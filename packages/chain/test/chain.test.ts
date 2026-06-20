@@ -3,7 +3,7 @@
 // §6 address export shape, decimals===6 read FROM CHAIN, and a bigint balance
 // read for a wallet. Requires `.env.local` (gitignored) with ARC_RPC_URL +
 // TEST_WALLET_ADDRESS.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { config as loadEnv } from "dotenv";
 import { isAddress, type Address } from "viem";
 import {
@@ -24,6 +24,18 @@ const wallet = process.env.TEST_WALLET_ADDRESS as Address;
 const client = createArcPublicClient(process.env.ARC_RPC_URL);
 
 describe("Arc Testnet chain foundation", () => {
+  beforeAll(() => {
+    // Fail fast with an operator-friendly message instead of letting an unset
+    // TEST_WALLET_ADDRESS surface as a confusing "invalid owner address:
+    // undefined" deep inside readUsdcBalance. ARC_RPC_URL is optional: the
+    // client falls back to the chain default RPC when it is absent.
+    if (!process.env.TEST_WALLET_ADDRESS) {
+      throw new Error(
+        "set TEST_WALLET_ADDRESS in .env.local (a funded Arc Testnet wallet)",
+      );
+    }
+  });
+
   it("connects to Arc Testnet (chainId 5042002)", async () => {
     // CHAIN-02 + threat T-00-03: a wrong-network / hijacked RPC is caught here
     // before any balance is trusted.
