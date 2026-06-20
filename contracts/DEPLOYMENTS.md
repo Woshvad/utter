@@ -59,3 +59,20 @@ creator = deployer, treasury = `0x...dEaD`, creatorBps 7000, active.
 | approve USDC | `0x0424a754db2e1fbe0ddad24a4f127fa2667125153d6bd78747ca7f86453471eb` |
 | deposit 0.01 USDC | `0x0d637ccf90630bc4efce090df018bceba78e9d6c78714e04873caad4fc39c53c` |
 | settle / debit (402 -> 200, 70/30 split) | `0x1c7606c543d7735420c746725d2685d9d88ba377cc7f11eb8f10207c38422dbf` |
+
+### Phase 2 exact / EIP-3009 flat-path verification (PAY-08) - 2026-06-20
+
+The FLAT `exact` settlement scheme was proven on-chain by
+`packages/x402-arc/examples/echo/live-exact-path.ts`: the buyer signs an EIP-3009
+`TransferWithAuthorization` (Arc USDC domain `USDC`/`2`) to the deployed
+`PaymentSplitter`; the relayer submits it (USDC `transferWithAuthorization` moves the
+signed `value` 5000 = 0.005 USDC to the splitter - no gate, no metering), then
+`distribute()` flushes the configured split. The `Distributed` event confirmed
+`toCreator 3500 (70%) / toTreasury 1500 (30%)` (sum 5000), and the splitter balance
+returned to 0. Buyer = relayer = the deployer EOA; the splitter's creator = treasury =
+deployer (sample config, unchanged), so the 0.005 USDC round-trips back (net cost ~gas).
+
+| Action | Tx |
+|--------|----|
+| transferWithAuthorization (0.005 USDC -> splitter) | `0x192d5ec9462b7b73e550d6ba76e5c617df5da414b9a7b2a8823d52e7cb892cd7` |
+| distribute (70/30 flat split) | `0x55188926dd9de94e4c5cbfbb25a785bc5030f1486cb677a9c34cb9c5a83bd8c4` |
