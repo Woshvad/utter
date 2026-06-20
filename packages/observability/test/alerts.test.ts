@@ -109,7 +109,7 @@ describe("InMemoryAlertSink", () => {
     );
     for (const a of alerts) sink.emit(a);
     expect(sink.alerts).toHaveLength(1);
-    expect(sink.alerts[0].kind).toBe("low_relayer_usdc");
+    expect(sink.alerts[0]!.kind).toBe("low_relayer_usdc");
   });
 });
 

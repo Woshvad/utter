@@ -18,7 +18,7 @@ describe("StructuredLogger keying", () => {
     logger.log({ resourceId: "res-1", idemKey: "idem-1", event: "settle" });
 
     expect(sink.lines).toHaveLength(1);
-    const record = JSON.parse(sink.lines[0]);
+    const record = JSON.parse(sink.lines[0]!);
     expect(record.resourceId).toBe("res-1");
     expect(record.idemKey).toBe("idem-1");
     expect(record.event).toBe("settle");
@@ -56,9 +56,9 @@ describe("redaction allowlist (T-06-LOGLEAK)", () => {
       signature: "0xdeadbeefsig",
       privateKey: "0xprivkey",
       bearerToken: "Bearer xyz",
-    } as Record<string, unknown>);
+    });
 
-    const line = sink.lines[0];
+    const line = sink.lines[0]!;
     // the raw secret value must NEVER reach the output line
     expect(line).not.toContain(SECRET);
     expect(line).not.toContain("ak_live_leakme");
@@ -77,9 +77,9 @@ describe("redaction allowlist (T-06-LOGLEAK)", () => {
       amountBaseUnits: "2500000",
       latencyMs: 120,
       ok: true,
-    } as Record<string, unknown>);
+    });
 
-    const record = JSON.parse(sink.lines[0]);
+    const record = JSON.parse(sink.lines[0]!);
     expect(record.amountBaseUnits).toBe("2500000");
     expect(record.latencyMs).toBe(120);
     expect(record.ok).toBe(true);
@@ -93,9 +93,9 @@ describe("redaction allowlist (T-06-LOGLEAK)", () => {
       idemKey: "k",
       event: "verify",
       signature: SECRET,
-    } as Record<string, unknown>);
+    });
 
-    const record = JSON.parse(sink.lines[0]);
+    const record = JSON.parse(sink.lines[0]!);
     // the value is replaced with the redaction marker, not the secret
     expect(record.signature).toBe(REDACTED);
     expect(record.signature).not.toBe(SECRET);
