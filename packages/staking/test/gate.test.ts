@@ -7,7 +7,7 @@ import { describe, it, expect, vi } from "vitest";
 import { STAKING_VAULT, stakingVaultAbi } from "@utter/chain";
 import { createBondGate, PublishRejected, MIN_BOND_BASE_UNITS } from "../src/gate";
 
-const RESOURCE = "0x" + "ab".repeat(32);
+const RESOURCE = `0x${"ab".repeat(32)}` as `0x${string}`;
 
 /**
  * A mock publicClient whose readContract returns a fixed bond for bonds(resourceId).
