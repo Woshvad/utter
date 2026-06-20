@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/server.ts"
+    ".": "./src/server.ts",
+    "./app": "./src/app.ts",
+    "./verify": "./src/verify.ts",
+    "./settle": "./src/settle.ts",
+    "./relayer": "./src/relayer.ts"
   },
   "scripts": {
     "start": "node --experimental-strip-types src/server.ts"

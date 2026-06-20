@@ -44,6 +44,10 @@ importers:
       viem:
         specifier: 2.52.2
         version: 2.52.2(typescript@6.0.3)
+    devDependencies:
+      '@utter/facilitator':
+        specifier: workspace:*
+        version: link:../../services/facilitator
 
   services/facilitator:
     dependencies:

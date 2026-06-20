@@ -13,5 +13,8 @@
     "ajv-formats": "3.0.1",
     "hono": "4.12.26",
     "viem": "2.52.2"
+  },
+  "devDependencies": {
+    "@utter/facilitator": "workspace:*"
   }
 }

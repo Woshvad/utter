@@ -65,5 +65,19 @@ export {
   type SignedExactTransfer,
 } from "./client";
 
-// Later wave extends this barrel:
-//   export { requirePayment } from "./gate";        // PAY-04/05 escrow gate
+// The escrow response gate (PAY-04/05/06): reserve -> run -> classify -> settle
+// (success) / release (declared-error) / release+strike (malfunction/timeout).
+export {
+  requirePayment,
+  type RequirePaymentOpts,
+  type ErrorPolicy,
+} from "./gate";
+
+// Buyer-side idempotent retrieval (PAY-11 client edge): GET /results/:idemKey by
+// the payment nonce, never re-signing.
+export {
+  retrieveByIdemKey,
+  idemKeyForNonce,
+  type FetchLike,
+  type RetrievedResult,
+} from "./idempotency";
