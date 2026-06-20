@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@utter/ai-scorer": "workspace:*",
     "@utter/chain": "workspace:*",
     "viem": "2.52.2"
   }

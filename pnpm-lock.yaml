@@ -117,6 +117,9 @@ importers:
 
   packages/staking:
     dependencies:
+      '@utter/ai-scorer':
+        specifier: workspace:*
+        version: link:../ai-scorer
       '@utter/chain':
         specifier: workspace:*
         version: link:../chain
