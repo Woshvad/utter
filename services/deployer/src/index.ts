@@ -70,6 +70,15 @@ export {
   type InMemoryBillingLog,
 } from "./cache";
 
+// Redeploy semantics (DEP-04): preserve agentId + slug/URL, bump deployVersion
+// (price changes apply only to new calls), and invalidate the cache atomically by
+// version-namespace bump (+ eager DEL of the old namespace).
+export {
+  redeploy,
+  type RedeployOpts,
+  type RedeployConfig,
+} from "./redeploy";
+
 // Hardened build (SBX-05): dockerode build from a pinned-by-digest base image +
 // lockfile; registry swap via REGISTRY_MIRROR_URL; no-network-at-build is
 // operator-gated (NOT claimed locally).

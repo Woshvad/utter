@@ -32,6 +32,12 @@ export interface DeploymentRecord {
   status: DeploymentStatus;
   /** Epoch ms of the most recent (re)deploy. */
   updatedAt: number;
+  /**
+   * The signed spend cap for THIS version (USDC base units). Optional: pricing-bearing
+   * fields are version-scoped so a redeploy (DEP-04) applies a price change ONLY to
+   * new calls (the new version's quote), never retro-repricing old/cached results.
+   */
+  cap?: bigint;
 }
 
 /**
@@ -58,6 +64,13 @@ export interface ResponseCache {
   get(key: string): Promise<string | null>;
   /** Store a body under key with a TTL in seconds. */
   set(key: string, body: string, ttlSeconds: number): Promise<void>;
+  /**
+   * Delete every key under a resource:version prefix (eager invalidation on redeploy,
+   * DEP-04). The deployVersion bump ALONE makes old keys unreachable; this is the
+   * optional eager cleanup so stale bytes do not linger to TTL-expiry. In prod the
+   * ioredis adapter implements this via a SCAN+DEL over `resource:<id>:v<old>:*`.
+   */
+  delByPrefix(prefix: string): Promise<void>;
 }
 
 /**
@@ -98,6 +111,12 @@ export class InMemoryResponseCache implements ResponseCache {
 
   async set(key: string, body: string, ttlSeconds: number): Promise<void> {
     this.entries.set(key, { body, expiresAt: Date.now() + ttlSeconds * 1000 });
+  }
+
+  async delByPrefix(prefix: string): Promise<void> {
+    for (const key of this.entries.keys()) {
+      if (key.startsWith(prefix)) this.entries.delete(key);
+    }
   }
 }
 
