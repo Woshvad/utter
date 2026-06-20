@@ -38,9 +38,19 @@ export {
   type DnsLookupAll,
 } from "./allowlist";
 
-// The Hono proxy: verify token -> allowlist -> inject real key server-side -> forward.
+// The Hono proxy: verify token -> allowlist -> quota -> inject real key server-side -> forward.
 export {
   createDataProxy,
   type DataProxyOpts,
   type FetchLike,
 } from "./proxy";
+
+// PRX-03 per-resource quota counter seam (call/byte accounting; never money). The
+// /proxy quota gate increments this after verify+allowlist and 429s fail-closed over
+// the budget. The InMemory adapter is the test default; a Redis adapter drops in
+// behind the same QuotaStore contract.
+export {
+  InMemoryQuotaStore,
+  type QuotaStore,
+  type QuotaBudget,
+} from "./quota";

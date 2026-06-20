@@ -42,6 +42,7 @@ import {
   type CredentialResolver,
 } from "./credentials";
 import { verifyResourceToken } from "./token";
+import type { QuotaStore, QuotaBudget } from "./quota";
 
 /** A `fetch`-like seam so tests inject an upstream spy (mirrors the gate's fetcher). */
 export type FetchLike = typeof fetch;
@@ -88,6 +89,18 @@ export interface DataProxyOpts {
   maxResponseBytes?: number;
   /** Egress timeout in seconds (default RESOURCE_TIMEOUT_SECONDS env or 30s). */
   egressTimeoutSeconds?: number;
+  /**
+   * PRX-03 quota counter (per-resource call/byte accounting). When BOTH this and
+   * {@link DataProxyOpts.quotaBudget} are provided, the /proxy path increments the
+   * resource's counter AFTER token-verify + allowlist and BEFORE inject+forward, and
+   * returns 429 fail-closed once usage exceeds the budget. Omit both to leave the
+   * egress path unbounded (the Phase 3 behavior, unchanged). The counter is plain
+   * call/byte accounting - never a USDC amount, no decimals literal - and the markup
+   * is attributable to the platform cut, not a double-charge of the buyer.
+   */
+  quotaStore?: QuotaStore;
+  /** PRX-03 per-resource ceiling. Required alongside {@link DataProxyOpts.quotaStore}. */
+  quotaBudget?: QuotaBudget;
 }
 
 /**
@@ -109,6 +122,8 @@ export function createDataProxy(opts: DataProxyOpts) {
   const egressTimeoutSeconds =
     opts.egressTimeoutSeconds ??
     envInt("RESOURCE_TIMEOUT_SECONDS", DEFAULT_EGRESS_TIMEOUT_SECONDS);
+  const quotaStore = opts.quotaStore;
+  const quotaBudget = opts.quotaBudget;
 
   const app = new Hono();
 
@@ -137,6 +152,30 @@ export function createDataProxy(opts: DataProxyOpts) {
     const hostCheck = normalizeAndCheckHost(target, allowlist);
     if (!hostCheck.ok) {
       return c.json({ error: "upstream_not_allowlisted" }, 403);
+    }
+
+    // (3.5) PRX-03 QUOTA GATE. ONLY after the token-verify (step 2) and the allowlist
+    // (step 3), and BEFORE the credential resolution + inject + forward (steps 4-5).
+    // A blocked (401/403) request never reaches here, so it never consumes quota. The
+    // counter is per-resource call/byte accounting (never money); over the budget we
+    // return 429 FAIL-CLOSED so the over-quota call never forwards upstream. The
+    // egress/SSRF/key-injection logic below is untouched - this is an additive gate.
+    if (quotaStore && quotaBudget) {
+      // Count the inbound body bytes for the byte budget. Read once here; the body is
+      // re-read below for forwarding (Hono buffers the request body, so a second read
+      // is safe). 0 for a bodyless method.
+      const method = c.req.method;
+      const hasInboundBody = method !== "GET" && method !== "HEAD";
+      const inboundBytes = hasInboundBody
+        ? (await c.req.arrayBuffer()).byteLength
+        : 0;
+      const usage = await quotaStore.increment(resourceId, {
+        calls: 1,
+        bytes: inboundBytes,
+      });
+      if (usage.calls > quotaBudget.calls || usage.bytes > quotaBudget.bytes) {
+        return c.json({ error: "quota_exceeded" }, 429);
+      }
     }
 
     // (4) Resolve the REAL upstream credential SERVER-SIDE. A resource with no
