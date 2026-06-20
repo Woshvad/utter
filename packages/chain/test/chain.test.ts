@@ -65,10 +65,17 @@ describe("Arc Testnet chain foundation", () => {
 
   it("reads a wallet's USDC balance (bigint; >0n once funded)", async () => {
     const { raw, formatted } = await readUsdcBalance(client, wallet);
-    // HARD gate: wiring proven (read returns a bigint) even if unfunded.
-    expect(typeof raw).toBe("bigint");
-    // Funded-wallet check (RESEARCH Pitfall 5; faucet https://faucet.circle.com).
-    expect(raw).toBeGreaterThan(0n);
+    // HARD gate: wiring proven (read returns a bigint) even if unfunded. If this
+    // fails the chain wiring is broken, not the wallet balance.
+    expect(typeof raw, "wiring broken: balanceOf did not return a bigint").toBe(
+      "bigint",
+    );
+    // Funded-wallet check (RESEARCH Pitfall 5). A failure here means the wiring
+    // is fine but the wallet has no USDC: fund it at https://faucet.circle.com.
+    expect(
+      raw,
+      "wallet unfunded: fund TEST_WALLET_ADDRESS at https://faucet.circle.com",
+    ).toBeGreaterThan(0n);
     // Never log a private key - only the formatted balance.
     console.log(`USDC balance: ${formatted}`);
   });
