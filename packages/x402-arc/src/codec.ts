@@ -8,6 +8,12 @@
 // (the X-PAYMENT payload is untrusted input crossing into the gate).
 import { isAddress, type Hex } from "viem";
 
+/** Arc Testnet CAIP-2 network id (chainId 5042002) - the only network we accept. */
+const ARC_CAIP2_NETWORK = "eip155:5042002";
+
+/** The payment schemes the codec accepts (escrow primary; exact flat fallback). */
+const ACCEPTED_SCHEMES = new Set(["utter-escrow", "exact"]);
+
 /** The buyer's signed DebitAuthorization message, as carried on the wire. */
 export interface DebitAuthorizationMessage {
   /** The buyer (EIP-712 signer). */
@@ -74,7 +80,13 @@ export function decodePayment(header: string): PaymentPayload {
   }
 
   // Reject anything that is not strict base64 BEFORE decoding (Buffer is lenient).
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(header)) {
+  // Enforce: only base64 alphabet + at most 2 trailing `=`, length a multiple of 4,
+  // and at least one non-pad char (a string like "==" or "====" is not valid base64).
+  if (
+    header.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(header) ||
+    /^=+$/.test(header)
+  ) {
     throw new Error("decodePayment: header is not valid base64");
   }
 
@@ -99,8 +111,18 @@ export function decodePayment(header: string): PaymentPayload {
   if (typeof p.scheme !== "string") {
     throw new Error("decodePayment: missing/invalid scheme");
   }
+  // Defense in depth: reject a foreign scheme rather than relying solely on the
+  // EIP-712 domain separator to fail signature recovery downstream.
+  if (!ACCEPTED_SCHEMES.has(p.scheme)) {
+    throw new Error("decodePayment: unsupported scheme");
+  }
   if (typeof p.network !== "string") {
     throw new Error("decodePayment: missing/invalid network");
+  }
+  // The payload must claim the Arc CAIP-2 network; a cross-chain replay is rejected
+  // here, not just by the domain separator (defense in depth, clear reason).
+  if (p.network !== ARC_CAIP2_NETWORK) {
+    throw new Error("decodePayment: unsupported network");
   }
   if (typeof p.signature !== "string" || !/^0x[0-9a-fA-F]+$/.test(p.signature)) {
     throw new Error("decodePayment: missing/invalid signature");

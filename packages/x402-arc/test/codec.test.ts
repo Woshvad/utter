@@ -72,4 +72,26 @@ describe("codec decodePayment input validation (ASVS V5)", () => {
     });
     expect(() => decodePayment(bad)).toThrow();
   });
+
+  // WR-01: the base64 validator must enforce length % 4 === 0 and reject pad-only.
+  it("rejects base64 of a non-multiple-of-4 length", () => {
+    expect(() => decodePayment("abcde")).toThrow(/base64/);
+  });
+
+  it("rejects a padding-only string", () => {
+    expect(() => decodePayment("====")).toThrow(/base64/);
+    expect(() => decodePayment("==")).toThrow(/base64/);
+  });
+
+  // WR-03: a foreign network must be rejected (defense in depth, not just the domain).
+  it("rejects a foreign network (cross-chain replay defense)", () => {
+    const bad = encodePayment({ ...payload, network: "eip155:1" });
+    expect(() => decodePayment(bad)).toThrow(/network/);
+  });
+
+  // WR-03: an unsupported scheme must be rejected.
+  it("rejects an unsupported scheme", () => {
+    const bad = encodePayment({ ...payload, scheme: "permit2" });
+    expect(() => decodePayment(bad)).toThrow(/scheme/);
+  });
 });
