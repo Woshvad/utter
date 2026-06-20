@@ -58,6 +58,24 @@ describe("cache key", () => {
     const b = cacheKey(RESOURCE, 1, req({ body: '{"text":"world"}' }));
     expect(a).not.toBe(b);
   });
+
+  it("does NOT collide a JSON object body with a JSON-string body of the same text (WR-03)", () => {
+    // Old canon recursively JSON.parse'd string LEAVES, so a string value that was
+    // itself valid JSON collapsed to the same key as the structurally-different
+    // object — serving caller B the body computed for caller A. These two bodies
+    // are distinct logical requests and MUST get distinct keys.
+    const objBody = cacheKey(RESOURCE, 1, req({ body: '{"a":1}' }));
+    const stringBody = cacheKey(RESOURCE, 1, req({ body: JSON.stringify('{"a":1}') }));
+    expect(objBody).not.toBe(stringBody);
+  });
+
+  it("does NOT collide two distinct string-leaf bodies that the old canon would re-parse equal", () => {
+    // {"x":"{\"k\":1}"} and {"x":{"k":1}} differ: one has a STRING leaf, the other a
+    // nested object. The old recursive re-parse collapsed them; they must differ now.
+    const stringLeaf = cacheKey(RESOURCE, 1, req({ body: '{"x":"{\\"k\\":1}"}' }));
+    const objectLeaf = cacheKey(RESOURCE, 1, req({ body: '{"x":{"k":1}}' }));
+    expect(stringLeaf).not.toBe(objectLeaf);
+  });
 });
 
 describe("cache getOrInvoke", () => {

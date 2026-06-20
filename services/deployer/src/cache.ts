@@ -8,10 +8,13 @@
 // handler. This is the load-bearing guard against the free-call bypass (T-03-20).
 //
 // Key shape (RESEARCH Pattern 4 / Code Ex §5):
-//   resource:<resourceId>:v<deployVersion>:sha256(method\npath\ncanon(query)\ncanon(body))
-// `canon` sorts object keys + normalizes whitespace so semantically-identical
-// requests collapse to one key. The `v<deployVersion>` namespace means a redeploy
-// bump (DEP-04) makes ALL old-version keys unreachable -> atomic cache invalidation.
+//   resource:<resourceId>:v<deployVersion>:sha256(method\npath\ncanonQuery(query)\ncanonBody(body))
+// canonQuery/canonBody sort object keys + normalize whitespace so
+// semantically-identical requests collapse to one key, but string LEAVES are kept
+// opaque (parsed at most ONCE, never recursively re-parsed) so two distinct bodies
+// can never collide on one key (WR-03). The `v<deployVersion>` namespace means a
+// redeploy bump (DEP-04) makes ALL old-version keys unreachable -> atomic cache
+// invalidation.
 //
 // Backend: the in-memory `ResponseCache` is the TEST DEFAULT (Phase 2 adapter
 // pattern). The prod path is `ioredis` implementing the SAME `ResponseCache`
@@ -47,29 +50,55 @@ export interface BillableCall {
 export type RecordBillableCall = (call: BillableCall) => void | Promise<void>;
 
 /**
- * Canonicalize a value for the cache key: sort object keys recursively and
- * normalize whitespace, so `{a,b}` and `{b,a}` (and `{ "x" : 1 }` vs `{"x":1}`)
- * collapse to one key. A non-JSON string is whitespace-trimmed verbatim.
+ * Structurally canonicalize an ALREADY-PARSED value: sort object keys recursively
+ * so `{a,b}` and `{b,a}` collapse to one key, but treat string leaves as OPAQUE
+ * literals (JSON.stringify'd verbatim, NEVER re-parsed). The previous version
+ * recursively `JSON.parse`d every string leaf, so a string value that happened to
+ * be valid JSON for a DIFFERENT logical request could canon-equal a structurally
+ * different request and collide on one key — serving caller B the body computed
+ * for caller A within a resource (WR-03). Leaving string leaves opaque removes
+ * that collision while keeping key-order stability.
  */
-function canon(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    try {
-      return canon(JSON.parse(trimmed));
-    } catch {
-      return trimmed;
-    }
-  }
+function canonStructural(value: unknown): string {
+  if (value === null || value === undefined) return "null";
   if (Array.isArray(value)) {
-    return `[${value.map(canon).join(",")}]`;
+    return `[${value.map(canonStructural).join(",")}]`;
   }
   if (typeof value === "object") {
     const obj = value as Record<string, unknown>;
     const keys = Object.keys(obj).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canon(obj[k])}`).join(",")}}`;
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonStructural(obj[k])}`).join(",")}}`;
   }
+  // Primitives (string, number, boolean): exact JSON literal, no re-parse.
   return JSON.stringify(value);
+}
+
+/**
+ * Canonicalize the request BODY for the cache key. The body is parsed AT MOST ONCE
+ * (the documented JSON-body shape): a body that parses as JSON is canonicalized
+ * structurally (key-order + whitespace stable), and one that does not parse is the
+ * exact verbatim string. Crucially, string LEAVES inside a parsed body are NOT
+ * re-parsed (see {@link canonStructural}), so two distinct bodies cannot collapse
+ * into one key (WR-03).
+ */
+function canonBody(value: string | undefined): string {
+  if (value === undefined || value === null) return "";
+  // A body that is itself valid JSON: normalize whitespace + key order ONCE.
+  try {
+    return canonStructural(JSON.parse(value));
+  } catch {
+    // Not JSON: the exact bytes are the key material (no re-interpretation).
+    return value;
+  }
+}
+
+/**
+ * Canonicalize the query map for the cache key: sort keys, keep each value as the
+ * exact string it is (query values are strings; never re-parsed as JSON).
+ */
+function canonQuery(query: Record<string, string>): string {
+  const keys = Object.keys(query).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${JSON.stringify(query[k])}`).join(",")}}`;
 }
 
 /**
@@ -86,8 +115,8 @@ export function cacheKey(
   const material = [
     req.method.toUpperCase(),
     req.path,
-    canon(req.query ?? {}),
-    canon(req.body ?? ""),
+    canonQuery(req.query ?? {}),
+    canonBody(req.body),
   ].join("\n");
   const hash = createHash("sha256").update(material).digest("hex");
   return `resource:${resourceId}:v${deployVersion}:${hash}`;
