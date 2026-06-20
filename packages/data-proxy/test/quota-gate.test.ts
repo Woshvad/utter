@@ -1,0 +1,143 @@
+// Quota gate wiring tests (PRX-03). The /proxy path enforces a per-resource quota
+// counter AFTER token-verify + allowlist and BEFORE inject+forward. Over the budget
+// it returns 429 fail-CLOSED (no upstream forward). Under the budget the existing
+// egress path is untouched (the forward still happens with the real key injected).
+// The counter is plain call/byte accounting - never a USDC amount, no decimals
+// literal - and the markup is attributable to the platform cut, not a double-charge.
+import { describe, it, expect, vi } from "vitest";
+import {
+  createDataProxy,
+  mintResourceToken,
+  InMemoryQuotaStore,
+  type DnsLookupAll,
+  type QuotaBudget,
+} from "../src/index";
+
+const SECRET = "test-proxy-secret-never-leaves-the-proxy";
+const RESOURCE_A = "resource-aaaa-1111"; // -> api.openai.com / sk-real-...AAAA
+const REAL_KEY_A = "sk-real-upstream-key-AAAA-server-side-only";
+
+function publicDnsStub(): DnsLookupAll {
+  return vi.fn(async (_host: string) => [{ address: "93.184.216.34", family: 4 }]);
+}
+
+/** Build a quota-wired proxy with an injected upstream-fetch spy that echoes a 200. */
+function makeProxy(over: { quotaBudget?: QuotaBudget } = {}) {
+  const upstreamFetch = vi.fn(async (_url: string, _init?: RequestInit) => {
+    return new Response(JSON.stringify({ ok: true, upstream: "hit" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  const quotaStore = new InMemoryQuotaStore();
+  const app = createDataProxy({
+    tokenSecret: SECRET,
+    allowlist: ["api.openai.com"],
+    upstreamFetch: upstreamFetch as unknown as typeof fetch,
+    dnsLookup: publicDnsStub(),
+    quotaStore,
+    quotaBudget: over.quotaBudget ?? { calls: 2, bytes: 1_000_000 },
+  });
+  return { app, upstreamFetch, quotaStore };
+}
+
+function containerRequest(target: string): Request {
+  const token = mintResourceToken(RESOURCE_A, 120, SECRET);
+  return new Request("http://data-proxy.internal/proxy", {
+    method: "POST",
+    headers: {
+      "x-upstream-url": target,
+      "x-resource-token": token,
+      "x-resource-id": RESOURCE_A,
+    },
+    body: JSON.stringify({ prompt: "hello" }),
+  });
+}
+
+const TARGET = "https://api.openai.com/v1/chat/completions";
+
+describe("data-proxy quota gate (PRX-03)", () => {
+  it("forwards while under the call budget", async () => {
+    const { app, upstreamFetch } = makeProxy({ quotaBudget: { calls: 2, bytes: 1_000_000 } });
+    const res = await app.request(containerRequest(TARGET));
+    expect(res.status).toBe(200);
+    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 429 fail-closed once the call budget is exceeded (no forward)", async () => {
+    const { app, upstreamFetch } = makeProxy({ quotaBudget: { calls: 1, bytes: 1_000_000 } });
+    const ok = await app.request(containerRequest(TARGET));
+    expect(ok.status).toBe(200);
+    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+
+    const blocked = await app.request(containerRequest(TARGET));
+    expect(blocked.status).toBe(429);
+    const body = (await blocked.json()) as { error?: string };
+    expect(body.error).toBe("quota_exceeded");
+    // FAIL-CLOSED: the over-quota call never reached the upstream.
+    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 429 fail-closed once the byte budget is exceeded", async () => {
+    const { app, upstreamFetch } = makeProxy({ quotaBudget: { calls: 1000, bytes: 1 } });
+    const blocked = await app.request(containerRequest(TARGET));
+    expect(blocked.status).toBe(429);
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps independent budgets per resource (counter is per-resource)", async () => {
+    const { app, quotaStore } = makeProxy({ quotaBudget: { calls: 1, bytes: 1_000_000 } });
+    await app.request(containerRequest(TARGET));
+    const totals = await quotaStore.increment(RESOURCE_A, { calls: 0, bytes: 0 });
+    expect(totals.calls).toBe(1);
+  });
+
+  it("still injects the real key on the forwarded (under-budget) leg - egress untouched", async () => {
+    const { app, upstreamFetch } = makeProxy({ quotaBudget: { calls: 5, bytes: 1_000_000 } });
+    await app.request(containerRequest(TARGET));
+    const [, calledInit] = upstreamFetch.mock.calls[0]!;
+    const outHeaders = new Headers((calledInit as RequestInit | undefined)?.headers);
+    expect(outHeaders.get("authorization")).toBe(`Bearer ${REAL_KEY_A}`);
+  });
+
+  it("rejects an unauthlisted host with 403 BEFORE counting quota (order preserved)", async () => {
+    const { app, quotaStore } = makeProxy({ quotaBudget: { calls: 1, bytes: 1_000_000 } });
+    const res = await app.request(containerRequest("https://evil.example.com/v1"));
+    expect(res.status).toBe(403);
+    // The blocked request must not consume the resource's quota (counted only after allowlist).
+    const totals = await quotaStore.increment(RESOURCE_A, { calls: 0, bytes: 0 });
+    expect(totals.calls).toBe(0);
+  });
+
+  it("rejects an invalid token with 401 BEFORE counting quota", async () => {
+    const { app, quotaStore } = makeProxy({ quotaBudget: { calls: 1, bytes: 1_000_000 } });
+    const bad = new Request("http://data-proxy.internal/proxy", {
+      method: "POST",
+      headers: {
+        "x-upstream-url": TARGET,
+        "x-resource-token": "not-a-valid-token",
+        "x-resource-id": RESOURCE_A,
+      },
+      body: "{}",
+    });
+    const res = await app.request(bad);
+    expect(res.status).toBe(401);
+    const totals = await quotaStore.increment(RESOURCE_A, { calls: 0, bytes: 0 });
+    expect(totals.calls).toBe(0);
+  });
+
+  it("is unbounded (no gate) when no quotaBudget is configured - egress unchanged", async () => {
+    const upstreamFetch = vi.fn(
+      async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const app = createDataProxy({
+      tokenSecret: SECRET,
+      allowlist: ["api.openai.com"],
+      upstreamFetch: upstreamFetch as unknown as typeof fetch,
+      dnsLookup: publicDnsStub(),
+      // no quotaStore / quotaBudget
+    });
+    for (let i = 0; i < 5; i++) await app.request(containerRequest(TARGET));
+    expect(upstreamFetch).toHaveBeenCalledTimes(5);
+  });
+});
