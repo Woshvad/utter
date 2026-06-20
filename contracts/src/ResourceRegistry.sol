@@ -75,6 +75,9 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
     error UnknownResource();
     /// @notice creatorBps exceeds the 10000 basis-point ceiling.
     error InvalidBps();
+    /// @notice creator or treasury was the zero address, which would route its
+    /// split share to balanceOf[address(0)] in the escrow and lock it forever.
+    error ZeroAddress();
 
     /// @param initialOwner The registry admin (OZ v5 Ownable takes the owner).
     constructor(address initialOwner) Ownable(initialOwner) {}
@@ -91,6 +94,7 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
         bytes32 pricingHash
     ) external onlyOwner {
         if (resources[resourceId].exists) revert AlreadyRegistered();
+        if (creator == address(0) || treasury == address(0)) revert ZeroAddress();
         if (creatorBps > BPS_DENOMINATOR) revert InvalidBps();
 
         resources[resourceId] = Resource({
@@ -119,6 +123,7 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
     ) external onlyOwner {
         Resource storage r = resources[resourceId];
         if (!r.exists) revert UnknownResource();
+        if (treasury == address(0)) revert ZeroAddress();
         if (creatorBps > BPS_DENOMINATOR) revert InvalidBps();
 
         r.treasury = treasury;
@@ -146,9 +151,15 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
         emit ResourceUnpaused(resourceId);
     }
 
-    /// @notice Authorize a slash against a resource bond. This is the on-chain
-    /// signal the StakingVault slash is driven by; the registry itself does not
-    /// custody or move funds.
+    /// @notice Authorize a slash against a resource bond.
+    /// @dev ADVISORY-ONLY. This emits an indexer signal that a slash is intended;
+    /// it does not custody or move funds and is NOT consumed or reconciled on
+    /// chain by StakingVault.slash. The off-chain scorer / admin drives the actual
+    /// spend by calling StakingVault.slash(resourceId, amount, reason) directly
+    /// with consistent values. The two contracts share no state; this event must
+    /// not be relied on as an on-chain spend authorization. Full on-chain coupling
+    /// is an accepted out-of-scope design item under the MVP single-key threat
+    /// model (D-04).
     function slashAuthorization(bytes32 resourceId, uint256 amount, string calldata reason) external onlyOwner {
         if (!resources[resourceId].exists) revert UnknownResource();
         emit ResourceSlashAuthorized(resourceId, amount, reason);

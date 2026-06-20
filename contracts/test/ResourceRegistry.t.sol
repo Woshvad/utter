@@ -82,6 +82,27 @@ contract ResourceRegistryTest is Test {
         assertTrue(registry.isActive(RESOURCE_ID), "unpaused resource active");
     }
 
+    /// @notice register reverts ZeroAddress when creator or treasury is the zero
+    /// address, so the escrow split share can never be credited to address(0).
+    function test_register_revertsOnZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(ResourceRegistry.ZeroAddress.selector);
+        registry.register(RESOURCE_ID, address(0), treasury, CREATOR_BPS, AGENT_ID, PRICING_HASH);
+
+        vm.prank(owner);
+        vm.expectRevert(ResourceRegistry.ZeroAddress.selector);
+        registry.register(RESOURCE_ID, creator, address(0), CREATOR_BPS, AGENT_ID, PRICING_HASH);
+    }
+
+    /// @notice update reverts ZeroAddress when treasury is the zero address.
+    function test_update_revertsOnZeroAddressTreasury() public {
+        _register();
+
+        vm.prank(owner);
+        vm.expectRevert(ResourceRegistry.ZeroAddress.selector);
+        registry.update(RESOURCE_ID, address(0), CREATOR_BPS, AGENT_ID, PRICING_HASH);
+    }
+
     /// @notice A non-owner caller to register / pause / slashAuthorization reverts
     /// with OZ v5 OwnableUnauthorizedAccount(caller).
     function test_registry_onlyAdminGuards() public {
