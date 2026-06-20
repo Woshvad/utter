@@ -93,3 +93,10 @@ export {
   type BundleRuntime,
   type NetworkIsolation,
 } from "./build";
+
+// Operator-gated live HTTPS deploy (DEP-01/02, PRX-02): deploy the echo bundle
+// behind the real Traefik wildcard-TLS edge and curl 402-unpaid->200-paid over
+// HTTPS + assert non-allowlisted unreachability. WRITTEN + type-checks, NEVER run
+// in the autonomous suite (needs the provisioned host + *.resources.<domain> cert);
+// recorded as a Deferred Item in STATE.md (Plan 06).
+export { liveDeployEcho, type LiveDeployResult } from "./live-deploy";

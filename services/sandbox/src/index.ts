@@ -82,8 +82,12 @@ export {
 } from "./prepublish/checks";
 export {
   DEFAULT_PROBE_TARGETS,
+  DEFAULT_PROBE_IMAGE,
   RequiresProvisionedHostError,
+  ContainmentFailureError,
   createOperatorGatedProbe,
+  createLiveHostProbe,
   type DynamicHostProbe,
   type ProbeTarget,
+  type LiveProbeOptions,
 } from "./prepublish/probe";
