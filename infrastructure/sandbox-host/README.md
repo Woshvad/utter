@@ -77,3 +77,27 @@ Provision Verdaccio as a pull-through npm mirror and point the build container's
 only registry at it (`REGISTRY_MIRROR_URL`), with `--network` restricted to the
 mirror. **Do NOT claim the no-network-at-build property until this mirror
 exists** — locally the build uses the public registry with the documented swap.
+
+## runsc-under-WSL2 spike result
+
+**Run on the builder's host (Windows 11 + WSL2 + Docker Desktop 29.5.2) on
+2026-06-20 (RESEARCH Pitfall 1 / Open Question 1):**
+
+- `runsc` is **NOT on PATH** and **NOT installed**.
+- Docker's registered runtimes are `runc`, `io.containerd.runc.v2`, and `nvidia`
+  — **no `runsc`** runtime is registered.
+- `docker run --rm --runtime=runsc hello-world` fails with
+  `Error response from daemon: unknown or invalid runtime name: runsc`.
+
+**Outcome: runsc is NOT runnable locally on this Docker Desktop host.** This is
+the EXPECTED result (the RESEARCH spike anticipated that Docker-Desktop-managed
+WSL2 does not ship runsc). It is **NOT a plan failure**.
+
+**Decision:** use the **`docker-dev` backend (runc) locally** for wiring +
+integration tests ONLY, and **gate gVisor fully on the provisioned host**. The
+security-boundary acceptance (malicious-probe-blocked DoD SBX-02/06, live HTTPS
+402->200 DEP-01/02, read-only/quota/timeout under runsc SBX-04) is
+**operator-gated regardless** of this spike — the `docker-dev` backend is NEVER a
+trusted boundary. If a local gVisor smoke is ever wanted as a DEV CONVENIENCE,
+register runsc inside a non-Docker-Desktop WSL2 distro per §1 above; it would
+still be a smoke test only, never the trusted boundary.

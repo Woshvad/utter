@@ -166,6 +166,9 @@ importers:
       '@types/dockerode':
         specifier: 4.0.1
         version: 4.0.1
+      hono:
+        specifier: 4.12.26
+        version: 4.12.26
 
 packages:
 
