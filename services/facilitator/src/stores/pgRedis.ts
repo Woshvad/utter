@@ -30,9 +30,11 @@ import {
 import type { FacilitatorStores } from "./memory";
 
 const RES_PREFIX = "resv:"; // reservation lock key prefix
-const RES_BUYER_PREFIX = "resvbuyer:"; // per-buyer live-reservation set
+const RES_BUYER_SET_PREFIX = "resvbuyerset:"; // per-buyer SET of live reservation idemKeys
+const RES_BUYER_CAP_PREFIX = "resvbuyercap:"; // per-(buyer,idemKey) cap value
 const SPENT_PREFIX = "spent:"; // spent-nonce membership key prefix
 const STRIKE_PREFIX = "strike:"; // per-resource strike counter key prefix
+const SETTLE_TX_PREFIX = "settletx:"; // nonce -> settle tx hash (WR-02 receipt rebuild)
 
 /** Postgres-backed PaymentStore with Redis reservation locks + spent-nonce cache. */
 export class PgRedisPaymentStore implements PaymentStore {
@@ -48,6 +50,7 @@ export class PgRedisPaymentStore implements PaymentStore {
       return false;
     }
     const ttlMs = Math.max(1, lock.expiresAt - Date.now());
+    const buyerKey = lock.buyer.toLowerCase();
     // Atomic reserve: SET NX only sets when the key is absent, so a concurrent or
     // replayed verify for the same nonce loses the race and returns false.
     const ok = await this.redis.set(
@@ -58,10 +61,13 @@ export class PgRedisPaymentStore implements PaymentStore {
       "NX",
     );
     if (ok !== "OK") return false;
-    // Track the live reservation under the buyer for outstandingReserved, with the
-    // same TTL so it self-expires (the member is the idemKey; the value is the cap).
+    // Track the live reservation under the buyer for outstandingReserved via a
+    // per-buyer SET of idemKeys (SADD/SREM/SMEMBERS - NO O(N) `keys` scan, WR-05).
+    // The per-(buyer,idemKey) cap value carries the same TTL so it self-expires; the
+    // SET member is pruned lazily in outstandingReserved when its cap key is gone.
+    await this.redis.sadd(`${RES_BUYER_SET_PREFIX}${buyerKey}`, lock.idemKey);
     await this.redis.set(
-      `${RES_BUYER_PREFIX}${lock.buyer.toLowerCase()}:${lock.idemKey}`,
+      `${RES_BUYER_CAP_PREFIX}${buyerKey}:${lock.idemKey}`,
       lock.cap.toString(),
       "PX",
       ttlMs,
@@ -76,20 +82,34 @@ export class PgRedisPaymentStore implements PaymentStore {
     return true;
   }
 
+  /** Drop the reservation lock + the per-buyer SET member + cap value atomically. */
+  private async dropReservation(idemKey: Hex, extra?: (multi: ReturnType<Redis["multi"]>) => void): Promise<void> {
+    // Read the lock to learn the buyer (so we target the per-buyer SET precisely
+    // without an O(N) keys scan). A missing lock is a no-op.
+    const raw = await this.redis.get(`${RES_PREFIX}${idemKey}`);
+    const buyer = raw ? (JSON.parse(raw) as { buyer: string }).buyer.toLowerCase() : null;
+    const multi = this.redis.multi();
+    multi.del(`${RES_PREFIX}${idemKey}`);
+    if (buyer) {
+      multi.srem(`${RES_BUYER_SET_PREFIX}${buyer}`, idemKey);
+      multi.del(`${RES_BUYER_CAP_PREFIX}${buyer}:${idemKey}`);
+    }
+    if (extra) extra(multi);
+    await multi.exec();
+  }
+
   async release(idemKey: Hex): Promise<void> {
-    await this.redis.del(`${RES_PREFIX}${idemKey}`);
-    // Drop any buyer-set members for this idemKey (scan by suffix).
-    const keys = await this.redis.keys(`${RES_BUYER_PREFIX}*:${idemKey}`);
-    if (keys.length > 0) await this.redis.del(...keys);
+    await this.dropReservation(idemKey);
     await this.pg.query(`UPDATE payments SET status = 'released' WHERE idem_key = $1`, [idemKey]);
   }
 
   async markNonceSpent(idemKey: Hex): Promise<void> {
-    // Permanent spent marker (no TTL) - a settled nonce can never be re-reserved.
-    await this.redis.set(`${SPENT_PREFIX}${idemKey}`, "1");
-    await this.redis.del(`${RES_PREFIX}${idemKey}`);
-    const keys = await this.redis.keys(`${RES_BUYER_PREFIX}*:${idemKey}`);
-    if (keys.length > 0) await this.redis.del(...keys);
+    // Atomic spent + lock-release in ONE MULTI so a crash cannot leave the spent
+    // marker set without the reservation cleared (or vice versa) (WR-05). The
+    // permanent spent marker (no TTL) means a settled nonce can never be re-reserved.
+    await this.dropReservation(idemKey, (multi) => {
+      multi.set(`${SPENT_PREFIX}${idemKey}`, "1");
+    });
     await this.pg.query(`UPDATE payments SET status = 'settled' WHERE idem_key = $1`, [idemKey]);
   }
 
@@ -98,14 +118,24 @@ export class PgRedisPaymentStore implements PaymentStore {
   }
 
   async outstandingReserved(buyer: Hex): Promise<bigint> {
-    // Sum the live (unexpired) reservation caps for this buyer. The Redis TTL prunes
-    // expired members for us, so a stale lock never inflates the outstanding sum.
-    const keys = await this.redis.keys(`${RES_BUYER_PREFIX}${buyer.toLowerCase()}:*`);
-    if (keys.length === 0) return 0n;
-    const values = await this.redis.mget(...keys);
+    // Sum the live (unexpired) reservation caps for this buyer via the per-buyer SET
+    // (SMEMBERS), NOT a global `keys` scan (WR-05). An idemKey whose cap key has
+    // TTL-expired is pruned from the SET lazily here so a stale member never inflates
+    // the outstanding sum.
+    const buyerKey = buyer.toLowerCase();
+    const idemKeys = await this.redis.smembers(`${RES_BUYER_SET_PREFIX}${buyerKey}`);
+    if (idemKeys.length === 0) return 0n;
+    const capKeys = idemKeys.map((k) => `${RES_BUYER_CAP_PREFIX}${buyerKey}:${k}`);
+    const values = await this.redis.mget(...capKeys);
     let sum = 0n;
-    for (const v of values) {
+    const expired: string[] = [];
+    for (let i = 0; i < values.length; i += 1) {
+      const v = values[i];
       if (v) sum += BigInt(v);
+      else expired.push(idemKeys[i] as string);
+    }
+    if (expired.length > 0) {
+      await this.redis.srem(`${RES_BUYER_SET_PREFIX}${buyerKey}`, ...expired);
     }
     return sum;
   }
@@ -117,6 +147,18 @@ export class PgRedisPaymentStore implements PaymentStore {
   async getStrikes(resourceId: Hex): Promise<number> {
     const v = await this.redis.get(`${STRIKE_PREFIX}${resourceId.toLowerCase()}`);
     return v ? Number(v) : 0;
+  }
+
+  async recordSettleTx(idemKey: Hex, txHash: Hex): Promise<void> {
+    // SET NX: the FIRST broadcast's tx hash wins; a retry never overwrites it (the
+    // nonce->txHash mapping the WR-02 receipt rebuild reads). Permanent (no TTL) -
+    // a settled nonce's tx hash must outlive the reservation for crash recovery.
+    await this.redis.set(`${SETTLE_TX_PREFIX}${idemKey}`, txHash, "NX");
+  }
+
+  async getSettleTx(idemKey: Hex): Promise<Hex | null> {
+    const v = await this.redis.get(`${SETTLE_TX_PREFIX}${idemKey}`);
+    return v ? (v as Hex) : null;
   }
 }
 

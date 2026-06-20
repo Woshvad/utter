@@ -75,6 +75,15 @@ export interface PaymentStore {
   recordStrike(resourceId: Hex, reason: string): Promise<void>;
   /** Current strike count for a resource. */
   getStrikes(resourceId: Hex): Promise<number>;
+  /**
+   * Persist the on-chain settle tx hash for a nonce, written just before the debit
+   * is broadcast. On a retry-after-crash (the on-chain nonce reports used) the
+   * receipt is rebuilt by reading THIS single tx receipt rather than scanning the
+   * entire contract event history (WR-02). Idempotent: a re-record is a no-op.
+   */
+  recordSettleTx(idemKey: Hex, txHash: Hex): Promise<void>;
+  /** The persisted settle tx hash for a nonce, or null if none was recorded. */
+  getSettleTx(idemKey: Hex): Promise<Hex | null>;
 }
 
 /** Persisted settle results, keyed on idemKey, expiring after a TTL. */
@@ -97,6 +106,7 @@ export class InMemoryPaymentStore implements PaymentStore {
   private readonly reservations = new Map<Hex, ReservationLock>();
   private readonly spentNonces = new Set<Hex>();
   private readonly strikes = new Map<Hex, number>();
+  private readonly settleTx = new Map<Hex, Hex>();
 
   /** Drop a reservation if it exists and is past its TTL. Returns true if live. */
   private isLive(idemKey: Hex): boolean {
@@ -148,6 +158,14 @@ export class InMemoryPaymentStore implements PaymentStore {
 
   async getStrikes(resourceId: Hex): Promise<number> {
     return this.strikes.get(resourceId) ?? 0;
+  }
+
+  async recordSettleTx(idemKey: Hex, txHash: Hex): Promise<void> {
+    if (!this.settleTx.has(idemKey)) this.settleTx.set(idemKey, txHash);
+  }
+
+  async getSettleTx(idemKey: Hex): Promise<Hex | null> {
+    return this.settleTx.get(idemKey) ?? null;
   }
 }
 

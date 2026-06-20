@@ -121,9 +121,34 @@ function mockRelayerPool(state: { calls: number; revertWith?: Error }): RelayerP
 function mockPublicClient(opts: {
   debited?: { buyer: Address; amount: bigint; nonce: Hex; tx: Hex };
 }): PublicClient {
+  function debitedLog() {
+    if (!opts.debited) return null;
+    const topics = encodeEventTopics({
+      abi: escrowAbi,
+      eventName: "Debited",
+      args: { resourceId: RESOURCE, buyer: opts.debited.buyer },
+    });
+    const data = encodeAbiParameters(
+      [
+        { name: "amount", type: "uint256" },
+        { name: "toCreator", type: "uint256" },
+        { name: "toTreasury", type: "uint256" },
+        { name: "nonce", type: "bytes32" },
+      ],
+      [opts.debited.amount, 0n, opts.debited.amount, opts.debited.nonce],
+    );
+    return { address: PAYMENT_ESCROW, data, topics, transactionHash: opts.debited.tx };
+  }
   return {
     async waitForTransactionReceipt() {
       return { status: "success" };
+    },
+    async getBlockNumber() {
+      return 10_000n;
+    },
+    async getTransactionReceipt() {
+      const log = debitedLog();
+      return { logs: log ? [log] : [] };
     },
     async getLogs() {
       if (!opts.debited) return [];
@@ -284,5 +309,70 @@ describe("idempotent", () => {
     expect(receipt.idemKey).toBe(nonce);
     // Persisted so a later retry by idemKey serves from cache.
     expect(await resultStore.get(nonce)).not.toBeNull();
+  });
+
+  // WR-02: when a settle tx hash was persisted, the NonceUsed rebuild reads THAT
+  // single tx receipt (getTransactionReceipt) and never falls back to a getLogs
+  // history scan. We seed the stored tx and assert getLogs is NOT called.
+  it("Test 5 (WR-02 bounded rebuild): rebuild uses the stored txHash, not a full getLogs scan", async () => {
+    const nonce: Hex = `0x${"a5".repeat(32)}`;
+    const cap = 10_000n;
+    const amount = 6_000n;
+    const tx: Hex = `0x${"de".repeat(32)}`;
+    const payment = await escrowPayment({ pk, buyer, cap, nonce });
+
+    // Pre-seed the nonce->txHash mapping as if the first (crashed) settle broadcast
+    // it before dying. The retry's writeContract reverts with NonceUsed.
+    await store.recordSettleTx(nonce, tx);
+
+    let getLogsCalls = 0;
+    let getTxReceiptCalls = 0;
+    const topics = encodeEventTopics({
+      abi: escrowAbi,
+      eventName: "Debited",
+      args: { resourceId: RESOURCE, buyer },
+    });
+    const data = encodeAbiParameters(
+      [
+        { name: "amount", type: "uint256" },
+        { name: "toCreator", type: "uint256" },
+        { name: "toTreasury", type: "uint256" },
+        { name: "nonce", type: "bytes32" },
+      ],
+      [amount, 0n, amount, nonce],
+    );
+    const trackingClient = {
+      async waitForTransactionReceipt() {
+        return { status: "success" };
+      },
+      async getBlockNumber() {
+        return 10_000n;
+      },
+      async getTransactionReceipt({ hash }: { hash: Hex }) {
+        getTxReceiptCalls += 1;
+        expect(hash).toBe(tx); // reads exactly the stored tx
+        return { logs: [{ address: PAYMENT_ESCROW, data, topics, transactionHash: tx }] };
+      },
+      async getLogs() {
+        getLogsCalls += 1;
+        return [];
+      },
+    } as unknown as PublicClient;
+
+    const state = { calls: 0, revertWith: new Error("execution reverted: NonceUsed()") };
+    const deps = makeDeps({
+      relayerPool: mockRelayerPool(state),
+      publicClient: trackingClient,
+      store,
+      resultStore,
+    });
+
+    const receipt = await settle(payment, amount, nonce, deps);
+
+    expect(receipt.tx).toBe(tx);
+    expect(receipt.amount).toBe("6000");
+    // The PRIMARY path read the single stored-tx receipt; NO history scan happened.
+    expect(getTxReceiptCalls).toBe(1);
+    expect(getLogsCalls).toBe(0);
   });
 });

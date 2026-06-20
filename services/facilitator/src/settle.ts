@@ -118,41 +118,83 @@ function isAlreadySettledError(err: unknown): boolean {
 }
 
 /**
- * Rebuild an escrow receipt from the on-chain `Debited` event for a nonce, used on
- * a NonceUsed retry-after-crash so we NEVER submit a second debit. Scans recent
- * logs for the `Debited(resourceId, buyer, amount, ..., nonce)` event matching the
- * idemKey and reconstructs the identical receipt (the tx hash comes from the log).
+ * How many recent blocks the fallback `getLogs` scan covers when no tx hash was
+ * persisted for a nonce (WR-02). A bounded window keeps the RPC call within
+ * provider block-range caps; the PRIMARY path is the stored nonce->txHash lookup.
+ */
+const RECEIPT_REBUILD_BLOCK_WINDOW = 5_000n;
+
+/**
+ * Decode a single `Debited` log into the receipt for `idemKey`, or null if the log
+ * is not the matching Debited event.
+ */
+function debitedLogToReceipt(
+  log: { data: Hex; topics: [Hex, ...Hex[]]; transactionHash: Hex },
+  idemKey: Hex,
+): Receipt | null {
+  const decoded = decodeEventLog({
+    abi: escrowAbi,
+    data: log.data,
+    topics: log.topics,
+  }) as { eventName: string; args: Record<string, unknown> };
+  if (decoded.eventName !== "Debited") return null;
+  if ((decoded.args.nonce as Hex)?.toLowerCase() !== idemKey.toLowerCase()) return null;
+  return {
+    tx: log.transactionHash as Hex,
+    payer: decoded.args.buyer as Address,
+    amount: (decoded.args.amount as bigint).toString(),
+    idemKey,
+    scheme: "utter-escrow",
+  };
+}
+
+/**
+ * Rebuild an escrow receipt for a nonce on a NonceUsed retry-after-crash so we
+ * NEVER submit a second debit (RESEARCH Pattern 3).
+ *
+ * PRIMARY path (WR-02): look up the nonce->txHash mapping persisted at settle time
+ * and read THAT single tx receipt's Debited log - O(1), no history scan, no
+ * provider block-range cap risk. FALLBACK: a bounded recent-block `getLogs` window
+ * (never `fromBlock:"earliest"`), used only when no tx hash was recorded (e.g. a
+ * crash between the broadcast and the recordSettleTx write on an older adapter).
  */
 async function rebuildEscrowReceiptFromEvent(
   idemKey: Hex,
   escrowAddress: Address,
   publicClient: PublicClient,
+  store: PaymentStore,
 ): Promise<Receipt> {
+  // (1) PRIMARY: the stored tx hash -> read that single receipt's logs.
+  const storedTx = await store.getSettleTx(idemKey);
+  if (storedTx) {
+    const txReceipt = await publicClient.getTransactionReceipt({ hash: storedTx });
+    for (const log of txReceipt.logs) {
+      if ((log.address as Address).toLowerCase() !== escrowAddress.toLowerCase()) continue;
+      const receipt = debitedLogToReceipt(
+        log as { data: Hex; topics: [Hex, ...Hex[]]; transactionHash: Hex },
+        idemKey,
+      );
+      if (receipt) return receipt;
+    }
+  }
+
+  // (2) FALLBACK: a BOUNDED recent-block scan (never earliest..latest).
   const debitedEvent = escrowAbi.find(
     (e) => e.type === "event" && e.name === "Debited",
   );
+  const latest = await publicClient.getBlockNumber();
+  const fromBlock =
+    latest > RECEIPT_REBUILD_BLOCK_WINDOW ? latest - RECEIPT_REBUILD_BLOCK_WINDOW : 0n;
   const logs = (await publicClient.getLogs({
     address: escrowAddress,
     event: debitedEvent as never,
-    fromBlock: "earliest",
+    fromBlock,
     toBlock: "latest",
   })) as Array<{ data: Hex; topics: [Hex, ...Hex[]]; transactionHash: Hex }>;
 
   for (const log of logs) {
-    const decoded = decodeEventLog({
-      abi: escrowAbi,
-      data: log.data,
-      topics: log.topics,
-    }) as { eventName: string; args: Record<string, unknown> };
-    if (decoded.eventName !== "Debited") continue;
-    if ((decoded.args.nonce as Hex)?.toLowerCase() !== idemKey.toLowerCase()) continue;
-    return {
-      tx: log.transactionHash as Hex,
-      payer: decoded.args.buyer as Address,
-      amount: (decoded.args.amount as bigint).toString(),
-      idemKey,
-      scheme: "utter-escrow",
-    };
+    const receipt = debitedLogToReceipt(log, idemKey);
+    if (receipt) return receipt;
   }
   throw new Error(
     `settle: nonce ${idemKey} reports used on-chain but no Debited event was found to rebuild the receipt`,
@@ -258,6 +300,10 @@ export async function settle(
         account: signer.account,
         chain: signer.wallet.chain,
       });
+      // WR-02: persist the nonce->txHash mapping the instant the tx is broadcast so a
+      // retry-after-crash rebuilds the receipt from THIS single tx, never a full
+      // history scan. Recorded before waitForTransactionReceipt (the crash window).
+      await deps.store.recordSettleTx(idemKey, tx);
       await deps.publicClient.waitForTransactionReceipt({ hash: tx });
       receipt = {
         tx,
@@ -274,6 +320,7 @@ export async function settle(
         idemKey,
         deps.escrowAddress,
         deps.publicClient,
+        deps.store,
       );
     }
   }
