@@ -18,14 +18,26 @@
 // The Dockerfile the model emits is DISCARDED and overwritten by the platform
 // generateDockerfile (digest-pinned, SBX-05) - the model only declares runtime +
 // deps, never the FROM line.
-import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { generateDockerfile, PINNED_BASE_IMAGES } from "@utter/deployer";
+import { DEFAULT_MAX_RESPONSE_BYTES } from "@utter/sandbox";
 import type { Generator } from "./generator.js";
-import { type Bundle, type ResourceSpec } from "./types.js";
+import { BUNDLE_KEYS, type Bundle, type ResourceSpec } from "./types.js";
+
+/**
+ * Read caps for the UNTRUSTED model temp tree (WR-03). The model is explicitly
+ * untrusted: a model that emits hundreds of files, a multi-GB file, or a deep tree
+ * would otherwise be read unbounded into memory before any gate runs. We bound the
+ * file count and reuse the sandbox's per-file size cap (DEFAULT_MAX_RESPONSE_BYTES,
+ * 1 MB) so an over-large or extra-file output is REJECTED, not blindly ingested.
+ * BUNDLE_KEYS is the exact-five contract; the Dockerfile is overwritten anyway.
+ */
+const MAX_BUNDLE_FILES = BUNDLE_KEYS.length;
+const MAX_BUNDLE_FILE_BYTES = DEFAULT_MAX_RESPONSE_BYTES;
 
 /** Config for the operator-gated claude backend. */
 export interface ClaudeGeneratorConfig {
@@ -62,22 +74,45 @@ function buildPrompt(spec: ResourceSpec): string {
   ].join("\n");
 }
 
+/** The exact-five contract keys, as a Set for membership checks. */
+const BUNDLE_KEY_SET = new Set<string>(BUNDLE_KEYS);
+
 /**
- * Normalize a temp-dir file tree into a Bundle with POSIX-style relative keys
- * (RESEARCH Pitfall 3: a Windows backslash key would fail the static gate "missing
- * file" check). Reads every regular file under `dir` recursively.
+ * Normalize the UNTRUSTED model temp-dir file tree into a Bundle with POSIX-style
+ * relative keys (RESEARCH Pitfall 3: a Windows backslash key would fail the static
+ * gate "missing file" check). Reads regular files under `dir` recursively, but
+ * BOUNDED (WR-03): at most MAX_BUNDLE_FILES files, each at most
+ * MAX_BUNDLE_FILE_BYTES, and only the BUNDLE_KEYS contract keys are ingested. An
+ * over-large or extra-file model output is REJECTED here (throws) BEFORE any gate
+ * runs, mirroring the scaffold path's exact-five enforcement. The Dockerfile key is
+ * accepted (it is overwritten by the platform output downstream) but still counts
+ * against the file/size caps.
  */
 function readBundleFromDir(dir: string): Bundle {
   const bundle: Bundle = {};
+  let count = 0;
   const walk = (current: string): void => {
     for (const entry of readdirSync(current)) {
       const abs = join(current, entry);
-      if (statSync(abs).isDirectory()) {
+      const st = statSync(abs);
+      if (st.isDirectory()) {
         walk(abs);
         continue;
       }
       // POSIX-normalize the key: relative to the root, forward slashes only.
       const key = relative(dir, abs).split(sep).join("/");
+      // Reject anything outside the exact-five contract before reading it.
+      if (!BUNDLE_KEY_SET.has(key)) {
+        throw new Error(`claude bundle: unexpected file "${key}" (not a BUNDLE_KEYS file)`);
+      }
+      if (++count > MAX_BUNDLE_FILES) {
+        throw new Error(`claude bundle: too many files (cap ${MAX_BUNDLE_FILES})`);
+      }
+      if (st.size > MAX_BUNDLE_FILE_BYTES) {
+        throw new Error(
+          `claude bundle: "${key}" is ${st.size} bytes, exceeds cap ${MAX_BUNDLE_FILE_BYTES}`,
+        );
+      }
       bundle[key] = readFileSync(abs, "utf8");
     }
   };
@@ -101,41 +136,55 @@ export class ClaudeGenerator implements Generator {
   }
 
   async generate(spec: ResourceSpec): Promise<Bundle> {
-    // Absolute temp cwd (ESM + Windows safe). The agent writes ONLY here.
+    // Absolute temp cwd (ESM + Windows safe). The agent writes ONLY here. Cleaned up
+    // in the finally below (IN-05) so repeated live generations do not leak temp
+    // dirs full of untrusted model-authored source.
     const tmpDir = mkdtempSync(join(tmpdir(), "utter-gen-"));
     const systemPrompt = readSkill("system-prompt.md");
 
-    // Drive the agent loop. Tools are constrained to file Write/Read; Bash and the
-    // web are disallowed; no local Claude settings are inherited; the cwd is the
-    // absolute temp dir. The model emits the five files into tmpDir.
-    for await (const _msg of query({
-      prompt: buildPrompt(spec),
-      options: {
-        model: this.config.model,
-        systemPrompt,
-        allowedTools: ["Write", "Read"],
-        disallowedTools: ["Bash", "WebFetch", "WebSearch"],
-        permissionMode: "acceptEdits",
-        cwd: tmpDir,
-        maxTurns: 8,
-        settingSources: [],
-      },
-    })) {
-      // Drain the async iterator for logging only - the model output is read back
-      // from the temp dir, never trusted from the message stream.
-      void _msg;
+    try {
+      // Drive the agent loop. Tools are constrained to file Write/Read; Bash and the
+      // web are disallowed; no local Claude settings are inherited; the cwd is the
+      // absolute temp dir. The model emits the five files into tmpDir.
+      //
+      // The SDK's `env` REPLACES the subprocess environment, so we spread
+      // process.env (for PATH/HOME/etc) and inject the configured ANTHROPIC_API_KEY
+      // (WR-02). This makes selectGenerator(env)'s key authoritative: the executor
+      // honors the selector's key instead of silently depending on the ambient
+      // process env, so the selector and executor agree on the key source.
+      for await (const _msg of query({
+        prompt: buildPrompt(spec),
+        options: {
+          model: this.config.model,
+          systemPrompt,
+          allowedTools: ["Write", "Read"],
+          disallowedTools: ["Bash", "WebFetch", "WebSearch"],
+          permissionMode: "acceptEdits",
+          cwd: tmpDir,
+          maxTurns: 8,
+          settingSources: [],
+          env: { ...process.env, ANTHROPIC_API_KEY: this.config.apiKey },
+        },
+      })) {
+        // Drain the iterator to run the agent loop to completion - the model output
+        // is read back from the temp dir, never trusted from the message stream.
+        void _msg;
+      }
+
+      const bundle = readBundleFromDir(tmpDir);
+
+      // OVERWRITE the Dockerfile with the platform-produced, digest-pinned output -
+      // exactly as the scaffold does. The model never authors the FROM line (SBX-05).
+      bundle["Dockerfile"] = generateDockerfile({
+        runtime: spec.runtime,
+        baseImage: PINNED_BASE_IMAGES[spec.runtime],
+        registryUrl: process.env.REGISTRY_MIRROR_URL ?? "",
+      });
+
+      return bundle;
+    } finally {
+      // Always remove the untrusted model temp tree, even on a gate/read throw.
+      rmSync(tmpDir, { recursive: true, force: true });
     }
-
-    const bundle = readBundleFromDir(tmpDir);
-
-    // OVERWRITE the Dockerfile with the platform-produced, digest-pinned output -
-    // exactly as the scaffold does. The model never authors the FROM line (SBX-05).
-    bundle["Dockerfile"] = generateDockerfile({
-      runtime: spec.runtime,
-      baseImage: PINNED_BASE_IMAGES[spec.runtime],
-      registryUrl: process.env.REGISTRY_MIRROR_URL ?? "",
-    });
-
-    return bundle;
   }
 }

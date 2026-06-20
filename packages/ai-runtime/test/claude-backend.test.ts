@@ -54,6 +54,26 @@ describe("claude-backend.ts source discipline (static assertions, no runtime cal
     expect(src).toContain("generateDockerfile");
     expect(src).toContain('bundle["Dockerfile"]');
   });
+
+  it("passes the configured apiKey + model through to the query() call (WR-02)", () => {
+    // The executor must honor the selector's key/model, not silently depend on the
+    // ambient process env. The model flows via options.model and the key via the
+    // SDK env override (which replaces the subprocess env).
+    expect(src).toContain("model: this.config.model");
+    expect(src).toContain("ANTHROPIC_API_KEY: this.config.apiKey");
+  });
+
+  it("bounds the untrusted model temp tree read (WR-03)", () => {
+    // readBundleFromDir must cap file count + size and reject non-BUNDLE_KEYS files.
+    expect(src).toContain("MAX_BUNDLE_FILES");
+    expect(src).toContain("MAX_BUNDLE_FILE_BYTES");
+    expect(src).toContain("BUNDLE_KEY_SET.has");
+  });
+
+  it("cleans up the temp dir in a finally (IN-05)", () => {
+    expect(src).toContain("finally");
+    expect(src).toContain("rmSync(tmpDir");
+  });
 });
 
 describe("generate() barrel (autonomous: scaffold-only, no key)", () => {
