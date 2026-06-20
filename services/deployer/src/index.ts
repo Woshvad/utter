@@ -27,3 +27,18 @@ export {
   permissiveClassifier,
   type InjectGateConfig,
 } from "./inject-x402";
+
+// Hardened build (SBX-05): dockerode build from a pinned-by-digest base image +
+// lockfile; registry swap via REGISTRY_MIRROR_URL; no-network-at-build is
+// operator-gated (NOT claimed locally).
+export {
+  buildResourceImage,
+  generateDockerfile,
+  assertPinnedByDigest,
+  PINNED_BASE_IMAGES,
+  type BuildResourceImageOpts,
+  type BuildResult,
+  type BuildSpec,
+  type BundleRuntime,
+  type NetworkIsolation,
+} from "./build";
