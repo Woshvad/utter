@@ -37,9 +37,11 @@ describe("UsdcAmount", () => {
   });
 
   it("contains zero money literal (no 1e6 / 10**6 / / 1000000 / bare 6|18) in the format math", () => {
-    // process.cwd() is the package root (apps/studio) under the package-local config
+    // Resolve relative to THIS test file so the path holds whether run under the
+    // package-local config (cwd = apps/studio) or the root projects runner (cwd =
+    // repo root). import.meta.dirname is the test file's directory.
     const src = readFileSync(
-      resolve(process.cwd(), "app/components/primitives/UsdcAmount.tsx"),
+      resolve(import.meta.dirname, "../../app/components/primitives/UsdcAmount.tsx"),
       "utf8",
     );
     // strip comments so doc-prose mentioning "6dp" does not trip the grep
