@@ -29,6 +29,7 @@
 // this module never encodes a decimals literal.
 import {
   decodeEventLog,
+  parseSignature,
   type Address,
   type Hex,
   type PublicClient,
@@ -345,13 +346,28 @@ function isExact(
   return (payment as ExactSettlePayload).scheme === "exact";
 }
 
-/** Split a 65-byte ECDSA signature into the (v, r, s) ERC-3009 expects. */
-function splitSignature(signature: Hex): { v: number; r: Hex; s: Hex } {
-  const hex = signature.slice(2);
-  const r = ("0x" + hex.slice(0, 64)) as Hex;
-  const s = ("0x" + hex.slice(64, 128)) as Hex;
-  let v = parseInt(hex.slice(128, 130), 16);
-  // Normalize a 0/1 recovery id to the 27/28 EIP-3009 expects.
-  if (v < 27) v += 27;
-  return { v, r, s };
+/** Half the secp256k1 curve order (n/2); s must be <= this (EIP-2 low-s). */
+const SECP256K1_HALF_N =
+  0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+
+/**
+ * Split a 65-byte ECDSA signature into the (v, r, s) ERC-3009 expects, REJECTING a
+ * malformed or malleable signature BEFORE it is submitted on-chain (WR-06). Uses
+ * viem's `parseSignature` (no hand-rolled hex slicing) and asserts:
+ *   - the signature is exactly 132 hex chars (0x + 65 bytes),
+ *   - s <= secp256k1n/2 (low-s; reject the EIP-2 malleable high-s sibling).
+ * Exact path only (the escrow path uses viem recovery and never calls this).
+ */
+export function splitSignature(signature: Hex): { v: number; r: Hex; s: Hex } {
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+    throw new Error("splitSignature: signature must be exactly 65 bytes (0x + 130 hex)");
+  }
+  const parsed = parseSignature(signature);
+  // parseSignature returns r/s as hex strings; parse s to bigint for the bound check.
+  if (BigInt(parsed.s) > SECP256K1_HALF_N) {
+    throw new Error("splitSignature: high-s signature rejected (EIP-2 malleability)");
+  }
+  // parseSignature yields yParity (0/1) and/or v; ERC-3009 wants the 27/28 form.
+  const v = parsed.v !== undefined ? Number(parsed.v) : (parsed.yParity ?? 0) + 27;
+  return { v, r: parsed.r, s: parsed.s };
 }
