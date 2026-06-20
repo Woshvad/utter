@@ -89,8 +89,8 @@ describe("triggerSlash (STK-02)", () => {
     const pub = mockPublicClient();
     await triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
 
-    const authArg = admin.writeContract.mock.calls[0]![0] as { abi: unknown };
-    const slashArg = admin.writeContract.mock.calls[1]![0] as { abi: unknown };
+    const authArg = admin.writeContract.mock.calls[0]![0] as unknown as { abi: unknown };
+    const slashArg = admin.writeContract.mock.calls[1]![0] as unknown as { abi: unknown };
     expect(authArg.abi).toBe(registryAbi);
     expect(slashArg.abi).toBe(stakingVaultAbi);
   });
