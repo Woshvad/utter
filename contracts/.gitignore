@@ -1,0 +1,14 @@
+# Foundry build output
+out/
+cache/
+
+# Installed dependencies are re-installable from pinned tags (OZ v5.6.1,
+# forge-std v1.9.7). Do not commit the submodule trees per 01-RESEARCH
+# Pitfall 3 (nested-monorepo submodule surprises).
+lib/
+
+# Broadcast logs from forge script runs
+broadcast/
+
+# Foundry env
+.env
