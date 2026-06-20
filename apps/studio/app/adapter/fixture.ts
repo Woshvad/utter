@@ -1,0 +1,118 @@
+// fixture.ts - the autonomous test-default StudioDataAdapter.
+//
+// FixtureAdapter implements every adapter method deterministically from
+// app/fixtures (mirroring prober.ts FixtureProber + index-store InMemoryIndexStore):
+// NO network, NO chain, NO model. Reads return shallow copies so a caller mutation
+// cannot poison the fixture. subscribeBuildEvents is an async generator yielding the
+// scripted stages with small awaited gaps, drained-to-completion in tests.
+//
+// All money is base-unit bigint; there is NO 1e6/10**6/6/18 literal in any amount
+// path here.
+import { filterResources, type FilterCriteria, type IndexRecord } from "@utter/marketplace";
+import type {
+  BuildEvent,
+  ComposeSpec,
+  Hex,
+  PlaygroundResult,
+  ResourceCardData,
+  ResourceDetail,
+  RevenueSummary,
+  StudioDataAdapter,
+  UsdcBalance,
+} from "./types.js";
+import {
+  FIXTURE_BUILD_EVENTS,
+  FIXTURE_ESCROW_BALANCE,
+  FIXTURE_MARKETPLACE,
+  FIXTURE_RESOURCE_DETAIL,
+  FIXTURE_RESOURCE_ID,
+  FIXTURE_REVENUE,
+} from "../fixtures/index.js";
+
+/** A tiny deterministic delay so the SSE generator yields across ticks (no faking). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The deterministic autonomous adapter. Constructed with no arguments; every
+ * method projects from the fixture seed. The fixture marketplace list is filtered
+ * with the SAME pure filterResources the live index uses, by projecting the card
+ * rows into IndexRecord shape for the filter then projecting back.
+ */
+export class FixtureAdapter implements StudioDataAdapter {
+  readonly backend = "fixture" as const;
+
+  async createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
+    // Deterministic: the fixture always composes the canonical fixture resource.
+    // The spec is accepted (validated upstream by the action) but not persisted.
+    void spec;
+    return {
+      resourceId: FIXTURE_RESOURCE_ID,
+      eventsUrl: `/resources/${FIXTURE_RESOURCE_ID}/events`,
+    };
+  }
+
+  async *subscribeBuildEvents(_resourceId: string): AsyncIterable<BuildEvent> {
+    for (const ev of FIXTURE_BUILD_EVENTS) {
+      // Small awaited gap so the stream yields across ticks; deterministic and
+      // drained-to-completion in tests (Pitfall 4 - the generator settles).
+      await delay(1);
+      yield { ...ev };
+    }
+  }
+
+  async getResourceDetail(_resourceId: string): Promise<ResourceDetail> {
+    // Shallow copy on read (InMemoryIndexStore idiom) so callers cannot poison it.
+    return { ...FIXTURE_RESOURCE_DETAIL };
+  }
+
+  async listMarketplace(criteria: FilterCriteria): Promise<ResourceCardData[]> {
+    // Reuse the SAME pure filter the live index uses. Project the fixture cards
+    // into IndexRecord shape, filter, then project back to ResourceCardData.
+    const records: IndexRecord[] = FIXTURE_MARKETPLACE.map((c) => ({
+      resourceId: c.resourceId,
+      agentId: c.agentId,
+      slug: c.slug,
+      category: c.category,
+      pricing: { ...c.pricing },
+      reputation: c.reputation,
+      uptime: c.uptime,
+      health: { verified: c.uptime > 0, score: c.uptime },
+      bond: c.bond,
+      cardUrl: `https://${c.slug}.resources.example.com/.well-known/agent-card.json`,
+      active: c.active,
+    }));
+    const matched = filterResources(records, criteria);
+    return matched.map((r) => ({
+      resourceId: r.resourceId as Hex,
+      agentId: r.agentId,
+      slug: r.slug,
+      category: r.category,
+      pricing: { ...r.pricing },
+      reputation: r.reputation,
+      uptime: r.uptime,
+      bond: r.bond,
+      active: r.active,
+    }));
+  }
+
+  async getRevenue(_resourceId: string): Promise<RevenueSummary> {
+    return { ...FIXTURE_REVENUE };
+  }
+
+  async getEscrowBalance(_address: Hex): Promise<UsdcBalance> {
+    return { ...FIXTURE_ESCROW_BALANCE };
+  }
+
+  async runPlayground(_resourceId: string, _req: unknown): Promise<PlaygroundResult> {
+    // Deterministic 402 pay-flow beat: a paid call debiting <= cap. The real
+    // criterion-3 harness (runTestEndpoint + in-process createApp + mock chain)
+    // is wired in the playground feature plan; the scaffold beat asserts the shape.
+    return {
+      paid: true,
+      debitAmount: BigInt(FIXTURE_RESOURCE_DETAIL.pricing.base),
+      body: { ok: true },
+    };
+  }
+}

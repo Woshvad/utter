@@ -1,0 +1,194 @@
+// types.ts - the injectable StudioDataAdapter seam (the heart of Phase 6).
+//
+// StudioDataAdapter mirrors the cross-phase pluggable-adapter-with-deterministic-
+// test-default pattern (Phase 2 PaymentStore, Phase 3 SandboxRunner, Phase 4
+// Generator, Phase 5 ResourceProber). The interface carries a `readonly backend`
+// discriminator; selectAdapter(env) returns the deterministic FixtureAdapter by
+// default (no network/chain/model) and the operator-gated LiveAdapter only when
+// STUDIO_DATA_ADAPTER === "live". Every Studio loader/action reads THROUGH this
+// seam; the frontend never re-derives price/identity/bond (the Phase 5 mandate).
+//
+// All money on this surface is token BASE UNITS (bigint); decimals format is
+// applied at render time from a runtime decimals() read - never a 1e6/6/18 literal.
+import type { FilterCriteria } from "@utter/marketplace";
+
+/** A 0x-prefixed hex string (on-chain id / address shape), declared locally so the
+ *  adapter surface does not take a direct viem runtime dep for a type alias. */
+export type Hex = `0x${string}`;
+
+/** Which adapter backend produced a result - the deterministic-default discriminator. */
+export type AdapterBackend = "fixture" | "live";
+
+/** The six build-pipeline stages, in order (Generate -> Live). The contract Plan
+ *  04's SSE route consumes; the BuildStream UI snaps a block per stage. */
+export type BuildStage = "Generate" | "Deploy" | "Verify" | "Mint" | "Publish" | "Live";
+
+/** The ordered stage list - the single source of truth for stage progression. */
+export const BUILD_STAGES: readonly BuildStage[] = [
+  "Generate",
+  "Deploy",
+  "Verify",
+  "Mint",
+  "Publish",
+  "Live",
+] as const;
+
+/** The status of a single build stage as it streams. */
+export type BuildStageStatus = "pending" | "running" | "ok" | "error";
+
+/** One server-sent build event for a stage transition. */
+export interface BuildEvent {
+  /** Which pipeline stage this event reports. */
+  stage: BuildStage;
+  /** The stage status at this event. */
+  status: BuildStageStatus;
+  /** A short, non-secret human log line for the stage (never key/secret material). */
+  log: string;
+}
+
+/** Pricing model the composer offers (maps to the @utter/x402-arc Pricing shape). */
+export type PricingModel = "flat" | "metered";
+
+/** The compose form payload (STU-01): prompt + pricing + bond + payout. All money
+ *  fields are base-unit bigint; payout is a checksummed address. */
+export interface ComposeSpec {
+  /** The plain-English endpoint description. */
+  prompt: string;
+  /** Flat or metered pricing. */
+  pricingModel: PricingModel;
+  /** Per-call base price in token base units. */
+  basePrice: bigint;
+  /** The posted bond in token base units. */
+  bond: bigint;
+  /** The creator payout address (checksummed). */
+  payout: Hex;
+}
+
+/** The pricing block projected for the detail view (base units as strings). */
+export interface DetailPricing {
+  model: string;
+  /** Per-call base price in base units (string to avoid precision loss). */
+  base: string;
+  /** Per-KB price in base units. */
+  perKB: string;
+  /** The escrow cap in base units. */
+  max: string;
+}
+
+/** The health block projected from the Scorer. */
+export interface DetailHealth {
+  verified: boolean;
+  /** The rolling 0..1 health score, or null when not yet scored. */
+  score: number | null;
+}
+
+/** Sandbox reconcile status projected from the deployer. */
+export type SandboxStatus = "live" | "deploying" | "degraded" | "down";
+
+/**
+ * The resource detail projection (STU-03): card + health + bond + sandbox.
+ * Read THROUGH existing services; never re-derived. Includes the `creator` owner
+ * address so Plan 06's requireResourceOwner gate has a field to compare against
+ * the SIWE-authenticated address.
+ */
+export interface ResourceDetail {
+  /** The on-chain resourceId (bytes32 hex). */
+  resourceId: Hex;
+  /** The checksummed wallet address that owns the resource - the ownership-gate
+   *  field Plan 06 compares against the SIWE-authenticated creator. */
+  creator: Hex;
+  /** The ERC-8004 agentId (decimal string), projected from the mint. */
+  agentId: string;
+  /** The discovery slug. */
+  slug: string;
+  /** The listing category. */
+  category: string;
+  /** The creator payout address (checksummed). */
+  payout: Hex;
+  /** Pricing projected from the card x402 block. */
+  pricing: DetailPricing;
+  /** Health projected from the Scorer. */
+  health: DetailHealth;
+  /** The posted bond in base units, projected from StakingVault.bonds(). */
+  bond: bigint;
+  /** Sandbox reconcile status projected from the deployer. */
+  sandbox: SandboxStatus;
+  /** The absolute URL of the resource's /.well-known/agent-card.json. */
+  cardUrl: string;
+}
+
+/** A marketplace discovery card (the listMarketplace return row). */
+export interface ResourceCardData {
+  resourceId: Hex;
+  agentId: string;
+  slug: string;
+  category: string;
+  pricing: DetailPricing;
+  /** feedbackCount projected from ERC-8004 readReputation. */
+  reputation: bigint;
+  /** The rolling 0..1 health/uptime. */
+  uptime: number;
+  /** The posted bond in base units. */
+  bond: bigint;
+  /** Whether the resource is currently listed for discovery. */
+  active: boolean;
+}
+
+/** The revenue dashboard projection (STU-04). All money is base-unit bigint. */
+export interface RevenueSummary {
+  resourceId: Hex;
+  /** Total settled calls. */
+  calls: number;
+  /** Gross USDC settled, base units. */
+  gross: bigint;
+  /** The creator share, base units. */
+  creatorShare: bigint;
+  /** The platform share, base units. */
+  platformShare: bigint;
+  /** Total refunded USDC, base units. */
+  refunds: bigint;
+}
+
+/** An escrow USDC balance read (STU-06 / wallet). Base units + runtime decimals. */
+export interface UsdcBalance {
+  /** Raw on-chain balance in base units. */
+  raw: bigint;
+  /** Decimals read from the contract at runtime (never a literal). */
+  decimals: number;
+}
+
+/** A playground call result (the 402 pay-flow beat). */
+export interface PlaygroundResult {
+  /** True iff the call was paid (a debit settled). */
+  paid: boolean;
+  /** The amount debited in base units (<= cap), or 0n when unpaid. */
+  debitAmount: bigint;
+  /** The response body the endpoint returned. */
+  body: unknown;
+}
+
+/**
+ * The injectable Studio data adapter. Two backends implement it: `fixture` (the
+ * deterministic autonomous default, no network/chain/model) and `live` (operator-
+ * gated, throws RequiresLiveServicesError for any sub-call needing a provisioned
+ * host/funded wallet). The interface is identical so the suite exercises the same
+ * contract with no live services (mirrors ResourceProber/Generator).
+ */
+export interface StudioDataAdapter {
+  /** Which backend this adapter is. */
+  readonly backend: AdapterBackend;
+  /** Compose a resource (STU-01); returns the new id + its SSE events URL. */
+  createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }>;
+  /** Stream the build pipeline stages (STU-02) for a resource. */
+  subscribeBuildEvents(resourceId: string): AsyncIterable<BuildEvent>;
+  /** Read the resource detail projection (STU-03): card+health+bond+sandbox. */
+  getResourceDetail(resourceId: string): Promise<ResourceDetail>;
+  /** List marketplace cards (MKT-02) through the filter criteria. */
+  listMarketplace(criteria: FilterCriteria): Promise<ResourceCardData[]>;
+  /** Aggregate the revenue summary (STU-04) for a resource. */
+  getRevenue(resourceId: string): Promise<RevenueSummary>;
+  /** Read an address's escrow USDC balance (STU-06) through readUsdcBalance. */
+  getEscrowBalance(address: Hex): Promise<UsdcBalance>;
+  /** Run the playground 402 pay-flow (criterion-3 beat) for a resource. */
+  runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult>;
+}
