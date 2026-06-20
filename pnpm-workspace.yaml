@@ -3,3 +3,12 @@ packages:
   - "services/*"
   - "packages/*"
   - "contracts"
+# Native build scripts deliberately NOT run (set false, not "ask"). These are
+# transitive helpers of dockerode (ssh2 -> cpu-features) and protobufjs,
+# irrelevant to our Docker-over-socket usage; blocking their build scripts is the
+# safe supply-chain posture and keeps the ERR_PNPM_IGNORED_BUILDS notice from
+# failing verify gates.
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

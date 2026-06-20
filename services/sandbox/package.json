@@ -1,0 +1,23 @@
+{
+  "name": "@utter/sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./stores/memory": "./src/stores/memory.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@utter/chain": "workspace:*",
+    "@utter/x402-arc": "workspace:*",
+    "dockerode": "5.0.0",
+    "ioredis": "5.11.1",
+    "viem": "2.52.2"
+  },
+  "devDependencies": {
+    "@types/dockerode": "4.0.1"
+  }
+}

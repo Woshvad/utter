@@ -1,0 +1,28 @@
+{
+  "name": "@utter/deployer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./stores/memory": "./src/stores/memory.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.5",
+    "@utter/chain": "workspace:*",
+    "@utter/facilitator": "workspace:*",
+    "@utter/x402-arc": "workspace:*",
+    "dockerode": "5.0.0",
+    "hono": "4.12.26",
+    "ioredis": "5.11.1",
+    "viem": "2.52.2"
+  },
+  "devDependencies": {
+    "@secretlint/secretlint-rule-preset-recommend": "13.0.2",
+    "@types/dockerode": "4.0.1",
+    "secretlint": "13.0.2"
+  }
+}
