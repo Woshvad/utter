@@ -21,14 +21,29 @@ export type ClassifyResponse = (body: unknown) => ResponseClass;
 const SUCCESS_REF = "openapi.json#/components/schemas/EchoSuccess";
 const ERROR_REF = "openapi.json#/components/schemas/EchoError";
 
+/** Optional resource-named schema refs for a generated openapi. */
+export interface ClassifierRefs {
+  /** The success schema ref; defaults to the echo `EchoSuccess` ref. */
+  successRef?: string;
+  /** The declared-error schema ref; defaults to the echo `EchoError` ref. */
+  errorRef?: string;
+}
+
 /**
- * Compile an openapi doc into a classifier. The doc must define
+ * Compile an openapi doc into a classifier. By default the doc must define
  * `components.schemas.EchoSuccess` and `EchoError` and carry `$id:"openapi.json"`
- * (Wave 0 echo fixture sets it). Throws at build time if either schema is absent
- * so a misconfigured resource fails loudly rather than silently classifying
- * everything as malfunction.
+ * (Wave 0 echo fixture sets it). Pass `{ successRef, errorRef }` to classify
+ * against resource-named component schemas instead (Phase 4 generated openapi),
+ * e.g. `openapi.json#/components/schemas/WeatherSuccess`. Throws at build time if
+ * either schema is absent so a misconfigured resource fails loudly rather than
+ * silently classifying everything as malfunction.
  */
-export function buildClassifier(openapi: Record<string, unknown>): ClassifyResponse {
+export function buildClassifier(
+  openapi: Record<string, unknown>,
+  opts?: ClassifierRefs,
+): ClassifyResponse {
+  const successRef = opts?.successRef ?? SUCCESS_REF;
+  const errorRef = opts?.errorRef ?? ERROR_REF;
   // strict:false tolerates the OpenAPI 3.1 dialect; addFormats supplies
   // date-time/uri/email/etc. AJV would otherwise omit.
   const ajv = addFormats(new Ajv({ allErrors: true, strict: false }));
@@ -40,13 +55,13 @@ export function buildClassifier(openapi: Record<string, unknown>): ClassifyRespo
   }
   ajv.addSchema(doc);
 
-  const validateSuccess: ValidateFunction | undefined = ajv.getSchema(SUCCESS_REF);
-  const validateError: ValidateFunction | undefined = ajv.getSchema(ERROR_REF);
+  const validateSuccess: ValidateFunction | undefined = ajv.getSchema(successRef);
+  const validateError: ValidateFunction | undefined = ajv.getSchema(errorRef);
   if (!validateSuccess) {
-    throw new Error(`buildClassifier: missing schema ${SUCCESS_REF}`);
+    throw new Error(`buildClassifier: missing schema ${successRef}`);
   }
   if (!validateError) {
-    throw new Error(`buildClassifier: missing schema ${ERROR_REF}`);
+    throw new Error(`buildClassifier: missing schema ${errorRef}`);
   }
 
   return function classifyResponse(body: unknown): ResponseClass {
