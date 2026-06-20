@@ -1,0 +1,11 @@
+{
+  "name": "utter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:chain": "vitest run packages/chain",
+    "test": "vitest run"
+  },
+  "devDependencies": {}
+}
