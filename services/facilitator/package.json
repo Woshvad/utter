@@ -18,5 +18,8 @@
     "ioredis": "5.11.1",
     "pg": "8.22.0",
     "viem": "2.52.2"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0"
   }
 }

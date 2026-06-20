@@ -71,6 +71,10 @@ importers:
       viem:
         specifier: 2.52.2
         version: 2.52.2(typescript@6.0.3)
+    devDependencies:
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
 
 packages:
 
@@ -243,6 +247,9 @@ packages:
 
   '@types/node@26.0.0':
     resolution: {integrity: sha512-vf2YFi1iY9lHGwNJMs01biZFbKJkrZR1T6/MlzjhJLPdntOHLhTrDSnSVcdtvjihi4VQNlrFRIxLsDBlQpAipA==}
+
+  '@types/pg@8.20.0':
+    resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
 
   '@vitest/expect@4.1.9':
     resolution: {integrity: sha512-vl/rYsUKcBr3SnQn166+XR5ZQcgMx3DQhFWdfli/cWpLnLUmbxZvyrJZotLFUryib+LtArYMSTJ5RbQ57ZqrlA==}
@@ -845,6 +852,12 @@ snapshots:
   '@types/node@26.0.0':
     dependencies:
       undici-types: 8.3.0
+
+  '@types/pg@8.20.0':
+    dependencies:
+      '@types/node': 26.0.0
+      pg-protocol: 1.15.0
+      pg-types: 2.2.0
 
   '@vitest/expect@4.1.9':
     dependencies:
