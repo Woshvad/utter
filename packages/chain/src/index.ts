@@ -5,6 +5,9 @@
 // Chain object + public client factory
 export { arcTestnet, createArcPublicClient } from "./arc";
 
+// Wallet (write-path) client factory for the relayer signer pool (Phase 2)
+export { createArcWalletClient } from "./wallet";
+
 // Pinned Arc Testnet address constants (SPEC §6)
 export {
   USDC,
@@ -19,8 +22,19 @@ export {
   CREATE2_FACTORY,
 } from "./addresses";
 
+// Pinned Utter Phase 1 contract addresses (deployed on Arc Testnet; SPEC §6)
+export {
+  RESOURCE_REGISTRY,
+  PAYMENT_ESCROW,
+  PAYMENT_SPLITTER,
+  STAKING_VAULT,
+} from "./addresses";
+
 // Minimal ERC-20 ABI
 export { erc20Abi } from "./abis";
+
+// Phase 2 write-path ABIs: escrow debit/Debited, splitter distribute, erc3009 exact
+export { escrowAbi, splitterAbi, erc3009Abi } from "./abis";
 
 // Runtime-decimals() USDC balance helper (CHAIN-03)
 export { readUsdcBalance, type UsdcBalance } from "./usdc";
