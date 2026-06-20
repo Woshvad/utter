@@ -20,8 +20,8 @@
 //
 // The gate NEVER records a strike locally - strikes are recorded by the facilitator
 // `/release` route WHEN a `strikeReason` is present (the facilitator-side store is
-// the canonical, durable strike owner). There is intentionally NO `recordStrike`
-// call in this file.
+// the canonical, durable strike owner). There is intentionally NO local strike-
+// recording call in this file: the gate drives strikes ONLY via /release.
 import { createMiddleware } from "hono/factory";
 import type { Hex } from "viem";
 import type { Context } from "hono";
@@ -74,6 +74,31 @@ async function postJson(
   });
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, json };
+}
+
+/**
+ * Release a reservation at the facilitator. When `strikeReason` is provided this is
+ * the MALFUNCTION/timeout path - the facilitator `/release` route records the strike
+ * against the resource on its own (canonical) store. WITHOUT a `strikeReason` it is
+ * the free / declared-error path: release only, NO strike. The gate NEVER records a
+ * strike locally - it drives the strike exclusively through this route.
+ */
+async function release(
+  fetcher: FetchLike,
+  facilitator: string,
+  payment: PaymentPayload,
+  resourceId: Hex,
+  strikeReason?: string,
+): Promise<void> {
+  const body: Record<string, unknown> = {
+    idemKey: payment.authorization.nonce as Hex,
+  };
+  if (strikeReason) {
+    body.strikeReason = strikeReason;
+    // The facilitator requires the resourceId to attribute the strike.
+    body.resourceId = resourceId;
+  }
+  await postJson(fetcher, `${facilitator}/release`, body);
 }
 
 /** Race a promise against a timeout; reject with a sentinel on expiry. */
@@ -137,18 +162,32 @@ export function requirePayment(opts: RequirePaymentOpts) {
     }
 
     // (4) ONLY NOW run the handler - funds are reserved. Bound it by the timeout.
+    // A timeout is a MALFUNCTION: release the reservation WITH a strikeReason
+    // ("timeout") - the facilitator-side store records the strike - and return 504.
+    // The gate NEVER debits a timed-out call and NEVER records a strike locally.
     const start = Date.now();
-    await withTimeout(next(), opts.maxTimeoutSeconds * 1000);
+    try {
+      await withTimeout(next(), opts.maxTimeoutSeconds * 1000);
+    } catch (err) {
+      if (err === TIMEOUT_SENTINEL) {
+        await release(fetcher, facilitator, payment, accepts.payTo, "timeout");
+        return c.json({ error: "endpoint_timeout" }, 504);
+      }
+      // A genuine handler throw is also a malfunction (never charge a broken handler).
+      await release(fetcher, facilitator, payment, accepts.payTo, "handler_error");
+      return c.json({ error: "handler_error" }, 502);
+    }
     const handlerMs = Date.now() - start;
 
     // (5) Buffer the body WITHOUT consuming the stream returned to the client.
     const body = await c.res.clone().text();
 
-    // (6) Classify and act. Task 1 implements the success branch; the non-success
-    // branches (declared_error / malfunction) are added in Task 2.
+    // (6) Classify the cloned body and act on the class.
     const kind = opts.classifier(body);
 
     if (kind === "success") {
+      // SUCCESS: debit min(computed, cap) and expose the receipt. The ORIGINAL body
+      // still streams to the client (it was never consumed - clone-before-read).
       const cap = BigInt(payment.authorization.maxAmount);
       const bodyBytes = Buffer.byteLength(body, "utf8");
       const amount = computeMeteredAmount(opts.pricing, bodyBytes, handlerMs, cap);
@@ -158,17 +197,38 @@ export function requirePayment(opts: RequirePaymentOpts) {
         idemKey: payment.authorization.nonce as Hex,
         response: body,
       });
-      // The persisted result + the on-chain debit happened facilitator-side; expose
-      // the receipt to the buyer. The ORIGINAL body still streams to the client.
       c.header("X-PAYMENT-RESPONSE", b64(settle.json.receipt ?? settle.json));
       return;
     }
 
-    // Non-success branches arrive in Task 2; until then treat as a malfunction-safe
-    // default (release the reservation, never debit) so no path charges by accident.
-    await postJson(fetcher, `${facilitator}/release`, {
-      idemKey: payment.authorization.nonce as Hex,
-    });
+    if (kind === "declared_error" && errorPolicy === "free") {
+      // DECLARED ERROR (bad buyer input) under the FREE policy: release the
+      // reservation WITHOUT a strikeReason - NO charge, NO strike (the wrongful-
+      // strike guard) - and serve the ORIGINAL handler body unchanged.
+      await release(fetcher, facilitator, payment, accepts.payTo);
+      return;
+    }
+
+    if (kind === "declared_error") {
+      // A non-free error policy applies the configured error price (STILL no strike -
+      // bad buyer input never strikes the creator). The `free` default fully
+      // satisfies PAY-06; the priced branch is the documented errorPolicy switch.
+      // Phase 2 ships the free default; a priced policy debits the error price here.
+      const cap = BigInt(payment.authorization.maxAmount);
+      const settle = await postJson(fetcher, `${facilitator}/settle`, {
+        payment,
+        amount: cap.toString(),
+        idemKey: payment.authorization.nonce as Hex,
+        response: body,
+      });
+      c.header("X-PAYMENT-RESPONSE", b64(settle.json.receipt ?? settle.json));
+      return;
+    }
+
+    // MALFUNCTION (response matched neither schema): release WITH a strikeReason -
+    // the facilitator-side store records the strike (canonical owner) - NEVER debit,
+    // and replace the body with a 502 (the buyer is not charged for a broken endpoint).
+    await release(fetcher, facilitator, payment, accepts.payTo, "invalid_output");
     c.res = c.json({ error: "response_failed_validation" }, 502);
     return;
   });
