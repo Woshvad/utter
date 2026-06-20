@@ -94,6 +94,8 @@ contract PaymentEscrow is EIP712, Ownable, ReentrancyGuard {
     error BadSignature();
     /// @notice The resource is paused or unregistered.
     error ResourceInactive();
+    /// @notice A zero amount was supplied where a positive amount is required.
+    error ZeroAmount();
 
     /// @param _usdc The escrowed USDC token.
     /// @param _registry The resource config store debit reads.
@@ -122,6 +124,7 @@ contract PaymentEscrow is EIP712, Ownable, ReentrancyGuard {
     /// the ledger. nonReentrant for defense in depth.
     /// @param amount USDC base units to deposit.
     function deposit(uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         usdc.safeTransferFrom(msg.sender, address(this), amount);
         balanceOf[msg.sender] += amount;
         emit Deposited(msg.sender, amount);
@@ -133,6 +136,7 @@ contract PaymentEscrow is EIP712, Ownable, ReentrancyGuard {
     /// nonReentrant guards the single external interaction.
     /// @param amount USDC base units to withdraw.
     function withdraw(uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         balanceOf[msg.sender] -= amount;
         usdc.safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, amount);

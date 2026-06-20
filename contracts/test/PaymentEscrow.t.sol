@@ -85,6 +85,18 @@ contract PaymentEscrowTest is Test, EIP712SignHelper {
         assertEq(usdc.balanceOf(buyer), 0, "buyer wallet drained by deposit");
     }
 
+    /// @notice deposit and withdraw revert ZeroAmount on a zero amount rather
+    /// than emitting a no-op event into the indexer stream.
+    function test_depositWithdraw_revertOnZeroAmount() public {
+        vm.prank(buyer);
+        vm.expectRevert(PaymentEscrow.ZeroAmount.selector);
+        escrow.deposit(0);
+
+        vm.prank(buyer);
+        vm.expectRevert(PaymentEscrow.ZeroAmount.selector);
+        escrow.withdraw(0);
+    }
+
     /// @notice a valid signed debit decrements the buyer by amount and credits
     /// the floored creator share and the treasury remainder.
     function test_debit_splitsAndDecrements() public {
