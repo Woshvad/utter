@@ -9,6 +9,7 @@ export default defineConfig({
     include: [
       "packages/*/test/**/*.test.ts",
       "services/*/test/**/*.test.ts",
+      "apps/*/test/**/*.test.ts",
     ],
     testTimeout: 30000,
     hookTimeout: 30000,
