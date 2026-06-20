@@ -229,9 +229,14 @@ export async function runTestEndpoint(opts: RunTestEndpointOptions): Promise<Tes
   // The cap is the card's escrow max in base units. Guard: it must be a whole number of
   // base units (a positive integer); baseUnit anchors the precision the cap is denominated in.
   const cap = BigInt(capRaw);
-  if (cap <= 0n || cap % 1n !== 0n || baseUnit <= 0n) {
-    throw new Error(`test-endpoint: card pricing.max ${capRaw} is not a valid cap`);
+  // IN-01: `cap` is already a bigint (a whole number of base units), so `cap % 1n` and
+  // `baseUnit <= 0n` can never trip - they were vestigial. The live guard is `cap > 0n`:
+  // the escrow max must be a positive base-unit amount. `baseUnit` stays computed above
+  // as the runtime decimals-derivation witness (Pitfall 3: precision is read, never literal'd).
+  if (cap <= 0n) {
+    throw new Error(`test-endpoint: card pricing.max ${capRaw} is not a positive cap`);
   }
+  void baseUnit;
 
   const cardInputs = readCardInputs(card, cap);
 
