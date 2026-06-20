@@ -1,0 +1,50 @@
+// handler.ts - the generated resource handler (templated from the proven echo
+// handler, packages/x402-arc/examples/echo/handler.ts). This is a plain Hono
+// handler: parse the JSON body, return a declared error (HTTP 400 {error, code})
+// for bad buyer input, otherwise return the success body (HTTP 200). The escrow
+// gate sits IN FRONT (requirePayment): it reserves the cap, runs this handler,
+// then classifies the body. This handler does no payment work and reads no key.
+//
+// KEYLESS EGRESS (GEN-02 / PRX-01): this handler NEVER holds a raw upstream key.
+// Any upstream call goes through the data-proxy at process.env.EGRESS_PROXY_URL
+// with the runtime-injected scoped token in `x-resource-token` (the proxy injects
+// the real credential server-side). A literal key here would fail the secret scan.
+import type { Context } from "hono";
+
+/** The max input length accepted before it is a declared (bad-input) error. */
+export const MAX_INPUT_LENGTH = 4096;
+
+/** The request body this handler accepts. A non-string `text` is a declared error. */
+interface ResourceRequest {
+  text?: unknown;
+}
+
+/**
+ * The generated handler. Reads `{ text }` from the JSON body and returns either a
+ * 200 success body or a 400 declared error for the buyer's bad input. The gate in
+ * front owns the money path; this handler only shapes a schema-valid response.
+ */
+export async function handler(c: Context): Promise<Response> {
+  let body: ResourceRequest;
+  try {
+    body = (await c.req.json()) as ResourceRequest;
+  } catch {
+    // Malformed JSON is the buyer's bad input: a declared error (no strike).
+    return c.json({ error: "request body must be valid JSON", code: "BAD_JSON" }, 400);
+  }
+
+  const text = body?.text;
+  if (typeof text !== "string") {
+    // Bad buyer input: a declared error - the gate releases, never strikes.
+    return c.json({ error: "text must be a string", code: "BAD_INPUT" }, 400);
+  }
+  if (text.length > MAX_INPUT_LENGTH) {
+    return c.json(
+      { error: `text exceeds ${MAX_INPUT_LENGTH} characters`, code: "TOO_LONG" },
+      400,
+    );
+  }
+__UPSTREAM_BLOCK__
+  // Success: return the result with its length.
+  return c.json({ result: text, length: text.length }, 200);
+}

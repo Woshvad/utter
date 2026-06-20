@@ -9,56 +9,22 @@
 // `!env.ANTHROPIC_API_KEY -> scaffold` branch is the load-bearing invariant: the
 // whole autonomous suite runs green with no key and reaches no model/network path.
 //
-// In THIS plan (04-01) the two backend bodies are placeholders - their `generate`
-// throws `not-implemented`. Plan 04-02 replaces the bodies; the `backend`
-// discriminator and the selector are fully testable now.
+// Plan 04-02 replaces the placeholder bodies: the real ScaffoldGenerator lives in
+// scaffold.ts (deterministic five-file bundle) and the real ClaudeGenerator lives
+// in claude-backend.ts (operator-gated Agent SDK loop). This module owns the
+// interface + the env-driven selector and re-exports the two concrete backends.
 import type { Bundle, ResourceSpec } from "./types.js";
+import { ScaffoldGenerator } from "./scaffold.js";
+import { ClaudeGenerator, type ClaudeGeneratorConfig } from "./claude-backend.js";
+
+export { ScaffoldGenerator } from "./scaffold.js";
+export { ClaudeGenerator, type ClaudeGeneratorConfig } from "./claude-backend.js";
 
 export interface Generator {
   /** Which backend this generator is - the deterministic-default discriminator. */
   readonly backend: "scaffold" | "claude";
   /** Turn a ResourceSpec into the five-file Bundle. */
   generate(spec: ResourceSpec): Promise<Bundle>;
-}
-
-/** Config for the operator-gated claude backend. */
-export interface ClaudeGeneratorConfig {
-  apiKey: string;
-  model: string;
-}
-
-/**
- * The deterministic, zero-model-call backend - the test default. Templated from
- * the proven echo bundle in plan 04-02. Placeholder body here so the selector +
- * its discriminator are testable in 04-01.
- */
-export class ScaffoldGenerator implements Generator {
-  readonly backend = "scaffold" as const;
-
-  async generate(_spec: ResourceSpec): Promise<Bundle> {
-    throw new Error("ScaffoldGenerator.generate not-implemented (lands in plan 04-02)");
-  }
-}
-
-/**
- * The live, operator-gated backend driven by @anthropic-ai/claude-agent-sdk.
- * Needs ANTHROPIC_API_KEY + network and is never the CI default. Constructing it
- * performs NO network call (the model is contacted only inside generate()), so the
- * selector can return it from env alone without a live key beyond the flag.
- * Placeholder body here; the agent-loop wiring lands in plan 04-02.
- */
-export class ClaudeGenerator implements Generator {
-  readonly backend = "claude" as const;
-  private readonly config: ClaudeGeneratorConfig;
-
-  constructor(config: ClaudeGeneratorConfig) {
-    // Store config only - do NOT touch the network here.
-    this.config = config;
-  }
-
-  async generate(_spec: ResourceSpec): Promise<Bundle> {
-    throw new Error("ClaudeGenerator.generate not-implemented (lands in plan 04-02)");
-  }
 }
 
 /**
