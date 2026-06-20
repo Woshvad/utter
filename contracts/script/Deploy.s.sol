@@ -56,6 +56,20 @@ contract Deploy is Script {
         address admin = vm.envOr("ESCROW_ADMIN", deployer);
         address owner = vm.envOr("CONTRACT_OWNER", deployer);
 
+        // Warn loudly if any role silently defaulted to the deployer. On a live
+        // broadcast this collapses the relayer, owner, and treasury into one EOA
+        // and flattens the threat model, so the operator must see it. This is a
+        // warning, not a hard revert, to keep the keyless dry run convenient.
+        if (treasury == deployer) {
+            console.log("WARNING: PLATFORM_TREASURY unset, defaulting to deployer. Set it for production.");
+        }
+        if (admin == deployer) {
+            console.log("WARNING: ESCROW_ADMIN unset, defaulting to deployer. Set it for production.");
+        }
+        if (owner == deployer) {
+            console.log("WARNING: CONTRACT_OWNER unset, defaulting to deployer. Set it for production.");
+        }
+
         require(feeBps <= 10_000, "PLATFORM_FEE_BPS exceeds 10000");
         uint16 creatorBps = 10_000 - feeBps;
 
