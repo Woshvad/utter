@@ -14,10 +14,12 @@ import {
 
 const NONCE: Hex = `0x${"11".repeat(32)}`;
 const RESOURCE: Hex = `0x${"22".repeat(32)}`;
+const BUYER: Hex = `0x${"33".repeat(20)}`;
 
 function lock(overrides: Partial<ReservationLock> = {}): ReservationLock {
   return {
     idemKey: NONCE,
+    buyer: BUYER,
     cap: 10_000n,
     resourceId: RESOURCE,
     expiresAt: Date.now() + 60_000,
@@ -73,6 +75,35 @@ describe("InMemoryPaymentStore", () => {
     vi.advanceTimersByTime(2_000);
     expect(await store.isNoncePending(NONCE)).toBe(false);
     expect(await store.reserve(lock({ expiresAt: Date.now() + 1_000 }))).toBe(true);
+  });
+
+  it("outstandingReserved sums live caps for one buyer and excludes others", async () => {
+    const store = new InMemoryPaymentStore();
+    const nonceA: Hex = `0x${"a1".repeat(32)}`;
+    const nonceB: Hex = `0x${"b2".repeat(32)}`;
+    const nonceC: Hex = `0x${"c3".repeat(32)}`;
+    const otherBuyer: Hex = `0x${"44".repeat(20)}`;
+    await store.reserve(lock({ idemKey: nonceA, cap: 1_000n }));
+    await store.reserve(lock({ idemKey: nonceB, cap: 2_500n }));
+    await store.reserve(lock({ idemKey: nonceC, cap: 9_999n, buyer: otherBuyer }));
+    // BUYER has two open reservations (1000 + 2500); the third belongs to another buyer.
+    expect(await store.outstandingReserved(BUYER)).toBe(3_500n);
+    // Case-insensitive address match.
+    expect(await store.outstandingReserved(BUYER.toUpperCase() as Hex)).toBe(3_500n);
+    expect(await store.outstandingReserved(otherBuyer)).toBe(9_999n);
+    // Releasing one drops it from the sum.
+    await store.release(nonceA);
+    expect(await store.outstandingReserved(BUYER)).toBe(2_500n);
+  });
+
+  it("outstandingReserved excludes expired reservations", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-20T00:00:00Z"));
+    const store = new InMemoryPaymentStore();
+    await store.reserve(lock({ cap: 5_000n, expiresAt: Date.now() + 1_000 }));
+    expect(await store.outstandingReserved(BUYER)).toBe(5_000n);
+    vi.advanceTimersByTime(2_000);
+    expect(await store.outstandingReserved(BUYER)).toBe(0n);
   });
 
   it("recordStrike increments getStrikes per resource", async () => {

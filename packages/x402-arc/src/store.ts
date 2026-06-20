@@ -19,6 +19,8 @@ import type { Hex } from "viem";
 export interface ReservationLock {
   /** The payment nonce (bytes32 Hex) - the idempotency key for the whole call. */
   idemKey: Hex;
+  /** The buyer whose on-chain balance backs this reservation (lower-cased Address). */
+  buyer: Hex;
   /** The signed spend cap in USDC base units. Never a decimals-scaled number. */
   cap: bigint;
   /** The resource being charged (bytes32 Hex). */
@@ -61,6 +63,14 @@ export interface PaymentStore {
   markNonceSpent(idemKey: Hex): Promise<void>;
   /** True while a nonce holds a live (unexpired) reservation. */
   isNoncePending(idemKey: Hex): Promise<boolean>;
+  /**
+   * Sum of the caps of every live (unexpired) reservation for one buyer. This is
+   * the off-chain "already committed" amount: `/verify` rejects a new reservation
+   * when `onchain balanceOf(buyer) - outstandingReserved(buyer) < cap`, so two
+   * sequential verifies with different nonces cannot over-commit one balance. The
+   * on-chain `debit` revert remains the FINAL authority; this is defense in depth.
+   */
+  outstandingReserved(buyer: Hex): Promise<bigint>;
   /** Record a malfunction strike against a resource (Phase 5 acts on the count). */
   recordStrike(resourceId: Hex, reason: string): Promise<void>;
   /** Current strike count for a resource. */
@@ -117,6 +127,19 @@ export class InMemoryPaymentStore implements PaymentStore {
 
   async isNoncePending(idemKey: Hex): Promise<boolean> {
     return this.isLive(idemKey);
+  }
+
+  async outstandingReserved(buyer: Hex): Promise<bigint> {
+    const target = buyer.toLowerCase();
+    let sum = 0n;
+    // Iterate a snapshot of keys so the lazy-expiry delete inside isLive() does
+    // not mutate the map mid-iteration.
+    for (const idemKey of [...this.reservations.keys()]) {
+      if (!this.isLive(idemKey)) continue;
+      const lock = this.reservations.get(idemKey);
+      if (lock && lock.buyer.toLowerCase() === target) sum += lock.cap;
+    }
+    return sum;
   }
 
   async recordStrike(resourceId: Hex, _reason: string): Promise<void> {
