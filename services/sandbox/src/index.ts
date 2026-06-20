@@ -40,6 +40,19 @@ export {
 export { DockerDevRunner } from "./runner/docker-dev";
 export { GvisorRunner } from "./runner/gvisor";
 
+// --- HARD request/response size cap (SBX-04 size clause; Plan 02 Task 4) ---
+export {
+  DEFAULT_MAX_REQUEST_BYTES,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  SizeCapError,
+  byteLengthOf,
+  enforceRequestSizeCap,
+  enforceResponseSizeCap,
+  maxRequestBytesFromEnv,
+  maxResponseBytesFromEnv,
+  type SizeCapReason,
+} from "./runner/size-cap";
+
 // --- Egress firewall: default-deny ruleset generator, only-proxy (Plan 02 Task 2) ---
 export {
   EGRESS_BLOCK_SET,
