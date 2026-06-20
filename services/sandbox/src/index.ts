@@ -16,9 +16,26 @@
 export {
   InMemoryRunStore,
   createInMemoryStores,
-  type RunBackend,
   type RunOutcome,
   type RunRecord,
   type RunStore,
   type SandboxStores,
 } from "./stores/memory";
+
+// --- Runner: the pluggable SandboxRunner + the hardened run-spec builder (Plan 02 Task 1) ---
+export type {
+  ContainerRuntime,
+  RunBackend,
+  RunHandle,
+  RunInspect,
+  RunLogs,
+  RunSpec,
+  SandboxRunner,
+} from "./runner/types";
+export {
+  buildRunSpec,
+  type BuildRunSpecOptions,
+  type RunLimits,
+} from "./runner/runspec";
+export { DockerDevRunner } from "./runner/docker-dev";
+export { GvisorRunner } from "./runner/gvisor";

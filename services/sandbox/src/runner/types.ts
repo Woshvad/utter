@@ -1,0 +1,129 @@
+// SandboxRunner interface + the hardened RunSpec type (SBX-01/04; RESEARCH
+// Pattern 1).
+//
+// A `RunSpec` is the pure, fully-resolved description of how ONE untrusted
+// handler container is launched. It is produced by `buildRunSpec` (runspec.ts)
+// and consumed by a `SandboxRunner` backend (gvisor.ts | docker-dev.ts) which
+// translates it into a dockerode create-spec. Keeping the spec a plain data
+// object lets the security-relevant invariants (never --privileged, never
+// host-net, cap-drop ALL, empty env) be unit-asserted with NO container launch.
+//
+// SECURITY BOUNDARY NOTE: only the `gvisor` backend (runtime "runsc" on the
+// operator-provisioned host) is a trusted isolation boundary. The `docker-dev`
+// backend (runtime "runc", plain Docker / Docker Desktop) is wiring +
+// integration-test scaffolding ONLY and is NEVER a security boundary
+// (CLAUDE.md, SPEC §9.5). It is given the IDENTICAL hardening flags so the
+// wiring is faithful, but it must never satisfy a security acceptance.
+
+/** Which isolation backend a run targets. `docker-dev` is NOT a security boundary. */
+export type RunBackend = "gvisor" | "docker-dev";
+
+/**
+ * The container runtime a backend maps to. `runsc` is gVisor (the trusted
+ * boundary on the provisioned host); `runc` is plain Docker (docker-dev only).
+ */
+export type ContainerRuntime = "runsc" | "runc";
+
+/**
+ * The fully-resolved, hardened launch spec for one untrusted handler container.
+ *
+ * Every security-relevant field is a fixed literal so the invariant test can
+ * assert the spec NEVER carries `privileged:true`, `network:"host"`, any
+ * `capAdd`, or a non-empty `env`. The shape mirrors RESEARCH Pattern 1.
+ */
+export interface RunSpec {
+  /** The resource image to run (tagged by resourceId+version upstream). */
+  image: string;
+  /** runsc (gvisor backend) or runc (docker-dev backend, NOT a boundary). */
+  runtime: ContainerRuntime;
+  /**
+   * The container network. Default "none": the container starts with NO route;
+   * the egress firewall (egress/firewall.ts) attaches the only path (the
+   * data-proxy) host-side. Never "host" (the invariant forbids it).
+   */
+  network: "none" | string;
+  /** Read-only root filesystem. Always true (SBX-04). */
+  readonlyRootfs: true;
+  /**
+   * The only writable mounts: small tmpfs(es) mounted noexec,nosuid. e.g.
+   * `{ "/tmp": "rw,noexec,nosuid,size=16m" }`.
+   */
+  tmpfs: Record<string, string>;
+  /** Linux capabilities dropped. Always exactly ["ALL"] (SBX-01). */
+  capDrop: readonly ["ALL"];
+  /**
+   * Capabilities added back. ALWAYS empty (the invariant forbids any capAdd) —
+   * present as an explicit empty list so the assertion is unambiguous.
+   */
+  capAdd: readonly [];
+  /** no-new-privileges so a setuid binary cannot escalate (SBX-01). */
+  securityOpt: readonly ["no-new-privileges:true"];
+  /** Hard process cap (--pids-limit), e.g. 128. Positive (SBX-04). */
+  pidsLimit: number;
+  /** Memory cap in bytes (--memory). Positive (SBX-04). */
+  memoryBytes: number;
+  /** CPU cap (--cpus), e.g. 0.5. Positive (SBX-04). */
+  cpus: number;
+  /**
+   * Disk quota (--storage-opt size=...). OPERATOR-GATED: real enforcement needs
+   * a quota-capable storage driver/FS (overlay2 + xfs pquota — RESEARCH
+   * Pitfall 4); on Docker Desktop's WSL2 disk it may be a no-op. Present in the
+   * spec, but disk-quota enforcement is host-verified, never assumed locally.
+   */
+  storageOptSize?: string;
+  /**
+   * Hard execution timeout in seconds (= maxTimeoutSeconds). RUNNER-enforced:
+   * the backend kills the container at this deadline (SBX-04 timeout clause).
+   */
+  timeoutSeconds: number;
+  /**
+   * The container environment. MUST be exactly empty (SBX-03): no platform env,
+   * no wallet/upstream keys — the data-proxy injects only a short-lived scoped
+   * token at request time. Typed `Record<string, never>` so any key is a type
+   * error.
+   */
+  env: Record<string, never>;
+}
+
+/** A handle to a launched run, returned by `SandboxRunner.run`. */
+export interface RunHandle {
+  /** The backend's container id for this run. */
+  id: string;
+  /** Which backend launched it (`docker-dev` is NOT a boundary). */
+  backend: RunBackend;
+  /** Wait for the run to exit (or be killed at the timeout). Resolves the exit code. */
+  wait(): Promise<number>;
+}
+
+/** Captured stdout/stderr from a run. */
+export interface RunLogs {
+  stdout: string;
+  stderr: string;
+}
+
+/** Backend-reported inspection of a launched container. */
+export interface RunInspect {
+  id: string;
+  running: boolean;
+  exitCode: number | null;
+}
+
+/**
+ * The pluggable isolation runner. Two backends implement it: `gvisor` (the
+ * trusted boundary, runtime runsc, operator host) and `docker-dev` (runtime
+ * runc, NOT a security boundary — local wiring + integration tests only). The
+ * interface is identical so the autonomous suite exercises the same contract
+ * with no isolation host (mirrors the Phase 2 PaymentStore adapter pattern).
+ */
+export interface SandboxRunner {
+  /** Which backend this runner is. */
+  readonly backend: RunBackend;
+  /** Launch a container from a hardened RunSpec; the runner enforces the timeout (kill). */
+  run(spec: RunSpec): Promise<RunHandle>;
+  /** Stop (kill) a running container by id. Idempotent. */
+  stop(id: string): Promise<void>;
+  /** Fetch captured stdout/stderr for a run. */
+  logs(id: string): Promise<RunLogs>;
+  /** Inspect a run's current state. */
+  inspect(id: string): Promise<RunInspect>;
+}

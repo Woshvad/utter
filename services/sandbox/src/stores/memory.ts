@@ -13,9 +13,7 @@
 // agnostic so the gvisor (prod) and docker-dev (local, NOT a security boundary)
 // runners write the same shape.
 import type { Hex } from "viem";
-
-/** The isolation backend a run used. `docker-dev` is NOT a security boundary. */
-export type RunBackend = "gvisor" | "docker-dev";
+import type { RunBackend } from "../runner/types";
 
 /** How a sandboxed run terminated. */
 export type RunOutcome = "success" | "timeout" | "oom" | "killed" | "error";
