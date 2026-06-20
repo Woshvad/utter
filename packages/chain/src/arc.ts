@@ -41,8 +41,13 @@ export const arcTestnet = defineChain({
  * rate-limits (RESEARCH Pitfall 4). Falls back to the chain's default HTTP RPC.
  */
 export function createArcPublicClient(rpcUrl?: string) {
+  // Only honor an override that is actually a non-empty string. A blank or
+  // whitespace-only ARC_RPC_URL falls back to the chain default rather than
+  // silently building a client that fails opaquely at first call.
+  const trimmed = rpcUrl?.trim();
+  const url = trimmed && trimmed.length > 0 ? trimmed : arcTestnet.rpcUrls.default.http[0];
   return createPublicClient({
     chain: arcTestnet,
-    transport: http(rpcUrl ?? arcTestnet.rpcUrls.default.http[0]),
+    transport: http(url),
   });
 }
