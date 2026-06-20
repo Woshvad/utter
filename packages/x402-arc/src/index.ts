@@ -41,7 +41,29 @@ export {
   type DebitAuthorizationMessage,
 } from "./codec";
 
-// Wave 2 (Task 2) extends this barrel:
-//   export { requirePayment } from "./gate";        // PAY-04/05/06 escrow gate
-//   export { classifyResponse, buildClassifier } from "./classify"; // PAY-06
-//   export { signDebitAuthorization, signExactTransfer } from "./client"; // PAY-03/08
+// AJV response classifier (PAY-06): success | declared_error | malfunction
+export {
+  buildClassifier,
+  classifyResponse,
+  type ResponseClass,
+  type ClassifyResponse,
+} from "./classify";
+
+// Paying-agent signers (PAY-03 escrow, PAY-08 exact) - also via the ./client subpath
+export {
+  signDebitAuthorization,
+  signExactTransfer,
+  computeValidBefore,
+  DEBIT_AUTHORIZATION_TYPES,
+  TRANSFER_WITH_AUTHORIZATION_TYPES,
+  ESCROW_DOMAIN,
+  USDC_DOMAIN,
+  type SignerWalletClient,
+  type DebitAuthorizationInput,
+  type SignedDebitAuthorization,
+  type TransferWithAuthorizationInput,
+  type SignedExactTransfer,
+} from "./client";
+
+// Later wave extends this barrel:
+//   export { requirePayment } from "./gate";        // PAY-04/05 escrow gate
