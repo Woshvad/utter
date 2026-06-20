@@ -15,9 +15,21 @@ export {
   createInMemoryStores,
   type DeployerStores,
   type DeploymentRecord,
+  type DeploymentStatus,
   type DeploymentStore,
   type ResponseCache,
 } from "./stores/memory";
+
+// Health/reconcile loop (DEP-05): desired (records) vs actual (dockerode
+// listContainers) drift + the tick/start/stop loop.
+export {
+  reconcile,
+  createReconcileLoop,
+  type ActualContainer,
+  type ReconcileResult,
+  type ReconcileLoop,
+  type ReconcileLoopOpts,
+} from "./reconcile";
 
 // In-process x402 injection (DEP-01): wrap a resource app in the Phase 2
 // `requirePayment` escrow gate configured with this resource's pricing/escrow.

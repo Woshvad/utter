@@ -15,6 +15,9 @@
 //     bypasses the money path — that wiring lands in Plan 04/05).
 import type { Hex } from "viem";
 
+/** The lifecycle status of a deployment record (the reconcile loop's desired state). */
+export type DeploymentStatus = "running" | "stopped" | "deploying" | "failed";
+
 /** A deployed resource's identity + current version (redeploy semantics, DEP-04). */
 export interface DeploymentRecord {
   /** The ERC-8004 agent id this resource is bound to (stable across redeploys). */
@@ -25,6 +28,8 @@ export interface DeploymentRecord {
   slug: string;
   /** Monotonic deploy version; a bump namespaces the cache for atomic invalidation. */
   deployVersion: number;
+  /** The desired lifecycle status (the reconcile loop drives actual toward this). */
+  status: DeploymentStatus;
   /** Epoch ms of the most recent (re)deploy. */
   updatedAt: number;
 }
