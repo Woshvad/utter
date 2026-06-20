@@ -90,20 +90,80 @@ export interface PoolReader {
   }): Promise<bigint>;
 }
 
+/**
+ * The per-buyer refund idempotency store (mirrors the facilitator's exactly-once
+ * `(idemKey -> result)` store, services/facilitator/src/settle.ts). It records which
+ * buyers have already been refunded for a given `(resourceId, failureWindow)` batch so
+ * a retry after a mid-batch revert SKIPS the already-paid buyers and resumes only the
+ * unpaid remainder - the on-chain `StakingVault.refund` has no replay guard, so the
+ * double-pay defense lives here. The InMemory adapter is the test default; the real
+ * Postgres/Redis adapter (SPEC §10) implements the same contract so the live refund
+ * path swaps adapters by env without change.
+ */
+export interface RefundIdempotencyStore {
+  /** True iff this buyer was already refunded for this `(resourceId, window)` batch. */
+  isRefunded(idemKey: string, payer: `0x${string}`): Promise<boolean>;
+  /** Mark this buyer refunded for this `(resourceId, window)` batch (the tx hash). */
+  markRefunded(idemKey: string, payer: `0x${string}`, txHash: `0x${string}`): Promise<void>;
+}
+
+/** The in-memory refund idempotency store (autonomous test default). */
+export class InMemoryRefundIdempotencyStore implements RefundIdempotencyStore {
+  private readonly done = new Map<string, `0x${string}`>();
+
+  private key(idemKey: string, payer: `0x${string}`): string {
+    return `${idemKey}::${payer.toLowerCase()}`;
+  }
+
+  async isRefunded(idemKey: string, payer: `0x${string}`): Promise<boolean> {
+    return this.done.has(this.key(idemKey, payer));
+  }
+
+  async markRefunded(
+    idemKey: string,
+    payer: `0x${string}`,
+    txHash: `0x${string}`,
+  ): Promise<void> {
+    this.done.set(this.key(idemKey, payer), txHash);
+  }
+}
+
+/**
+ * Derive the deterministic refund batch idempotency key for a `(resourceId, window)`.
+ * The same failing resource + failure window always produces the SAME key, so a retry
+ * re-uses the per-buyer completion records from the first attempt. The off-chain
+ * affected-buyer query is deterministic over the same window, so the same buyer list
+ * is reproduced and the already-refunded buyers are skipped.
+ */
+export function refundBatchIdemKey(
+  resourceId: `0x${string}` | string,
+  window: FailureWindow,
+): string {
+  return `refund:${resourceId}:${window.from}-${window.to}`;
+}
+
 /** Injected clients for {@link executeRefund}. */
 export interface RefundDeps {
   /** The admin wallet (Ownable owner) that submits each refund. Operator-gated key. */
   admin: AdminWriter;
   /** The read-path client for the insurancePoolBalance bound. */
   publicClient: PoolReader;
+  /**
+   * Per-buyer refund idempotency store. When provided, a buyer already refunded for
+   * this `(resourceId, window)` batch is SKIPPED on a retry - never paid twice. Omit
+   * for a fresh in-memory store (a single-process batch with no retry recovery).
+   */
+  idempotencyStore?: RefundIdempotencyStore;
 }
 
 /** The outcome of an {@link executeRefund} batch. */
 export interface RefundResult {
-  /** The buyers refunded, in order. */
+  /** The buyers refunded in THIS call (excludes buyers already refunded on a prior try). */
   refunded: AffectedBuyer[];
-  /** The aggregate refunded in USDC base units. */
+  /** The aggregate refunded in THIS call in USDC base units. */
   totalRefunded: bigint;
+  /** The buyers SKIPPED because a prior attempt already refunded them (idempotency). */
+  skipped: AffectedBuyer[];
 }
 
 /**
@@ -125,34 +185,68 @@ export async function executeRefund(
 
   // Nothing to do: no read, no write.
   if (affected.length === 0) {
-    return { refunded: [], totalRefunded: 0n };
+    return { refunded: [], totalRefunded: 0n, skipped: [] };
   }
 
-  const total = affected.reduce((sum, a) => sum + a.amount, 0n);
+  // IDEMPOTENCY (mirrors the facilitator (idemKey -> result) store): partition the
+  // affected buyers into those a PRIOR attempt already refunded (skip - never re-pay)
+  // and the unpaid remainder this call must refund. A retry after a mid-batch revert
+  // resumes from the remainder; buyers 1..i are not paid a second time. With no store
+  // injected, a fresh in-memory store is used (single-process batch, no cross-retry
+  // recovery), so the unconditional behavior is unchanged for the non-retry path.
+  const idempotencyStore: RefundIdempotencyStore =
+    deps.idempotencyStore ?? new InMemoryRefundIdempotencyStore();
+  const idemKey = refundBatchIdemKey(resourceId, window);
 
-  // Bound the aggregate by the on-chain pool BEFORE any write (over-refund refused).
+  const skipped: AffectedBuyer[] = [];
+  const pending: AffectedBuyer[] = [];
+  for (const buyer of affected) {
+    if (await idempotencyStore.isRefunded(idemKey, buyer.payer)) {
+      skipped.push(buyer);
+    } else {
+      pending.push(buyer);
+    }
+  }
+
+  // Nothing left to refund: every affected buyer was already paid on a prior attempt.
+  if (pending.length === 0) {
+    return { refunded: [], totalRefunded: 0n, skipped };
+  }
+
+  // Bound the REMAINING aggregate (the unpaid buyers only) by the on-chain pool BEFORE
+  // any write (over-refund refused). On a retry the pool has already shrunk by the
+  // buyers paid in the prior attempt, so bounding the remainder - not the full batch -
+  // is the correct mirror of the on-chain OverRefund guard.
+  const remaining = pending.reduce((sum, a) => sum + a.amount, 0n);
   const poolBalance = await deps.publicClient.readContract({
     address: STAKING_VAULT,
     abi: stakingVaultAbi,
     functionName: "insurancePoolBalance",
     args: [],
   });
-  if (total > poolBalance) {
+  if (remaining > poolBalance) {
     throw new Error(
-      `executeRefund: aggregate refund ${total} exceeds insurance pool balance ${poolBalance} (over-refund refused)`,
+      `executeRefund: remaining refund ${remaining} exceeds insurance pool balance ${poolBalance} (over-refund refused)`,
     );
   }
 
-  for (const buyer of affected) {
-    await deps.admin.writeContract({
+  const refunded: AffectedBuyer[] = [];
+  for (const buyer of pending) {
+    // Write THEN mark: a revert throws before markRefunded, so a buyer is recorded
+    // ONLY after its refund tx is broadcast. A retry then skips the recorded buyers
+    // and re-runs only the one that reverted plus the unstarted remainder.
+    const txHash = await deps.admin.writeContract({
       address: STAKING_VAULT,
       abi: stakingVaultAbi,
       functionName: "refund",
       args: [buyer.payer, buyer.amount],
     });
+    await idempotencyStore.markRefunded(idemKey, buyer.payer, txHash);
+    refunded.push(buyer);
   }
 
-  return { refunded: affected, totalRefunded: total };
+  const totalRefunded = refunded.reduce((sum, a) => sum + a.amount, 0n);
+  return { refunded, totalRefunded, skipped };
 }
 
 /** Injected client for the {@link withdrawBond} passthrough. */

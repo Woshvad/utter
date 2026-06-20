@@ -14,6 +14,7 @@ import {
   identifyAffectedBuyers,
   executeRefund,
   withdrawBond,
+  InMemoryRefundIdempotencyStore,
   type SettledPayment,
 } from "../src/refund";
 
@@ -180,6 +181,106 @@ describe("executeRefund (STK-03)", () => {
     );
     expect(admin.writeContract).not.toHaveBeenCalled();
     expect(result.totalRefunded).toBe(0n);
+  });
+
+  describe("idempotency on a mid-batch revert + retry (WR-01)", () => {
+    const BUYER_C = `0x${"c".repeat(40)}` as `0x${string}`;
+
+    /**
+     * An admin that reverts on the Nth refund write (1-based) once, then succeeds on
+     * every subsequent call (mirrors a transient on-chain revert that clears on retry).
+     */
+    function flakyAdmin(revertOnCall: number) {
+      const calls: Array<{ functionName: string; args: unknown[] }> = [];
+      let n = 0;
+      let reverted = false;
+      const writeContract = vi.fn(async (a: { functionName: string; args: unknown[] }) => {
+        n += 1;
+        if (n === revertOnCall && !reverted) {
+          reverted = true;
+          throw new Error("on-chain revert (simulated): refund tx N reverted");
+        }
+        calls.push({ functionName: a.functionName, args: a.args });
+        return `0x${"22".repeat(32)}` as `0x${string}`;
+      });
+      return { client: { writeContract } as never, writeContract, calls };
+    }
+
+    it("a batch that reverts on buyer 2 of 3, retried, pays buyer 1 exactly once and completes 2+3", async () => {
+      const pool = mockPool(10_000_000n);
+      const idempotencyStore = new InMemoryRefundIdempotencyStore();
+      const payments: SettledPayment[] = [
+        payment({ payer: BUYER_A, amount: 100_000n }),
+        payment({ payer: BUYER_B, amount: 200_000n }),
+        payment({ payer: BUYER_C, amount: 300_000n }),
+      ];
+
+      // First attempt: write for A succeeds (recorded), write for B reverts -> throw.
+      const first = flakyAdmin(2);
+      await expect(
+        executeRefund(
+          { admin: first.client, publicClient: pool.client, idempotencyStore },
+          payments,
+          RESOURCE,
+          window,
+        ),
+      ).rejects.toThrow(/revert/i);
+      // Only buyer A was paid (and recorded) before the revert on B.
+      expect(first.calls).toEqual([{ functionName: "refund", args: [BUYER_A, 100_000n] }]);
+
+      // Retry: the same window reproduces the same buyer list. Buyer A is SKIPPED
+      // (already refunded); only B + C are paid this time.
+      const second = mockAdmin();
+      const result = await executeRefund(
+        { admin: second.client, publicClient: pool.client, idempotencyStore },
+        payments,
+        RESOURCE,
+        window,
+      );
+      expect(second.calls).toEqual([
+        { functionName: "refund", args: [BUYER_B, 200_000n] },
+        { functionName: "refund", args: [BUYER_C, 300_000n] },
+      ]);
+      expect(result.refunded).toEqual([
+        { payer: BUYER_B, amount: 200_000n },
+        { payer: BUYER_C, amount: 300_000n },
+      ]);
+      expect(result.skipped).toEqual([{ payer: BUYER_A, amount: 100_000n }]);
+
+      // Buyer A was paid EXACTLY ONCE across both attempts (no double-pay).
+      const aPayments =
+        first.calls.filter((c) => (c.args as unknown[])[0] === BUYER_A).length +
+        second.calls.filter((c) => (c.args as unknown[])[0] === BUYER_A).length;
+      expect(aPayments).toBe(1);
+    });
+
+    it("a fully-completed batch retried is a total no-op (every buyer skipped)", async () => {
+      const pool = mockPool(10_000_000n);
+      const idempotencyStore = new InMemoryRefundIdempotencyStore();
+      const payments: SettledPayment[] = [
+        payment({ payer: BUYER_A, amount: 100_000n }),
+        payment({ payer: BUYER_B, amount: 200_000n }),
+      ];
+      const first = mockAdmin();
+      await executeRefund(
+        { admin: first.client, publicClient: pool.client, idempotencyStore },
+        payments,
+        RESOURCE,
+        window,
+      );
+      expect(first.calls).toHaveLength(2);
+
+      const second = mockAdmin();
+      const result = await executeRefund(
+        { admin: second.client, publicClient: pool.client, idempotencyStore },
+        payments,
+        RESOURCE,
+        window,
+      );
+      expect(second.writeContract).not.toHaveBeenCalled();
+      expect(result.refunded).toHaveLength(0);
+      expect(result.skipped).toHaveLength(2);
+    });
   });
 });
 
