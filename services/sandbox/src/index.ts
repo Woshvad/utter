@@ -49,3 +49,28 @@ export {
   type EgressMechanism,
   type EgressRuleset,
 } from "./egress/firewall";
+
+// --- Pre-publish static scans + operator-gated dynamic probe (Plan 02 Task 3) ---
+export {
+  DISALLOWED_IMPORTS,
+  scanImports,
+  type ImportViolation,
+} from "./prepublish/import-scan";
+export {
+  scanSecrets,
+  shannonEntropy,
+  type Bundle,
+  type SecretViolation,
+} from "./prepublish/secret-scan";
+export {
+  runPrePublishStaticChecks,
+  type PrePublishResult,
+  type PrePublishViolation,
+} from "./prepublish/checks";
+export {
+  DEFAULT_PROBE_TARGETS,
+  RequiresProvisionedHostError,
+  createOperatorGatedProbe,
+  type DynamicHostProbe,
+  type ProbeTarget,
+} from "./prepublish/probe";
