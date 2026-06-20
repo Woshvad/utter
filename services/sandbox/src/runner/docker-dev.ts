@@ -16,7 +16,8 @@
 // execution timeout by killing the container at `spec.timeoutSeconds`.
 import type Docker from "dockerode";
 import { toDockerodeCreateOptions } from "./dockerode-spec";
-import type { RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./types";
+import { demuxDockerLogs } from "./demux";
+import type { RunErrorSink, RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./types";
 
 /**
  * The local, NON-SECURITY-BOUNDARY runner. Wraps dockerode with the hardened
@@ -25,8 +26,17 @@ import type { RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./t
  */
 export class DockerDevRunner implements SandboxRunner {
   readonly backend = "docker-dev" as const;
+  private readonly onError: RunErrorSink;
 
-  constructor(private readonly docker: Docker) {}
+  constructor(
+    private readonly docker: Docker,
+    onError?: RunErrorSink,
+  ) {
+    // A failed timeout-kill means an untrusted, possibly over-budget container kept
+    // running past its deadline — surface it, never swallow (WR-06). Default sink is
+    // a non-secret console.warn (id + message only).
+    this.onError = onError ?? ((e) => console.warn(`[docker-dev] ${e.phase} failed container=${e.id}: ${e.message}`));
+  }
 
   async run(spec: RunSpec): Promise<RunHandle> {
     if (spec.runtime !== "runc") {
@@ -36,9 +46,16 @@ export class DockerDevRunner implements SandboxRunner {
     const container = await this.docker.createContainer(toDockerodeCreateOptions(spec));
     await container.start();
 
-    // Runner-enforced timeout: kill the container at the deadline (SBX-04).
+    // Runner-enforced timeout: kill the container at the deadline (SBX-04). A failed
+    // kill is surfaced (WR-06) — it means the deadline was NOT enforced.
     const deadline = setTimeout(() => {
-      void container.kill().catch(() => undefined);
+      void container.kill().catch((err) => {
+        this.onError({
+          phase: "timeout-kill",
+          id: container.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
     }, spec.timeoutSeconds * 1000);
 
     return {
@@ -56,7 +73,16 @@ export class DockerDevRunner implements SandboxRunner {
   }
 
   async stop(id: string): Promise<void> {
-    await this.docker.getContainer(id).kill().catch(() => undefined);
+    // A failed stop is surfaced (WR-06): a still-running untrusted container is a
+    // security-relevant event. Swallow the rejection so stop() stays idempotent,
+    // but never silently.
+    await this.docker.getContainer(id).kill().catch((err) => {
+      this.onError({
+        phase: "stop",
+        id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   async logs(id: string): Promise<RunLogs> {
@@ -64,8 +90,9 @@ export class DockerDevRunner implements SandboxRunner {
       stdout: true,
       stderr: true,
     })) as unknown as Buffer;
-    // Plain (non-demuxed) capture is enough for the dev/test path.
-    return { stdout: buf.toString("utf8"), stderr: "" };
+    // Demultiplex Docker's multiplexed frame stream so stdout/stderr are separated
+    // and frame headers stripped (WR-05) — stderr classification depends on it.
+    return demuxDockerLogs(buf);
   }
 
   async inspect(id: string): Promise<RunInspect> {

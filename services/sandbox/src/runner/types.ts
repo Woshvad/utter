@@ -101,6 +101,24 @@ export interface RunLogs {
   stderr: string;
 }
 
+/**
+ * A surfaced runner enforcement failure (WR-06). A failed timeout-kill or stop
+ * means an untrusted container kept running past its deadline — a
+ * security-relevant event that must be visible, not swallowed. NEVER carries
+ * secret material (only the container id + a phase + an error message).
+ */
+export interface RunError {
+  /** Which enforcement action failed. */
+  phase: "timeout-kill" | "stop";
+  /** The container id involved. */
+  id: string;
+  /** The error message (no secrets). */
+  message: string;
+}
+
+/** The error sink a runner calls when an enforcement action fails (WR-06). */
+export type RunErrorSink = (error: RunError) => void;
+
 /** Backend-reported inspection of a launched container. */
 export interface RunInspect {
   id: string;

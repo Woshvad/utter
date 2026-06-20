@@ -26,12 +26,15 @@ export {
 export type {
   ContainerRuntime,
   RunBackend,
+  RunError,
+  RunErrorSink,
   RunHandle,
   RunInspect,
   RunLogs,
   RunSpec,
   SandboxRunner,
 } from "./runner/types";
+export { demuxDockerLogs, type DemuxedLogs } from "./runner/demux";
 export {
   buildRunSpec,
   type BuildRunSpecOptions,

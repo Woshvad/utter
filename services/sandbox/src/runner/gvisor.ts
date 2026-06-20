@@ -15,7 +15,8 @@
 // timeout by killing the container at `spec.timeoutSeconds`.
 import type Docker from "dockerode";
 import { toDockerodeCreateOptions } from "./dockerode-spec";
-import type { RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./types";
+import { demuxDockerLogs } from "./demux";
+import type { RunErrorSink, RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./types";
 
 /**
  * The trusted isolation runner (runtime runsc). Operator-gated: requires runsc
@@ -24,8 +25,17 @@ import type { RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./t
  */
 export class GvisorRunner implements SandboxRunner {
   readonly backend = "gvisor" as const;
+  private readonly onError: RunErrorSink;
 
-  constructor(private readonly docker: Docker) {}
+  constructor(
+    private readonly docker: Docker,
+    onError?: RunErrorSink,
+  ) {
+    // On the trusted boundary a failed timeout-kill is especially important: it
+    // means an untrusted container ran past its enforced deadline. Surface it,
+    // never swallow (WR-06). Default sink is a non-secret console.warn.
+    this.onError = onError ?? ((e) => console.warn(`[gvisor] ${e.phase} failed container=${e.id}: ${e.message}`));
+  }
 
   async run(spec: RunSpec): Promise<RunHandle> {
     if (spec.runtime !== "runsc") {
@@ -39,7 +49,13 @@ export class GvisorRunner implements SandboxRunner {
     await container.start();
 
     const deadline = setTimeout(() => {
-      void container.kill().catch(() => undefined);
+      void container.kill().catch((err) => {
+        this.onError({
+          phase: "timeout-kill",
+          id: container.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
     }, spec.timeoutSeconds * 1000);
 
     return {
@@ -57,7 +73,13 @@ export class GvisorRunner implements SandboxRunner {
   }
 
   async stop(id: string): Promise<void> {
-    await this.docker.getContainer(id).kill().catch(() => undefined);
+    await this.docker.getContainer(id).kill().catch((err) => {
+      this.onError({
+        phase: "stop",
+        id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   async logs(id: string): Promise<RunLogs> {
@@ -65,7 +87,9 @@ export class GvisorRunner implements SandboxRunner {
       stdout: true,
       stderr: true,
     })) as unknown as Buffer;
-    return { stdout: buf.toString("utf8"), stderr: "" };
+    // Demultiplex Docker's multiplexed frame stream so stdout/stderr are separated
+    // and frame headers stripped (WR-05) — stderr classification depends on it.
+    return demuxDockerLogs(buf);
   }
 
   async inspect(id: string): Promise<RunInspect> {
