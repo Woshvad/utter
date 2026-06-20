@@ -51,3 +51,17 @@ export type {
   TakedownRunner,
   RegistryAdmin,
 } from "./moderation/takedown.js";
+
+// --- Publish pipeline: the composed moderation->bond->score->mint->index gate (MKT-03) ---
+export { createPublishPipeline, PublishBlocked, PublishUnverified } from "./publish.js";
+export type {
+  PublishPipeline,
+  PublishPipelineDeps,
+  PublishRequest,
+  PublishResult,
+  PipelineProber,
+  PipelineBondGate,
+  PipelineIdentity,
+  InitialProbeResult,
+  BondReader,
+} from "./publish.js";

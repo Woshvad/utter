@@ -45,7 +45,8 @@ const FAIL_PROBE: ProbeResult = {
 function buildSpec(prompt = "Return the current weather for a city") {
   const card = buildAgentCard({
     prompt,
-    pricing: { model: "metered", base: "5000", perKB: "100", computeMultiplier: "200" },
+    runtime: "node",
+    pricing: { model: "metered", base: "5000", perKB: "100", max: "10000" },
   });
   return { prompt, card };
 }

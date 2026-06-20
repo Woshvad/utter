@@ -26,12 +26,24 @@ importers:
       '@utter/ai-runtime':
         specifier: workspace:*
         version: link:../../packages/ai-runtime
+      '@utter/ai-scorer':
+        specifier: workspace:*
+        version: link:../../packages/ai-scorer
       '@utter/chain':
         specifier: workspace:*
         version: link:../../packages/chain
+      '@utter/erc8004':
+        specifier: workspace:*
+        version: link:../../packages/erc8004
+      '@utter/facilitator':
+        specifier: workspace:*
+        version: link:../../services/facilitator
       '@utter/sandbox':
         specifier: workspace:*
         version: link:../../services/sandbox
+      '@utter/staking':
+        specifier: workspace:*
+        version: link:../../packages/staking
       '@utter/x402-arc':
         specifier: workspace:*
         version: link:../../packages/x402-arc

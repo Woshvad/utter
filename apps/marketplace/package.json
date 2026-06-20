@@ -11,8 +11,12 @@
   },
   "dependencies": {
     "@utter/ai-runtime": "workspace:*",
+    "@utter/ai-scorer": "workspace:*",
     "@utter/chain": "workspace:*",
+    "@utter/erc8004": "workspace:*",
+    "@utter/facilitator": "workspace:*",
     "@utter/sandbox": "workspace:*",
+    "@utter/staking": "workspace:*",
     "@utter/x402-arc": "workspace:*",
     "hono": "4.12.26"
   }
