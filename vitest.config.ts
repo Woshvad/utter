@@ -6,7 +6,10 @@ import { defineConfig } from "vitest/config";
 // network timeout (Arc Testnet public RPC can be slow / rate-limited).
 export default defineConfig({
   test: {
-    include: ["packages/*/test/**/*.test.ts"],
+    include: [
+      "packages/*/test/**/*.test.ts",
+      "services/*/test/**/*.test.ts",
+    ],
     testTimeout: 30000,
     hookTimeout: 30000,
   },

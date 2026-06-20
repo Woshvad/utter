@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test:chain": "vitest run packages/chain",
+    "test:x402": "vitest run packages/x402-arc",
+    "test:facilitator": "vitest run services/facilitator",
     "test:contracts": "forge test --root contracts",
     "test": "vitest run"
   },

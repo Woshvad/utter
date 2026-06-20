@@ -1,0 +1,23 @@
+{
+  "description": "Echo demo fixtures the Phase 2 response gate classifies (success | declared_error | malfunction). 'expectedClass' is what classifyResponse must return for each 'response' body; 'input' is the request the echo handler receives.",
+  "cases": [
+    {
+      "label": "success",
+      "input": { "text": "hello" },
+      "response": { "echo": "hello", "length": 5 },
+      "expectedClass": "success"
+    },
+    {
+      "label": "declared_error",
+      "input": { "text": 123 },
+      "response": { "error": "text must be a string", "code": "BAD_INPUT" },
+      "expectedClass": "declared_error"
+    },
+    {
+      "label": "malfunction",
+      "input": { "text": "hello" },
+      "response": { "unexpected": "field", "length": "not-an-integer" },
+      "expectedClass": "malfunction"
+    }
+  ]
+}
