@@ -185,19 +185,42 @@ export function requirePayment(opts: RequirePaymentOpts) {
     // (6) Classify the cloned body and act on the class.
     const kind = opts.classifier(body);
 
+    // Settle `amount` for this nonce and FAIL CLOSED: a thrown call, a non-200,
+    // an unsuccessful body, or a missing receipt all release the reservation (so
+    // the buyer's cap is never left locked) and surface a 502. The receipt header
+    // is set ONLY when the debit genuinely landed. This closes the free-compute /
+    // silent-no-charge leak (CR-01) and the dangling-reservation leak (CR-02): a
+    // settle failure is a facilitator/relayer malfunction (NOT the buyer's fault),
+    // so the release carries the "settle_failed" strike reason but never a debit.
+    const settleOrRelease = async (amount: bigint, responseBody: string): Promise<void> => {
+      let settle: { status: number; json: Record<string, unknown> };
+      try {
+        settle = await postJson(fetcher, `${facilitator}/settle`, {
+          payment,
+          amount: amount.toString(),
+          idemKey: payment.authorization.nonce as Hex,
+          response: responseBody,
+        });
+      } catch {
+        await release(fetcher, facilitator, payment, accepts.payTo, "settle_failed");
+        c.res = c.json({ error: "settlement_failed" }, 502);
+        return;
+      }
+      if (settle.status !== 200 || settle.json.success !== true || !settle.json.receipt) {
+        await release(fetcher, facilitator, payment, accepts.payTo, "settle_failed");
+        c.res = c.json({ error: "settlement_failed" }, 502);
+        return;
+      }
+      c.header("X-PAYMENT-RESPONSE", b64(settle.json.receipt));
+    };
+
     if (kind === "success") {
       // SUCCESS: debit min(computed, cap) and expose the receipt. The ORIGINAL body
       // still streams to the client (it was never consumed - clone-before-read).
       const cap = BigInt(payment.authorization.maxAmount);
       const bodyBytes = Buffer.byteLength(body, "utf8");
       const amount = computeMeteredAmount(opts.pricing, bodyBytes, handlerMs, cap);
-      const settle = await postJson(fetcher, `${facilitator}/settle`, {
-        payment,
-        amount: amount.toString(),
-        idemKey: payment.authorization.nonce as Hex,
-        response: body,
-      });
-      c.header("X-PAYMENT-RESPONSE", b64(settle.json.receipt ?? settle.json));
+      await settleOrRelease(amount, body);
       return;
     }
 
@@ -210,18 +233,24 @@ export function requirePayment(opts: RequirePaymentOpts) {
     }
 
     if (kind === "declared_error") {
-      // A non-free error policy applies the configured error price (STILL no strike -
-      // bad buyer input never strikes the creator). The `free` default fully
-      // satisfies PAY-06; the priced branch is the documented errorPolicy switch.
-      // Phase 2 ships the free default; a priced policy debits the error price here.
+      // PRICED declared error (bad buyer input; STILL no strike - bad input never
+      // strikes the creator). Charge min(errorPrice, cap) - NEVER the full cap (a
+      // declared error is not a metered success). When no errorPrice is configured
+      // (absent or "0") this is FREE: release WITHOUT a strikeReason, no debit.
       const cap = BigInt(payment.authorization.maxAmount);
-      const settle = await postJson(fetcher, `${facilitator}/settle`, {
-        payment,
-        amount: cap.toString(),
-        idemKey: payment.authorization.nonce as Hex,
-        response: body,
-      });
-      c.header("X-PAYMENT-RESPONSE", b64(settle.json.receipt ?? settle.json));
+      let errorPrice = 0n;
+      try {
+        errorPrice = BigInt(opts.pricing.errorPrice ?? "0");
+      } catch {
+        errorPrice = 0n;
+      }
+      if (errorPrice <= 0n) {
+        // No error price set: a priced policy with no price is treated as free.
+        await release(fetcher, facilitator, payment, accepts.payTo);
+        return;
+      }
+      const amount = errorPrice < cap ? errorPrice : cap;
+      await settleOrRelease(amount, body);
       return;
     }
 

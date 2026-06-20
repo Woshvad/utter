@@ -42,6 +42,13 @@ export interface Pricing {
   computeMultiplier: string;
   /** Optional MAX_RESPONSE_BYTES cap on the size term (bytes). */
   maxResponseBytes?: number;
+  /**
+   * Optional flat charge for a declared (bad-buyer-input) error under the `priced`
+   * error policy (base units, decimal string). The gate charges
+   * `min(errorPrice, cap)` - NEVER the full cap. Absent or "0" means a priced
+   * declared error is FREE (release, no debit). The signed cap is the hard ceiling.
+   */
+  errorPrice?: string;
 }
 
 /** The locked EIP-712 domain carried in the escrow entry's `extra.eip712`. */
