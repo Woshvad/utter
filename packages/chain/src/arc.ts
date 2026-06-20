@@ -2,12 +2,7 @@
 // Source: Utter-SPEC.md §6 (Network table), verified live this session against
 // https://docs.arc.io/arc/references/connect-to-arc and the live RPC
 // (eth_chainId -> 0x4cef52 = 5042002).
-import {
-  createPublicClient,
-  defineChain,
-  http,
-  type PublicClient,
-} from "viem";
+import { createPublicClient, defineChain, http } from "viem";
 
 /**
  * The Arc Testnet Viem chain object — the single source of truth for chain id,
@@ -45,7 +40,7 @@ export const arcTestnet = defineChain({
  * (Blockdaemon/dRPC/QuickNode) via `ARC_RPC_URL` when the public endpoint
  * rate-limits (RESEARCH Pitfall 4). Falls back to the chain's default HTTP RPC.
  */
-export function createArcPublicClient(rpcUrl?: string): PublicClient {
+export function createArcPublicClient(rpcUrl?: string) {
   return createPublicClient({
     chain: arcTestnet,
     transport: http(rpcUrl ?? arcTestnet.rpcUrls.default.http[0]),
