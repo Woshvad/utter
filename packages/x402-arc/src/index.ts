@@ -15,9 +15,33 @@ export {
   DEFAULT_RESULT_TTL_SECONDS,
 } from "./store";
 
-// Wave 1/2 modules extend this barrel:
-//   export { buildAccepts } from "./accepts";       // PAY-01 402 builder
+// 402 accepts builder (PAY-01) + the pinned wire constants and entry types
+export {
+  buildAccepts,
+  X402_VERSION,
+  ARC_CAIP2_NETWORK,
+  ESCROW_EIP712_DOMAIN,
+  USDC_EIP712_DOMAIN,
+  type Pricing,
+  type EscrowEip712,
+  type AcceptsEntry,
+  type AcceptsBody,
+  type ExactOption,
+  type BuildAcceptsOpts,
+} from "./accepts";
+
+// Metered settle math (PAY-07): base + perKB*size + compute, clamped to cap
+export { computeMeteredAmount } from "./metering";
+
+// PaymentPayload base64 codec (ASVS V5 validated decode)
+export {
+  encodePayment,
+  decodePayment,
+  type PaymentPayload,
+  type DebitAuthorizationMessage,
+} from "./codec";
+
+// Wave 2 (Task 2) extends this barrel:
 //   export { requirePayment } from "./gate";        // PAY-04/05/06 escrow gate
-//   export { computeMeteredAmount } from "./metering"; // PAY-07 metered math
-//   export { encodePayment, decodePayment } from "./codec";
-//   export { signDebitAuthorization } from "./client"; // PAY-03 (also via ./client subpath)
+//   export { classifyResponse, buildClassifier } from "./classify"; // PAY-06
+//   export { signDebitAuthorization, signExactTransfer } from "./client"; // PAY-03/08
