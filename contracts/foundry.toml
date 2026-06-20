@@ -7,10 +7,13 @@ script = "script"
 solc_version = "0.8.28"
 optimizer = true
 optimizer_runs = 200
-# Pin paris for Arc Testnet compatibility. These contracts use no cancun
-# features (no transient storage, no MCOPY), so paris is the safe target
-# per 01-RESEARCH Open Question 2 / assumption A1.
-evm_version = "paris"
+# Arc Testnet supports cancun: an eth_call state-override probe on
+# https://rpc.testnet.arc.network executed MCOPY (0x5e) successfully while a
+# 0xfe INVALID control reverted (InvalidFEOpcode), confirming real opcode
+# support. This resolves 01-RESEARCH Open Question 2 / assumption A1 (which
+# precautionarily pinned paris). cancun is required because OpenZeppelin
+# v5.6.1 EIP712 transitively compiles Bytes.sol (MCOPY) under solc 0.8.28.
+evm_version = "cancun"
 fuzz = { runs = 1000 }
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
