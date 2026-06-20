@@ -74,8 +74,8 @@ export function buildEchoQuote(opts: {
 
 /** Build the echo response classifier from the bundled echo openapi.json. */
 export function buildEchoClassifier(): ClassifyResponse {
-  // Clone the doc - buildClassifier mutates `$id` on the object it is given.
-  return buildClassifier({ ...(echoOpenapi as Record<string, unknown>) });
+  // buildClassifier clones the doc internally (IN-05), so no defensive spread here.
+  return buildClassifier(echoOpenapi as Record<string, unknown>);
 }
 
 /**

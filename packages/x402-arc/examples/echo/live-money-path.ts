@@ -41,6 +41,7 @@ import {
   erc20Abi,
   USDC,
   PAYMENT_ESCROW,
+  PAYMENT_SPLITTER,
 } from "@utter/chain";
 import {
   signDebitAuthorization,
@@ -164,7 +165,10 @@ async function main(): Promise<void> {
     publicClient,
     perBuyerLock: createInMemoryBuyerLock(),
     escrowAddress: PAYMENT_ESCROW,
-    splitterAddress: PAYMENT_ESCROW, // exact path unused here (escrow scheme only)
+    // The exact path is unused in this escrow-only live run; pass the real
+    // PAYMENT_SPLITTER (not the escrow address) so exercising the exact path through
+    // this script later would target the correct contract, never the escrow (IN-03).
+    splitterAddress: PAYMENT_SPLITTER,
     usdcAddress: USDC,
     maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
     settleBufferSeconds: SETTLE_BUFFER_SECONDS,

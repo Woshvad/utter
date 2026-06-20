@@ -32,10 +32,13 @@ export function buildClassifier(openapi: Record<string, unknown>): ClassifyRespo
   // strict:false tolerates the OpenAPI 3.1 dialect; addFormats supplies
   // date-time/uri/email/etc. AJV would otherwise omit.
   const ajv = addFormats(new Ajv({ allErrors: true, strict: false }));
-  if (openapi.$id === undefined) {
-    openapi.$id = "openapi.json";
+  // Clone the doc before setting `$id` so we never mutate the caller's object (a
+  // shared/frozen openapi doc would otherwise be mutated or throw) - IN-05.
+  const doc = { ...openapi };
+  if (doc.$id === undefined) {
+    doc.$id = "openapi.json";
   }
-  ajv.addSchema(openapi);
+  ajv.addSchema(doc);
 
   const validateSuccess: ValidateFunction | undefined = ajv.getSchema(SUCCESS_REF);
   const validateError: ValidateFunction | undefined = ajv.getSchema(ERROR_REF);

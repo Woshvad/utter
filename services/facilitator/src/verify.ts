@@ -16,8 +16,14 @@
 //
 // Per-buyer serialization: the balance read + outstanding sum + reserve are taken
 // under a per-buyer lock so two concurrent verifies against one balance cannot both
-// reserve. The in-memory mutex here is the test default; the Redis `SET NX PX`
-// equivalent is the real-adapter lock (pgRedis store, later wave).
+// reserve. This lock covers the OFF-CHAIN double-reserve race ONLY - it does NOT
+// span the eventual on-chain `debit`, so it is not authoritative against true
+// balance TOCTOU. The on-chain `debit` revert (insufficient internal balance /
+// replayed nonce) is the SOLE final authority against a genuine balance race; this
+// off-chain accounting is defense in depth that can only ever reject conservatively
+// (over-count, reject safely), never permit an overspend. The in-memory mutex here
+// is the test default; the Redis `SET NX PX` equivalent is the real-adapter lock
+// (pgRedis store, later wave).
 import {
   recoverTypedDataAddress,
   type Address,
@@ -185,7 +191,8 @@ export async function verifyAndReserve(
 
   // (3)-(5) The balance read + outstanding sum + nonce check + reserve are taken
   // atomically per buyer so two concurrent verifies against one balance cannot
-  // both reserve.
+  // both reserve (the OFF-CHAIN double-reserve guard only - the on-chain debit
+  // revert remains the sole authority against true balance TOCTOU).
   return deps.perBuyerLock.runExclusive(buyer, async (): Promise<VerifyResult> => {
     // (3) On-chain available balance = balanceOf(buyer) - outstandingReserved(buyer).
     // Read decimals-agnostic base units; never compare a decimals-scaled number.
