@@ -14,4 +14,13 @@
 // credential server-side, so the untrusted endpoint never sees a real key
 // (SBX-03). Upstream allowance is an ALLOWLIST, never a denylist.
 
-export {};
+// Short-lived resource-scoped token mint/verify (HS256, aud=resourceId, tight exp).
+export { mintResourceToken, verifyResourceToken } from "./token";
+
+// Server-side token -> resource -> upstream credential mapping (keys never leave
+// the proxy).
+export {
+  resolveUpstreamCredential,
+  type UpstreamCredential,
+  type CredentialResolver,
+} from "./credentials";
