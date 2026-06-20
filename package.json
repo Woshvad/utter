@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test:chain": "vitest run packages/chain",
+    "test:contracts": "forge test --root contracts",
     "test": "vitest run"
   },
   "devDependencies": {
