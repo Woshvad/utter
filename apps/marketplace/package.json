@@ -13,6 +13,7 @@
     "@utter/ai-runtime": "workspace:*",
     "@utter/chain": "workspace:*",
     "@utter/sandbox": "workspace:*",
-    "@utter/x402-arc": "workspace:*"
+    "@utter/x402-arc": "workspace:*",
+    "hono": "4.12.26"
   }
 }

@@ -11,6 +11,7 @@ import { createCardApp, type CardSource } from "../src/card-route";
 
 const SPEC = {
   prompt: "weather data for a city",
+  runtime: "node" as const,
   pricing: { model: "metered" as const, base: "1000", perKB: "10", max: "100000" },
 };
 
@@ -56,7 +57,11 @@ describe("createCardApp - GET /.well-known/agent-card.json (MKT-01)", () => {
   it("serves the finalized identity/health/bond (not placeholders)", async () => {
     const app = createCardApp({ source: source({ [KNOWN]: finalizedCard() }) });
     const res = await app.request(`/${KNOWN}/.well-known/agent-card.json`);
-    const body = (await res.json()) as Record<string, Record<string, unknown>>;
+    const body = (await res.json()) as {
+      identity: Record<string, unknown>;
+      health: Record<string, unknown>;
+      bond: Record<string, unknown>;
+    };
     expect(body.identity.agentId).toBe("42");
     expect(body.health.verified).toBe(true);
     expect(body.health.score).toBe(0.99);

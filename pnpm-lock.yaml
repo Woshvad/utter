@@ -35,6 +35,9 @@ importers:
       '@utter/x402-arc':
         specifier: workspace:*
         version: link:../../packages/x402-arc
+      hono:
+        specifier: 4.12.26
+        version: 4.12.26
 
   packages/ai-runtime:
     dependencies:
