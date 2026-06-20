@@ -1,4 +1,4 @@
-// @utter/chain — the single import point for the Arc Testnet chain foundation
+// @utter/chain - the single import point for the Arc Testnet chain foundation
 // (CHAIN-02). Every later package imports chain constants, the ERC-20 ABI, the
 // public-client factory, and the runtime-decimals USDC helper from here.
 

@@ -5,12 +5,12 @@
 import { createPublicClient, defineChain, http } from "viem";
 
 /**
- * The Arc Testnet Viem chain object — the single source of truth for chain id,
+ * The Arc Testnet Viem chain object - the single source of truth for chain id,
  * RPC/WS endpoints, explorer, and the Multicall3 address.
  *
  * IMPORTANT: `nativeCurrency.decimals` is 18 because it describes the NATIVE GAS
  * token (USDC as 18-decimal native value). This number is the GAS lens ONLY and
- * MUST NEVER be reused for ERC-20 USDC amount math — the ERC-20 interface is
+ * MUST NEVER be reused for ERC-20 USDC amount math - the ERC-20 interface is
  * 6-decimal and that value must be read from `decimals()` at runtime
  * (the decimals trap; see SPEC §6 + `usdc.ts`/`readUsdcBalance`).
  */

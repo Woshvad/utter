@@ -1,4 +1,4 @@
-// Minimal ERC-20 ABI — the four view functions Phase 0 needs (CHAIN-02).
+// Minimal ERC-20 ABI - the four view functions Phase 0 needs (CHAIN-02).
 // `decimals` is the load-bearing entry: it is read at runtime on every USDC
 // amount path so no consumer hardcodes 6 or 18 (the decimals trap; SPEC §6).
 export const erc20Abi = [

@@ -1,4 +1,4 @@
-// Live-RPC integration test — the Phase 0 Definition of Done (CHAIN-01/02/03).
+// Live-RPC integration test - the Phase 0 Definition of Done (CHAIN-01/02/03).
 // Connects to the live Arc Testnet RPC and asserts: chainId 5042002, the pinned
 // §6 address export shape, decimals===6 read FROM CHAIN, and a bigint balance
 // read for a wallet. Requires `.env.local` (gitignored) with ARC_RPC_URL +
@@ -45,7 +45,7 @@ describe("Arc Testnet chain foundation", () => {
   });
 
   it("reads USDC decimals at runtime (6, ERC-20 interface)", async () => {
-    // CHAIN-03: the `6` here is asserted as a value READ FROM CHAIN — the only
+    // CHAIN-03: the `6` here is asserted as a value READ FROM CHAIN - the only
     // place 6 may appear. It is never used as a conversion literal in src/.
     const { decimals } = await readUsdcBalance(client, wallet);
     expect(decimals).toBe(6);
@@ -57,7 +57,7 @@ describe("Arc Testnet chain foundation", () => {
     expect(typeof raw).toBe("bigint");
     // Funded-wallet check (RESEARCH Pitfall 5; faucet https://faucet.circle.com).
     expect(raw).toBeGreaterThan(0n);
-    // Never log a private key — only the formatted balance.
+    // Never log a private key - only the formatted balance.
     console.log(`USDC balance: ${formatted}`);
   });
 }, 30_000);
