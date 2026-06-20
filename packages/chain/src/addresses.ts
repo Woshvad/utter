@@ -37,3 +37,23 @@ export const STABLEFX_FX_ESCROW = "0x867650F5eAe8df91445971f14d89fd84F0C9a9f8" a
 
 /** CREATE2 Factory - deterministic contract deploys (Phase 3+ contracts/sandbox). */
 export const CREATE2_FACTORY = "0x4e59b44847b379578588920cA78FbF26c0B4956C" as const;
+
+// Utter Phase 1 contracts, deployed and verified on Arc Testnet (chainId 5042002)
+// on 2026-06-20 via contracts/script/Deploy.s.sol. Source verified on ArcScan
+// (Blockscout). A deposit -> debit(<=cap) -> withdraw cycle confirmed the 70/30
+// creator/treasury split on-chain. These are testnet deployments whose owner,
+// escrow admin (relayer), and platform treasury are all the deployer EOA
+// (0xDa8c5726f596E8dae99e6dDEBa8AEa1c8bE9A4a5); a production deploy sets distinct
+// roles (see contracts/DEPLOY.md). Re-pin on redeploy.
+
+/** ResourceRegistry - per-resource config + indexer events + pause/slash auth (Phase 1). */
+export const RESOURCE_REGISTRY = "0x12aafa5a70c3aD8Bd3a52252744f9F7Aa073E362" as const;
+
+/** PaymentEscrow - primary money path: capped EIP-712 debit + inline 70/30 split (Phase 1). */
+export const PAYMENT_ESCROW = "0x87DDD6df70A5CDb5c161C65bfE15e0F6942DD154" as const;
+
+/** StakingVault (with in-vault InsurancePool) - creator bonds, slash, refunds (Phase 1). */
+export const STAKING_VAULT = "0x15573Cb5a391F1023317bd49b076A7FE664FdE8B" as const;
+
+/** PaymentSplitter - sample flat-path (exact) splitter wired at deploy (Phase 1). */
+export const PAYMENT_SPLITTER = "0x71375fC7cA1EA9d2f0dFc44d454B37AbD3cCe510" as const;
