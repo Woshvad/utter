@@ -43,13 +43,29 @@ export interface AdminWriter {
 }
 
 /**
- * The minimal read/wait surface for the receipt wait. Deliberately NOT used to
- * reconcile the slash amount (Pitfall 7): triggerSlash never reads the registry to
- * derive the spend. Receipt waits keep the call ordering observable for the operator
- * audit. Optional - the autonomous suite injects a stub.
+ * The minimal read/wait surface for the receipt wait + the WR-04 bond pre-flight.
+ *
+ * The `readContract` here is used ONLY for the OFF-CHAIN PRE-FLIGHT bond read that
+ * happens BEFORE BOTH writes (guarding the call, never deriving the spend amount).
+ * It is deliberately NOT used to reconcile the slash amount between the advisory and
+ * the real slash (Pitfall 7): triggerSlash performs NO read between the two writes -
+ * the admin amount is authoritative. Receipt waits keep the call ordering observable
+ * for the operator audit. Optional - the autonomous suite injects a stub.
  */
 export interface SlashPublicClient {
   waitForTransactionReceipt?(args: { hash: `0x${string}` }): Promise<unknown>;
+  /**
+   * Read the current on-chain bond for the resource (StakingVault.bonds). Used by the
+   * WR-04 pre-flight ONLY (before any write), to refuse an over-bond slash that would
+   * revert on-chain after the advisory event is already mined. Optional - when absent
+   * the pre-flight is skipped (the on-chain SlashExceedsBond guard still applies).
+   */
+  readContract?(args: {
+    address: `0x${string}`;
+    abi: unknown;
+    functionName: "bonds";
+    args: readonly [`0x${string}`];
+  }): Promise<bigint>;
 }
 
 /** Injected clients for {@link triggerSlash}. */
@@ -97,6 +113,27 @@ export async function triggerSlash(
 
   const resourceId = review.resourceId as `0x${string}`;
   const reason = review.reason;
+
+  // WR-04 PRE-FLIGHT: read the current bond and refuse an over-bond slash BEFORE
+  // broadcasting ANYTHING. A slash with amount > bonds[resourceId] reverts on-chain
+  // (SlashExceedsBond) AFTER the advisory event is already mined - leaving the indexer
+  // a dangling "slash authorized" with no Slashed event. Catching it here means no
+  // advisory is ever emitted for a slash that cannot land. This read happens BEFORE
+  // BOTH writes (not between them), so Pitfall 7 is intact: the admin amount is still
+  // authoritative for the spend; the read only GUARDS the call, never derives it.
+  if (deps.publicClient?.readContract) {
+    const bond = await deps.publicClient.readContract({
+      address: STAKING_VAULT,
+      abi: stakingVaultAbi,
+      functionName: "bonds",
+      args: [resourceId],
+    });
+    if (amount > bond) {
+      throw new Error(
+        `triggerSlash: slash amount ${amount} exceeds current bond ${bond} (would revert; refused before any write)`,
+      );
+    }
+  }
 
   // Step 1: the ADVISORY indexer signal. Separate contract, shares NO state with the
   // vault (Pitfall 7). The amount/reason mirror the spend for a consistent indexer
