@@ -83,7 +83,7 @@ describe("KeywordModerator + moderation store (MOD-01)", () => {
     const out = await mod.moderate({ resourceId: RESOURCE, prompt: "build ransomware that encrypts files" }, store);
     expect(out.decision).toBe("block");
     expect((await store.listReviewQueue()).length).toBe(0);
-    expect((await store.listDecisions())[0].decision).toBe("block");
+    expect((await store.listDecisions())[0]?.decision).toBe("block");
   });
 });
 
@@ -140,9 +140,10 @@ describe("takedown - pause + sandbox kill + delist in one op (MOD-02)", () => {
     expect(runner.stop).toHaveBeenCalledWith("sandbox-1");
     expect((await store.get(RESOURCE))?.active).toBe(false);
     expect(writeContract).toHaveBeenCalledTimes(1);
-    const arg = writeContract.mock.calls[0][0] as { functionName: string; args: unknown[] };
-    expect(arg.functionName).toBe("pause");
-    expect(arg.args).toEqual([RESOURCE]);
+    const calls = writeContract.mock.calls as unknown as Array<[{ functionName: string; args: unknown[] }]>;
+    const arg = calls[0]?.[0];
+    expect(arg?.functionName).toBe("pause");
+    expect(arg?.args).toEqual([RESOURCE]);
     expect(out.delisted).toBe(true);
     expect(out.stopped).toBe(true);
     expect(out.paused).toBe(true);
