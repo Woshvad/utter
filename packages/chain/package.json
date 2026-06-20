@@ -5,5 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "viem": "2.52.2"
   }
 }
