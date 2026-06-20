@@ -54,6 +54,22 @@ export {
   type BuildTraefikDynamicConfigOpts,
 } from "./traefik-config";
 
+// Response cache (DEP-03): normalized + deployVersion-namespaced key; a HIT skips
+// the handler, sets X-Cache: HIT, and STILL fires recordBillableCall (the disclosed
+// billable call - never a free bypass; the lookup is AFTER /verify reserves).
+export {
+  cacheKey,
+  getOrInvoke,
+  recordBillableCall,
+  createInMemoryBillingLog,
+  type CachedRequest,
+  type BillableCall,
+  type RecordBillableCall,
+  type GetOrInvokeOpts,
+  type GetOrInvokeResult,
+  type InMemoryBillingLog,
+} from "./cache";
+
 // Hardened build (SBX-05): dockerode build from a pinned-by-digest base image +
 // lockfile; registry swap via REGISTRY_MIRROR_URL; no-network-at-build is
 // operator-gated (NOT claimed locally).
