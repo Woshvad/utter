@@ -84,8 +84,49 @@ export interface ReconcileLoopOpts {
   listContainers: () => Promise<ActualContainer[]>;
   /** The reconcile interval in ms (used by start/stop). */
   intervalMs: number;
+  /**
+   * ENFORCEMENT: stop + remove an orphan (toReap) container — an actual container
+   * with no desired record. This is a security outcome (T-03-19): an orphaned,
+   * unmanaged money-handling container MUST NOT be left running. The loop calls
+   * this for every orphan on each tick. Injectable (normally dockerode
+   * stop+remove); a tick where it is absent only REPORTS drift (and warns).
+   */
+  reapContainer?: (container: ActualContainer) => Promise<void>;
+  /**
+   * ENFORCEMENT: (re)launch a desired record (toLaunch) that has no running
+   * container. Optional — a deployment pipeline may relaunch out-of-band; when
+   * provided, the loop calls it for every toLaunch on each tick.
+   */
+  launchContainer?: (record: DeploymentRecord) => Promise<void>;
   /** Optional hook invoked with each tick's result (e.g. to act on drift / log health). */
   onTick?: (result: ReconcileResult) => void;
+  /**
+   * Surfaced when an enforcement action (reap/launch) or a tick fails. Defaults to
+   * a `console.warn` that NEVER logs secret material (only the container id /
+   * resourceId / error message). A failed reap of an untrusted container is a
+   * security-relevant event and must be visible, not swallowed (WR-06).
+   */
+  onError?: (event: ReconcileErrorEvent) => void;
+}
+
+/** A surfaced reconcile/enforcement failure (never carries secret material). */
+export interface ReconcileErrorEvent {
+  /** What failed. */
+  phase: "tick" | "reap" | "launch";
+  /** The container id (for a reap failure), if known. */
+  containerId?: string;
+  /** The resourceId involved, if known. */
+  resourceId?: Hex;
+  /** The error message (no secrets). */
+  message: string;
+}
+
+/** The default error sink: a non-secret console.warn so a failed action is visible. */
+function defaultOnError(event: ReconcileErrorEvent): void {
+  const where = event.containerId ? ` container=${event.containerId}` : "";
+  const who = event.resourceId ? ` resource=${event.resourceId}` : "";
+  // No secret material: id/resourceId/message only.
+  console.warn(`[reconcile] ${event.phase} failed${where}${who}: ${event.message}`);
 }
 
 /** A running reconcile loop: tick once on demand, or start/stop the interval. */
@@ -101,16 +142,67 @@ export interface ReconcileLoop {
 /**
  * Build a reconcile loop over a store + an injected `listContainers`. `tick()`
  * reads the desired records (store.list) and the actual containers (listContainers),
- * diffs them via `reconcile`, fires `onTick`, and returns the result. `start/stop`
- * manage a `setInterval` calling `tick()`; both are idempotent. The interval is
- * `unref`'d so a running loop never keeps the process alive on its own.
+ * diffs them via `reconcile`, ENFORCES the drift (reaps orphans + relaunches missing
+ * records when the action hooks are provided), fires `onTick`, and returns the
+ * result. `start/stop` manage a `setInterval` calling `tick()`; both are idempotent.
+ * The interval is `unref`'d so a running loop never keeps the process alive on its
+ * own.
+ *
+ * WR-04: the loop no longer merely reports drift. Orphan (toReap) containers — a
+ * security outcome (T-03-19) — are stopped+removed via `reapContainer`. If no
+ * `reapContainer` is provided AND there are orphans, the loop WARNS via `onError`
+ * so a non-enforcing configuration is loud, not silent.
  */
 export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
   let timer: ReturnType<typeof setInterval> | null = null;
+  const onError = opts.onError ?? defaultOnError;
 
   async function tick(): Promise<ReconcileResult> {
     const [desired, actual] = await Promise.all([opts.store.list(), opts.listContainers()]);
     const result = reconcile(desired, actual);
+
+    // ENFORCE: reap orphan containers (no desired record). Never leave an orphan
+    // money-handling container alive (T-03-19). A failed reap is surfaced, not
+    // swallowed (WR-06).
+    if (result.toReap.length > 0) {
+      if (opts.reapContainer) {
+        for (const orphan of result.toReap) {
+          try {
+            await opts.reapContainer(orphan);
+          } catch (err) {
+            onError({
+              phase: "reap",
+              containerId: orphan.id,
+              resourceId: orphan.resourceId,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      } else {
+        // No enforcement hook but orphans exist: make the gap loud.
+        onError({
+          phase: "reap",
+          message: `${result.toReap.length} orphan container(s) detected but no reapContainer enforcement hook is configured`,
+        });
+      }
+    }
+
+    // ENFORCE: (re)launch desired records with no running container, when a launch
+    // hook is provided. A failed launch is surfaced, not swallowed.
+    if (opts.launchContainer && result.toLaunch.length > 0) {
+      for (const rec of result.toLaunch) {
+        try {
+          await opts.launchContainer(rec);
+        } catch (err) {
+          onError({
+            phase: "launch",
+            resourceId: rec.resourceId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     opts.onTick?.(result);
     return result;
   }
@@ -118,9 +210,15 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
   function start(): void {
     if (timer !== null) return; // idempotent: already running
     timer = setInterval(() => {
-      // Swallow per-tick rejections so a transient dockerode error never crashes
-      // the loop; the next tick re-reads fresh state.
-      void tick().catch(() => {});
+      // A transient dockerode error must never crash the loop, but it MUST be
+      // visible (WR-06): surface it via onError instead of swallowing. The next
+      // tick re-reads fresh state.
+      void tick().catch((err) => {
+        onError({
+          phase: "tick",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
     }, opts.intervalMs);
     // Don't let the reconcile timer keep the process alive on its own.
     (timer as { unref?: () => void }).unref?.();

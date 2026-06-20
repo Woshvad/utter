@@ -155,6 +155,103 @@ describe("createReconcileLoop (DEP-05)", () => {
     expect(result.healthy).toBe(false);
   });
 
+  it("ENFORCES drift: reaps every orphan container via reapContainer (WR-04, T-03-19)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"91".repeat(32)}`;
+    const orphan1: Hex = `0x${"92".repeat(32)}`;
+    const orphan2: Hex = `0x${"93".repeat(32)}`;
+    await store.put(record(r1));
+
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1),
+      container(orphan1),
+      container(orphan2),
+    ]);
+    const reaped: Hex[] = [];
+    const reapContainer = vi.fn(async (c: ActualContainer) => {
+      reaped.push(c.resourceId);
+    });
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+    });
+    const result = await loop.tick();
+
+    // Both orphans were reaped (stopped+removed), the desired record was not.
+    expect(reapContainer).toHaveBeenCalledTimes(2);
+    expect(reaped.sort()).toEqual([orphan1, orphan2].sort());
+    expect(result.toReap.map((c) => c.resourceId).sort()).toEqual([orphan1, orphan2].sort());
+  });
+
+  it("does NOT reap a container that has a desired record (only orphans are reaped)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"a1".repeat(32)}`;
+    await store.put(record(r1));
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [container(r1)]);
+    const reapContainer = vi.fn(async () => undefined);
+    const loop = createReconcileLoop({ store, listContainers, intervalMs: 60_000, reapContainer });
+    await loop.tick();
+    expect(reapContainer).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a reap failure via onError instead of swallowing it (WR-06)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const orphan: Hex = `0x${"b2".repeat(32)}`;
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [container(orphan)]);
+    const reapContainer = vi.fn(async () => {
+      throw new Error("docker remove failed");
+    });
+    const errors: { phase: string; message: string }[] = [];
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    // The tick still resolves (a failed reap does not crash the loop) but the
+    // failure is SURFACED, not dropped.
+    await loop.tick();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.phase).toBe("reap");
+    expect(errors[0]?.message).toContain("docker remove failed");
+  });
+
+  it("WARNS via onError when orphans exist but no reapContainer hook is configured (loud gap)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const orphan: Hex = `0x${"c3".repeat(32)}`;
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [container(orphan)]);
+    const errors: { phase: string; message: string }[] = [];
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    await loop.tick();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.phase).toBe("reap");
+    expect(errors[0]?.message).toContain("no reapContainer enforcement hook");
+  });
+
+  it("ENFORCES drift: relaunches missing desired records via launchContainer", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"d4".repeat(32)}`;
+    await store.put(record(r1));
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => []); // nothing running
+    const launched: Hex[] = [];
+    const launchContainer = vi.fn(async (rec: DeploymentRecord) => {
+      launched.push(rec.resourceId);
+    });
+    const loop = createReconcileLoop({ store, listContainers, intervalMs: 60_000, launchContainer });
+    await loop.tick();
+    expect(launchContainer).toHaveBeenCalledTimes(1);
+    expect(launched).toEqual([r1]);
+  });
+
   it("start/stop manage the interval without throwing (no real tick asserted)", () => {
     const store = new InMemoryDeploymentStore();
     const listContainers = vi.fn(async (): Promise<ActualContainer[]> => []);
