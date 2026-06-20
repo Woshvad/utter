@@ -24,3 +24,11 @@ export {
   type UpstreamCredential,
   type CredentialResolver,
 } from "./credentials";
+
+// Default-deny host allowlist + SSRF normalize-then-validate checks.
+export {
+  isAllowlisted,
+  normalizeAndCheckHost,
+  DEFAULT_ALLOWLIST,
+  type HostCheckResult,
+} from "./allowlist";
