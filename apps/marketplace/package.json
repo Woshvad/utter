@@ -19,5 +19,8 @@
     "@utter/staking": "workspace:*",
     "@utter/x402-arc": "workspace:*",
     "hono": "4.12.26"
+  },
+  "devDependencies": {
+    "viem": "2.52.2"
   }
 }

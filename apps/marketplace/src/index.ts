@@ -65,3 +65,18 @@ export type {
   InitialProbeResult,
   BondReader,
 } from "./publish.js";
+
+// --- Test-this-endpoint: the programmatic pay-flow runner (MKT-03/04) ---
+export {
+  runTestEndpoint,
+  liveTestEndpoint,
+  RequiresFundedWalletError,
+} from "./test-endpoint.js";
+export type {
+  RunTestEndpointOptions,
+  TestEndpointResult,
+  CardPayInputs,
+  CardFetcher,
+  RunnerPublicClient,
+  LiveTestEndpointOptions,
+} from "./test-endpoint.js";
