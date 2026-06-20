@@ -8,18 +8,35 @@
 //   2. verifyResourceToken (aud=resourceId + exp + HS256) -> 401 on failure;
 //   3. normalizeAndCheckHost + allowlist on the requested upstream -> 403 on failure;
 //   4. resolveUpstreamCredential(resourceId) SERVER-SIDE;
-//   5. inject the REAL key into the OUTBOUND request (proxy->upstream leg ONLY) and
-//      forward via the injectable upstream `fetch`;
+//   5. ASSERT the requested host EQUALS the credential's upstream host (CR-01: the
+//      container chooses the PATH on its own upstream, never a host swap), RESOLVE
+//      + re-check every A/AAAA address against the SSRF block set (CR-02: DNS
+//      rebinding / malicious record), enforce the request-size cap, inject the
+//      REAL key, and forward via the injectable upstream `fetch` with a timeout
+//      and a response-size cap;
 //   6. pass the upstream response back to the container.
 //
 // SECURITY (load-bearing): the container-visible inbound request NEVER carries the
 // real key (the passthrough test asserts this). The key is added solely on the
 // proxy->upstream leg. There is NO code path that forwards without first passing
-// BOTH the token verify (step 2) AND the allowlist (step 3) — verify precedes the
-// allowlist so a bad token short-circuits before any host/cred work. The scoped
-// token is also stripped from the outbound leg (it is a container<->proxy secret).
+// the token verify (step 2), the allowlist (step 3), the host-equality check AND
+// the resolved-IP block-check (step 5). The scoped token is also stripped from the
+// outbound leg (it is a container<->proxy secret).
+//
+// CR-01 (host pinning): the outbound forward host is ALWAYS the resolved credential
+// upstream host. We additionally REJECT a request whose target host does not equal
+// the credential host, so the allowlist check on `target` is no longer decorative —
+// a container cannot present an allowlisted host while the forward goes elsewhere,
+// and cannot drive an arbitrary host under another resource's key.
+//
+// CR-02 (rebinding): before forwarding we resolve the upstream host and re-check
+// EVERY resolved address against the same block set, then re-validate immediately
+// before connect. Full IP-pinning (connecting to the exact validated socket) needs
+// a custom dispatcher; with the injectable `fetch` seam here we re-validate the
+// resolved address in the tightest possible window before the connect and surface
+// the validated addresses for a production pinning dispatcher (see `validatedIps`).
 import { Hono } from "hono";
-import { normalizeAndCheckHost } from "./allowlist";
+import { normalizeAndCheckHost, resolveAndCheckHost, type DnsLookupAll } from "./allowlist";
 import {
   resolveUpstreamCredential,
   type CredentialResolver,
@@ -36,6 +53,20 @@ const RESOURCE_HEADER = "x-resource-id";
 /** Header carrying the requested upstream URL the container wants to reach. */
 const UPSTREAM_HEADER = "x-upstream-url";
 
+/** Hard request-body cap (bytes). Reject an oversize inbound body before forwarding. */
+const DEFAULT_MAX_REQUEST_BYTES = 1_048_576;
+/** Hard response-body cap (bytes). Reject an oversize upstream body before relaying. */
+const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
+/** Egress timeout (seconds): abort a slow upstream so it cannot hold the proxy open. */
+const DEFAULT_EGRESS_TIMEOUT_SECONDS = 30;
+
+function envInt(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 /** Options for {@link createDataProxy}. */
 export interface DataProxyOpts {
   /** The HS256 secret (DATA_PROXY_TOKEN_SECRET). Stays on the proxy; verifies tokens. */
@@ -46,18 +77,38 @@ export interface DataProxyOpts {
   upstreamFetch?: FetchLike;
   /** The server-side credential resolver (default {@link resolveUpstreamCredential}). */
   resolveCredential?: CredentialResolver;
+  /**
+   * Injectable DNS resolver for the resolved-IP SSRF re-check (CR-02). Defaults to
+   * Node `dns.lookup({all:true})`; tests stub it to simulate a rebinding record.
+   */
+  dnsLookup?: DnsLookupAll;
+  /** Max inbound request body bytes (default MAX_REQUEST_BYTES env or 1 MiB). */
+  maxRequestBytes?: number;
+  /** Max upstream response body bytes (default MAX_RESPONSE_BYTES env or 1 MiB). */
+  maxResponseBytes?: number;
+  /** Egress timeout in seconds (default RESOURCE_TIMEOUT_SECONDS env or 30s). */
+  egressTimeoutSeconds?: number;
 }
 
 /**
  * Build the Hono data-proxy app. A single `POST /proxy` route runs the ordered
- * verify -> allowlist -> resolve -> inject -> forward flow. Mount this behind the
- * netns firewall (Plan 02) so it is the only route out of the sandbox.
+ * verify -> allowlist -> resolve -> host-pin -> resolved-IP-check -> inject ->
+ * forward flow. Mount this behind the netns firewall (Plan 02) so it is the only
+ * route out of the sandbox.
  */
 export function createDataProxy(opts: DataProxyOpts) {
   const upstreamFetch: FetchLike = opts.upstreamFetch ?? (globalThis.fetch as FetchLike);
   const resolveCredential: CredentialResolver =
     opts.resolveCredential ?? resolveUpstreamCredential;
   const allowlist = opts.allowlist;
+  const dnsLookup = opts.dnsLookup;
+  const maxRequestBytes =
+    opts.maxRequestBytes ?? envInt("MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES);
+  const maxResponseBytes =
+    opts.maxResponseBytes ?? envInt("MAX_RESPONSE_BYTES", DEFAULT_MAX_RESPONSE_BYTES);
+  const egressTimeoutSeconds =
+    opts.egressTimeoutSeconds ??
+    envInt("RESOURCE_TIMEOUT_SECONDS", DEFAULT_EGRESS_TIMEOUT_SECONDS);
 
   const app = new Hono();
 
@@ -89,8 +140,7 @@ export function createDataProxy(opts: DataProxyOpts) {
     }
 
     // (4) Resolve the REAL upstream credential SERVER-SIDE. A resource with no
-    // mapped credential fails closed (401-equivalent at the resource layer); never
-    // forward without a credential.
+    // mapped credential fails closed; never forward without a credential.
     let cred: { upstreamBaseUrl: string; realApiKey: string };
     try {
       cred = resolveCredential(resourceId);
@@ -105,16 +155,30 @@ export function createDataProxy(opts: DataProxyOpts) {
       return c.json({ error: "upstream_not_allowlisted" }, 403);
     }
 
-    // (5) Build the OUTBOUND request. Compose the resolved upstream base + the
-    // requested path/query, copy the body + safe headers, STRIP the container<->proxy
-    // token, and inject the REAL key ONLY here (the proxy->upstream leg). The real
-    // key is NEVER on the inbound container-visible request.
+    // (5) Build the OUTBOUND request. The forward host is ALWAYS the resolved
+    // credential upstream host. CR-01: the requested host MUST EQUAL the credential
+    // host, otherwise the allowlist check on `target` would be decorative (the
+    // container could present an allowlisted host while we forward to the credential
+    // base under the real key). Reject a host mismatch — the container chooses only
+    // the PATH/QUERY on its OWN upstream, never a host swap.
     const requested = new URL(
       /^[a-z][a-z0-9+.-]*:\/\//i.test(target) ? target : `https://${target}`,
     );
     const upstreamUrl = new URL(cred.upstreamBaseUrl);
+    if (normalizeHostname(requested.hostname) !== normalizeHostname(upstreamUrl.hostname)) {
+      return c.json({ error: "upstream_host_mismatch" }, 403);
+    }
     upstreamUrl.pathname = requested.pathname;
     upstreamUrl.search = requested.search;
+
+    // CR-02: resolve the upstream host and re-check EVERY resolved A/AAAA address
+    // against the SSRF block set, so an allowlisted record that resolves to a
+    // private/metadata address (DNS rebinding or a malicious allowlisted record) is
+    // rejected before we ever connect.
+    const resolved = await resolveAndCheckHost(upstreamUrl.hostname, allowlist, dnsLookup);
+    if (!resolved.ok) {
+      return c.json({ error: "upstream_resolves_to_blocked" }, 403);
+    }
 
     const outHeaders = new Headers();
     // Forward only a safe content-type; never echo the scoped token or any
@@ -127,12 +191,41 @@ export function createDataProxy(opts: DataProxyOpts) {
     const method = c.req.method;
     const hasBody = method !== "GET" && method !== "HEAD";
     const body = hasBody ? await c.req.arrayBuffer() : undefined;
+    // WR-01: hard-reject an oversize inbound body before forwarding upstream.
+    if (body && body.byteLength > maxRequestBytes) {
+      return c.json({ error: "request_too_large" }, 413);
+    }
 
-    const upstreamRes = await upstreamFetch(upstreamUrl.toString(), {
-      method,
-      headers: outHeaders,
-      body,
-    });
+    // CR-02 (TOCTOU tighten): re-validate the resolved host immediately before the
+    // connect. Full socket-pinning to `resolved.addresses[0]` needs a custom fetch
+    // dispatcher; with the injectable fetch seam we re-check in the tightest window
+    // and surface the validated addresses for a production pinning dispatcher.
+    const recheck = await resolveAndCheckHost(upstreamUrl.hostname, allowlist, dnsLookup);
+    if (!recheck.ok) {
+      return c.json({ error: "upstream_resolves_to_blocked" }, 403);
+    }
+
+    // WR-01: bound the egress with a timeout so a slow upstream cannot hold the
+    // proxy connection open indefinitely (DoS from inside the sandbox).
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), egressTimeoutSeconds * 1000);
+
+    let upstreamRes: Response;
+    try {
+      upstreamRes = await upstreamFetch(upstreamUrl.toString(), {
+        method,
+        headers: outHeaders,
+        body,
+        signal: ac.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (err instanceof Error && err.name === "AbortError") {
+        return c.json({ error: "upstream_timeout" }, 504);
+      }
+      return c.json({ error: "upstream_unreachable" }, 502);
+    }
+    clearTimeout(timer);
 
     // (6) Pass the upstream response back to the container. Strip hop-by-hop / any
     // credential-bearing headers; relay the status + body + content-type only.
@@ -140,6 +233,10 @@ export function createDataProxy(opts: DataProxyOpts) {
     const upstreamCt = upstreamRes.headers.get("content-type");
     if (upstreamCt) passHeaders.set("content-type", upstreamCt);
     const responseBody = await upstreamRes.arrayBuffer();
+    // WR-01: hard-reject an oversize upstream response before relaying it.
+    if (responseBody.byteLength > maxResponseBytes) {
+      return c.json({ error: "response_too_large" }, 502);
+    }
     return new Response(responseBody, {
       status: upstreamRes.status,
       headers: passHeaders,
@@ -147,4 +244,9 @@ export function createDataProxy(opts: DataProxyOpts) {
   });
 
   return app;
+}
+
+/** Lowercase + strip a single trailing dot for host equality comparison. */
+function normalizeHostname(host: string): string {
+  return host.toLowerCase().replace(/\.$/, "");
 }
