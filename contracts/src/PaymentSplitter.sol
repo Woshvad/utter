@@ -67,6 +67,9 @@ contract PaymentSplitter is Ownable, ReentrancyGuard {
     /// pre-configured creator and treasury.
     function distribute() external nonReentrant {
         uint256 bal = usdc.balanceOf(address(this));
+        // Nothing held: short-circuit so a no-op distribute does not emit an
+        // empty Distributed(creator, treasury, 0, 0) event into the indexer.
+        if (bal == 0) return;
         uint256 toCreator = (bal * creatorBps) / BPS_DENOMINATOR;
         uint256 toTreasury = bal - toCreator;
 
