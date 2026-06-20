@@ -11,6 +11,7 @@ import {
   InMemoryQuotaStore,
   type DnsLookupAll,
   type QuotaBudget,
+  type QuotaStore,
 } from "../src/index";
 
 const SECRET = "test-proxy-secret-never-leaves-the-proxy";
@@ -124,6 +125,64 @@ describe("data-proxy quota gate (PRX-03)", () => {
     expect(res.status).toBe(401);
     const totals = await quotaStore.increment(RESOURCE_A, { calls: 0, bytes: 0 });
     expect(totals.calls).toBe(0);
+  });
+
+  it("WR-03: denies with 429 (fail-closed) when the counter store throws on increment (no forward)", async () => {
+    const upstreamFetch = vi.fn(
+      async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    // A quota store whose increment always throws (e.g. Redis unreachable).
+    const throwingStore: QuotaStore = {
+      async increment() {
+        throw new Error("quota store unreachable (simulated)");
+      },
+    };
+    const app = createDataProxy({
+      tokenSecret: SECRET,
+      allowlist: ["api.openai.com"],
+      upstreamFetch: upstreamFetch as unknown as typeof fetch,
+      dnsLookup: publicDnsStub(),
+      quotaStore: throwingStore,
+      quotaBudget: { calls: 100, bytes: 1_000_000 },
+    });
+
+    const res = await app.request(containerRequest(TARGET));
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toBe("quota_unavailable");
+    // EXPLICIT fail-closed: a counter-store error never forwards upstream.
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it("IN-02: meters the upstream RESPONSE bytes into the per-resource counter", async () => {
+    const responsePayload = JSON.stringify({ ok: true, upstream: "hit" });
+    const upstreamFetch = vi.fn(
+      async () =>
+        new Response(responsePayload, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const quotaStore = new InMemoryQuotaStore();
+    const app = createDataProxy({
+      tokenSecret: SECRET,
+      allowlist: ["api.openai.com"],
+      upstreamFetch: upstreamFetch as unknown as typeof fetch,
+      dnsLookup: publicDnsStub(),
+      quotaStore,
+      quotaBudget: { calls: 100, bytes: 10_000_000 },
+    });
+
+    const inboundBytes = new TextEncoder().encode(JSON.stringify({ prompt: "hello" })).byteLength;
+    const responseBytes = new TextEncoder().encode(responsePayload).byteLength;
+
+    const res = await app.request(containerRequest(TARGET));
+    expect(res.status).toBe(200);
+
+    // The counter reflects BOTH the inbound request bytes AND the relayed response bytes.
+    const totals = await quotaStore.increment(RESOURCE_A, { calls: 0, bytes: 0 });
+    expect(totals.calls).toBe(1);
+    expect(totals.bytes).toBe(inboundBytes + responseBytes);
   });
 
   it("is unbounded (no gate) when no quotaBudget is configured - egress unchanged", async () => {

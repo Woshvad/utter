@@ -169,10 +169,20 @@ export function createDataProxy(opts: DataProxyOpts) {
       const inboundBytes = hasInboundBody
         ? (await c.req.arrayBuffer()).byteLength
         : 0;
-      const usage = await quotaStore.increment(resourceId, {
-        calls: 1,
-        bytes: inboundBytes,
-      });
+      // WR-03: EXPLICIT fail-closed. If the counter store throws (e.g. the Redis
+      // adapter is unreachable), DENY the request with an explicit 429 - never rely on
+      // a framework 500 default, and never "degrade gracefully" by skipping the
+      // counter (that would silently flip fail-OPEN). The over-quota branch below is
+      // the other fail-closed leg; both deny, neither forwards upstream.
+      let usage: QuotaBudget;
+      try {
+        usage = await quotaStore.increment(resourceId, {
+          calls: 1,
+          bytes: inboundBytes,
+        });
+      } catch {
+        return c.json({ error: "quota_unavailable" }, 429);
+      }
       if (usage.calls > quotaBudget.calls || usage.bytes > quotaBudget.bytes) {
         return c.json({ error: "quota_exceeded" }, 429);
       }
@@ -276,6 +286,23 @@ export function createDataProxy(opts: DataProxyOpts) {
     if (responseBody.byteLength > maxResponseBytes) {
       return c.json({ error: "response_too_large" }, 502);
     }
+
+    // IN-02: meter the RESPONSE bytes (the dominant upstream cost) into the per-resource
+    // counter so byte usage reflects what was actually relayed, not just the inbound
+    // request. This is a usage meter for the platform-cut markup (plain byte accounting,
+    // never a USDC amount, no decimals literal); the response already passed the egress
+    // path, so a counter failure here is best-effort (it must not corrupt the buyer's
+    // already-fetched response) - the request-time increment above is the fail-closed
+    // budget gate.
+    if (quotaStore && quotaBudget) {
+      try {
+        await quotaStore.increment(resourceId, { calls: 0, bytes: responseBody.byteLength });
+      } catch {
+        // Best-effort post-relay metering: the response is already authorized and
+        // fetched. The fail-closed budget decision was made at request time above.
+      }
+    }
+
     return new Response(responseBody, {
       status: upstreamRes.status,
       headers: passHeaders,
