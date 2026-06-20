@@ -1,0 +1,16 @@
+{
+  "name": "@utter/ai-scorer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@utter/chain": "workspace:*",
+    "@utter/x402-arc": "workspace:*"
+  }
+}

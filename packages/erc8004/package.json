@@ -1,0 +1,16 @@
+{
+  "name": "@utter/erc8004",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@utter/chain": "workspace:*",
+    "viem": "2.52.2"
+  }
+}

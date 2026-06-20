@@ -21,6 +21,21 @@ importers:
         specifier: 4.1.9
         version: 4.1.9(@types/node@26.0.0)(vite@8.0.16(@types/node@26.0.0))
 
+  apps/marketplace:
+    dependencies:
+      '@utter/ai-runtime':
+        specifier: workspace:*
+        version: link:../../packages/ai-runtime
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../../packages/chain
+      '@utter/sandbox':
+        specifier: workspace:*
+        version: link:../../services/sandbox
+      '@utter/x402-arc':
+        specifier: workspace:*
+        version: link:../../packages/x402-arc
+
   packages/ai-runtime:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
@@ -54,6 +69,15 @@ importers:
         specifier: 2.52.2
         version: 2.52.2(typescript@6.0.3)(zod@4.4.3)
 
+  packages/ai-scorer:
+    dependencies:
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../chain
+      '@utter/x402-arc':
+        specifier: workspace:*
+        version: link:../x402-arc
+
   packages/chain:
     dependencies:
       viem:
@@ -81,6 +105,24 @@ importers:
       '@types/jsonwebtoken':
         specifier: 9.0.10
         version: 9.0.10
+
+  packages/erc8004:
+    dependencies:
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../chain
+      viem:
+        specifier: 2.52.2
+        version: 2.52.2(typescript@6.0.3)(zod@4.4.3)
+
+  packages/staking:
+    dependencies:
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../chain
+      viem:
+        specifier: 2.52.2
+        version: 2.52.2(typescript@6.0.3)(zod@4.4.3)
 
   packages/x402-arc:
     dependencies:
