@@ -39,3 +39,13 @@ export {
 } from "./runner/runspec";
 export { DockerDevRunner } from "./runner/docker-dev";
 export { GvisorRunner } from "./runner/gvisor";
+
+// --- Egress firewall: default-deny ruleset generator, only-proxy (Plan 02 Task 2) ---
+export {
+  EGRESS_BLOCK_SET,
+  buildEgressRuleset,
+  type BuildEgressRulesetOptions,
+  type EgressBlockEntry,
+  type EgressMechanism,
+  type EgressRuleset,
+} from "./egress/firewall";
