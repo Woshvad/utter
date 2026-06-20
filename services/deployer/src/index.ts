@@ -40,6 +40,20 @@ export {
   type InjectGateConfig,
 } from "./inject-x402";
 
+// Traefik dynamic-config generator (DEP-01 routing): per-resource file-provider
+// config for Host(<slug>.resources.<domain>) with tls.certResolver=le + the
+// wildcard SANs (DNS-01). The live cert + DNS are operator-provisioned (Plan 06).
+export {
+  buildTraefikDynamicConfig,
+  serializeTraefikDynamicConfig,
+  parseTraefikDynamicConfig,
+  DEFAULT_RESOURCE_PORT,
+  type TraefikDynamicConfig,
+  type TraefikRouter,
+  type TraefikService,
+  type BuildTraefikDynamicConfigOpts,
+} from "./traefik-config";
+
 // Hardened build (SBX-05): dockerode build from a pinned-by-digest base image +
 // lockfile; registry swap via REGISTRY_MIRROR_URL; no-network-at-build is
 // operator-gated (NOT claimed locally).
