@@ -9,3 +9,10 @@ export { BondBadge, type BondBadgeProps } from "./BondBadge";
 export { ReputationBadge, type ReputationBadgeProps } from "./ReputationBadge";
 export { VerifiedBadge, type VerifiedBadgeProps } from "./VerifiedBadge";
 export { AddressPill, type AddressPillProps } from "./AddressPill";
+
+// Form + layout primitives (Task 2)
+export { Input, type InputProps } from "./Input";
+export { Toggle, type ToggleProps } from "./Toggle";
+export { Modal, type ModalProps } from "./Modal";
+export { Tabs, type TabsProps, type TabItem } from "./Tabs";
+export { CodeBlock, type CodeBlockProps } from "./CodeBlock";
