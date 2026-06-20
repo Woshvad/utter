@@ -74,6 +74,14 @@ describe("prepublish - secret scan (SBX-06a)", () => {
     expect(v.some((x) => x.rule === "high-entropy-string")).toBe(true);
   });
 
+  it("flags an OpenAI-style sk- provider key by a named rule (IN-03)", () => {
+    const bundle = {
+      "cfg.ts": 'const key = "sk-abcdefABCDEF0123456789ghijklmn";',
+    };
+    const v = scanSecrets(bundle);
+    expect(v.some((x) => x.rule === "openai-style-key")).toBe(true);
+  });
+
   it("passes a clean benign bundle", () => {
     expect(scanSecrets({ "handler.ts": benignSource })).toEqual([]);
   });

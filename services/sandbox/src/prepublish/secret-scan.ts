@@ -33,6 +33,10 @@ const SECRET_RULES: { rule: string; pattern: RegExp }[] = [
   { rule: "github-token", pattern: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
   { rule: "private-key-block", pattern: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/ },
   { rule: "slack-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
+  // OpenAI-style provider key (sk-... / sk-proj-...). The architecture keeps real
+  // upstream keys out of bundles entirely, but a literal provider key embedded in
+  // a bundle should not slip a scan that has no named rule for it (IN-03).
+  { rule: "openai-style-key", pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/ },
   { rule: "generic-api-key-assignment", pattern: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9+/_\-]{16,}["']/i },
   { rule: "hex-private-key", pattern: /\b0x[a-fA-F0-9]{64}\b/ },
 ];
