@@ -9,6 +9,17 @@ packages:
 # safe supply-chain posture and keeps the ERR_PNPM_IGNORED_BUILDS notice from
 # failing verify gates.
 allowBuilds:
+  bufferutil: false
   cpu-features: false
+  esbuild: false
+  keccak: false
   protobufjs: false
   ssh2: false
+  utf-8-validate: false
+
+# Hold the single viem pin repo-wide (Pitfall 2 / T-06-VIEM). wagmi v2's peer is
+# `viem: 2.x`, and @wagmi/connectors transitively resolves an older 2.23.2; this
+# override forces every copy to the workspace 2.52.2 so `pnpm why viem` shows one
+# version and type identity across @utter/* holds.
+overrides:
+  viem: 2.52.2
