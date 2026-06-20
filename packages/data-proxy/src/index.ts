@@ -25,12 +25,17 @@ export {
   type CredentialResolver,
 } from "./credentials";
 
-// Default-deny host allowlist + SSRF normalize-then-validate checks.
+// Default-deny host allowlist + SSRF normalize-then-validate checks (sync
+// literal/allowlist pre-filter + async resolve-and-recheck against the same
+// block set, pinning the validated IP for connect).
 export {
   isAllowlisted,
   normalizeAndCheckHost,
+  resolveAndCheckHost,
   DEFAULT_ALLOWLIST,
   type HostCheckResult,
+  type ResolvedHostResult,
+  type DnsLookupAll,
 } from "./allowlist";
 
 // The Hono proxy: verify token -> allowlist -> inject real key server-side -> forward.
