@@ -36,5 +36,16 @@ export { erc20Abi } from "./abis";
 // Phase 2 write-path ABIs: escrow debit/Debited, splitter distribute, erc3009 exact
 export { escrowAbi, splitterAbi, erc3009Abi } from "./abis";
 
+// Phase 5 ABIs: StakingVault deposit/slash/refund + Slashed/Refunded events,
+// ResourceRegistry register/pause/slashAuthorization/getResource/isActive, and the
+// three empty ERC-8004 reference ABIs (Plan 02 pins these post-CREATE2-deploy).
+export {
+  stakingVaultAbi,
+  registryAbi,
+  identityAbi,
+  reputationAbi,
+  validationAbi,
+} from "./abis";
+
 // Runtime-decimals() USDC balance helper (CHAIN-03)
 export { readUsdcBalance, type UsdcBalance } from "./usdc";

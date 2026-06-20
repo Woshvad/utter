@@ -144,3 +144,210 @@ export const erc3009Abi = [
     outputs: [{ type: "uint8" }],
   },
 ] as const;
+
+// StakingVault ABI - the Phase 5 staking + takedown surface (STK-01, STK-02,
+// STK-03). Field names and order are copied verbatim from contracts/src/
+// StakingVault.sol so the Slashed/Refunded events decode byte-for-byte and the
+// deposit/slash/refund arguments line up with the contract signature. All
+// amounts are USDC base units; this ABI never encodes a decimals literal (the
+// vault denominates bonds in raw base units, never a 6/1e6 scaling; Pitfall 3).
+export const stakingVaultAbi = [
+  {
+    type: "function",
+    name: "deposit",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resourceId", type: "bytes32" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "slash",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resourceId", type: "bytes32" },
+      { name: "amount", type: "uint256" },
+      { name: "reason", type: "string" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "requestWithdraw",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "withdraw",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "refund",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "payer", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "bonds",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "bytes32" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "insurancePoolBalance",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "MIN_BOND_BASE_UNITS",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "COOLDOWN",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "event",
+    name: "Slashed",
+    inputs: [
+      { name: "resourceId", type: "bytes32", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "reason", type: "string", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "Refunded",
+    inputs: [
+      { name: "payer", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+// ResourceRegistry ABI - the Phase 5 registry write/read surface (MKT-01, STK-03).
+// Field names and order are copied verbatim from contracts/src/ResourceRegistry.sol
+// so register/update/pause/unpause/slashAuthorization encode byte-for-byte and the
+// ResourcePaused/ResourceSlashAuthorized events decode for the indexer. getResource
+// and isActive are the reads the escrow active-check and marketplace listing perform.
+// All amounts are USDC base units; this ABI never encodes a decimals literal (Pitfall 3).
+export const registryAbi = [
+  {
+    type: "function",
+    name: "register",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resourceId", type: "bytes32" },
+      { name: "creator", type: "address" },
+      { name: "treasury", type: "address" },
+      { name: "creatorBps", type: "uint16" },
+      { name: "agentId", type: "bytes32" },
+      { name: "pricingHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "update",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resourceId", type: "bytes32" },
+      { name: "treasury", type: "address" },
+      { name: "creatorBps", type: "uint16" },
+      { name: "agentId", type: "bytes32" },
+      { name: "pricingHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "pause",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "unpause",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "slashAuthorization",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resourceId", type: "bytes32" },
+      { name: "amount", type: "uint256" },
+      { name: "reason", type: "string" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "getResource",
+    stateMutability: "view",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [
+      { name: "creator", type: "address" },
+      { name: "treasury", type: "address" },
+      { name: "creatorBps", type: "uint16" },
+      { name: "active", type: "bool" },
+    ],
+  },
+  {
+    type: "function",
+    name: "isActive",
+    stateMutability: "view",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [{ type: "bool" }],
+  },
+  {
+    type: "event",
+    name: "ResourcePaused",
+    inputs: [{ name: "resourceId", type: "bytes32", indexed: true }],
+  },
+  {
+    type: "event",
+    name: "ResourceSlashAuthorized",
+    inputs: [
+      { name: "resourceId", type: "bytes32", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "reason", type: "string", indexed: false },
+    ],
+  },
+] as const;
+
+// Phase 5 ERC-8004 reference ABI - Plan 02 fills this after the reference
+// contracts are authored and CREATE2-deployed. Empty placeholder for now so the
+// barrel export and downstream typing seam exist from Wave 0. These ABIs will
+// encode amounts only as uint256 base units, never a 6/1e6 literal (Pitfall 3).
+export const identityAbi = [] as const;
+
+// Phase 5 ERC-8004 reference ABI - Plan 02 fills this after the reference
+// contracts are authored and CREATE2-deployed.
+export const reputationAbi = [] as const;
+
+// Phase 5 ERC-8004 reference ABI - Plan 02 fills this after the reference
+// contracts are authored and CREATE2-deployed.
+export const validationAbi = [] as const;
