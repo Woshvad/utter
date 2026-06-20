@@ -1,0 +1,123 @@
+/*
+ * tokens.css - the dark-Bauhaus token layer for Utter Studio.
+ *
+ * Ported VERBATIM from Design/UTTER-UI-DESIGN-PROMPT.md + 06-UI-SPEC.md "Color".
+ * These CSS variables are the single source of every color / motion value in the
+ * app; Tailwind's theme.extend (tailwind.config.ts) reads them via var(--token).
+ * No component carries a raw hex - utilities reference these vars only.
+ *
+ * Triad-on-canvas, 60/30/10: canvas (60) / raised+hairline (30) / triad accent (10).
+ * Meaning is NEVER color-only: the triad is always paired with the circle / square
+ * / triangle shape system (see StatusDot, BuildStepBlock).
+ */
+
+:root {
+  /* --- Surfaces (60 + 30) --- */
+  --canvas: #0c0c0d; /* base background (near-black, warm) */
+  --raised: #161618; /* cards, bars, sidebar, modals, raised surfaces */
+  --hairline: #262629; /* 1px borders, rules, dividers */
+  --scrim: rgba(0, 0, 0, 0.6); /* modal/overlay scrim - NO blur */
+
+  /* --- Ink (text) --- */
+  --ink: #eceae3; /* primary text (warm off-white), AAA on canvas */
+  --ink-muted: #9c988e; /* secondary text, labels */
+  --ink-faint: #6a6760; /* tertiary text, disabled, meta */
+
+  /* --- Paper (inverted emphasis blocks, sparingly) --- */
+  --paper-bg: #f2efe6; /* inverted block bg */
+  --paper-ink: #101010; /* text on paper blocks */
+
+  /* --- Triad accent (10) - one leads per surface, never all three sprinkled --- */
+  --red: #e0241b; /* action / run / live-money / live / destructive / error */
+  --blue: #2541b2; /* navigation / links / identity / info / verifying */
+  --yellow: #f2c313; /* earnings / money / reputation (dark text on yellow fills) */
+
+  /* --- Gray ramp (charts / disabled / skeletons) - interpolated canvas -> ink --- */
+  --g1: #161618;
+  --g2: #262629;
+  --g3: #3a3a3d;
+  --g4: #565552;
+  --g5: #7e7b74;
+  --g6: #9c988e;
+
+  /* --- Geometry --- */
+  --radius: 0px; /* hard-edged default; perfect circles are the only exception */
+
+  /* --- Type families --- */
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Geist Mono", "IBM Plex Mono", monospace;
+}
+
+/*
+ * Motion keyframes - ported verbatim from Design/Utter.dc.html <style>.
+ * Functional, geometric, fast (120-240ms). Shapes assemble/snap, they do not fade.
+ */
+@keyframes utterPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes utterSnap {
+  0% {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes utterFill {
+  0% {
+    clip-path: inset(100% 0 0 0);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes utterBar {
+  0% {
+    transform: translateX(-101%);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+@keyframes utterBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* prefers-reduced-motion cuts all geometric motion to instant (brief §Motion). */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+  }
+}
+
+/* Base document treatment (mirrors the mockup html/body). */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+}
+::selection {
+  background: var(--red);
+  color: #fff;
+}

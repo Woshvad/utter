@@ -1,8 +1,13 @@
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+import type { LinksFunction } from "react-router";
+import tokens from "./styles/tokens.css?url";
 
-// Minimal SSR shell. The wagmi + QueryClient providers and the tokens.css import
-// are wired in Plan 05 (wallet) / Plan 02 (tokens); this scaffold keeps the
-// document compiling so the route tree has a root. Keep it minimal but valid.
+// The dark-Bauhaus token layer is now wired in (Plan 02). The wagmi + QueryClient
+// providers are still deferred to Plan 05 (wallet). `tokens.css` carries the CSS
+// variables every Tailwind utility resolves against.
+export const links: LinksFunction = () => [{ rel: "stylesheet", href: tokens }];
+
+// Minimal SSR shell. Keep it minimal but valid so the route tree has a root.
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
