@@ -32,3 +32,10 @@ export {
   DEFAULT_ALLOWLIST,
   type HostCheckResult,
 } from "./allowlist";
+
+// The Hono proxy: verify token -> allowlist -> inject real key server-side -> forward.
+export {
+  createDataProxy,
+  type DataProxyOpts,
+  type FetchLike,
+} from "./proxy";
