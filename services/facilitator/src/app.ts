@@ -196,6 +196,32 @@ export function createApp(deps: AppDeps): Hono {
     if (amount < 0n) return c.json({ success: false, reason: "bad_amount" }, 400);
 
     const idemKey = payment.authorization.nonce as Hex;
+
+    // CR-04: RESERVE-PRECEDES-SETTLE. Reject a settle for a nonce that holds no live
+    // reservation AND has no cached result - so an unreserved (replayed) authorization
+    // can never trigger a debit by hitting /settle directly. A legitimately
+    // reserved-then-settled nonce is the cache short-circuit (handled inside settle).
+    const pending = await deps.store.isNoncePending(idemKey);
+    const alreadySettled = await deps.resultStore.get(idemKey);
+    if (!pending && !alreadySettled) {
+      return c.json({ success: false, reason: "no_reservation" }, 409);
+    }
+
+    // WR-04: re-check the authorization is unexpired at settle entry. Between /verify
+    // and /settle (handler runtime + queueing) it can expire; rather than let the
+    // on-chain debit revert opaquely (unmatched by the NonceUsed rebuild path), reject
+    // cleanly and release the reservation so the buyer's cap is freed.
+    let validBefore: bigint;
+    try {
+      validBefore = BigInt(payment.authorization.validBefore);
+    } catch {
+      return c.json({ success: false, reason: "bad_authorization" }, 400);
+    }
+    if (validBefore <= BigInt(Math.floor(Date.now() / 1000)) && !alreadySettled) {
+      await deps.store.release(idemKey);
+      return c.json({ success: false, reason: "expired" }, 402);
+    }
+
     const receipt = await settle(payment, amount, idemKey, settleDeps, responseBody);
     return c.json({ success: true, receipt }, 200);
   });
