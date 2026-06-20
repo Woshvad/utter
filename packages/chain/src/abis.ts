@@ -338,16 +338,146 @@ export const registryAbi = [
   },
 ] as const;
 
-// Phase 5 ERC-8004 reference ABI - Plan 02 fills this after the reference
-// contracts are authored and CREATE2-deployed. Empty placeholder for now so the
-// barrel export and downstream typing seam exist from Wave 0. These ABIs will
-// encode amounts only as uint256 base units, never a 6/1e6 literal (Pitfall 3).
-export const identityAbi = [] as const;
+// Phase 5 ERC-8004 IdentityRegistry ABI (ID-01). Field names + order copied
+// verbatim from contracts/src/IdentityRegistry.sol so register encodes and the
+// Registered event decodes byte-for-byte, and the Plan 05 viem client reads the
+// minted agentId (the ERC-721 tokenId) from the receipt. register(agentURI)
+// returns the tokenId as agentId; ownerOf/tokenURI are the views the publish
+// pipeline reads. The matching EIP-8004 signature means a future canonical Arc
+// deployment is a drop-in ABI swap. Identity holds no funds: no decimals literal.
+export const identityAbi = [
+  {
+    type: "function",
+    name: "register",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "agentURI", type: "string" }],
+    outputs: [{ name: "agentId", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "ownerOf",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "tokenURI",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ type: "string" }],
+  },
+  {
+    type: "event",
+    name: "Registered",
+    inputs: [
+      { name: "agentId", type: "uint256", indexed: true },
+      { name: "agentURI", type: "string", indexed: false },
+      { name: "owner", type: "address", indexed: true },
+    ],
+  },
+] as const;
 
-// Phase 5 ERC-8004 reference ABI - Plan 02 fills this after the reference
-// contracts are authored and CREATE2-deployed.
-export const reputationAbi = [] as const;
+// Phase 5 ERC-8004 ReputationRegistry ABI (ID-02). Field names + order copied
+// verbatim from contracts/src/ReputationRegistry.sol. giveFeedback carries the
+// full EIP-8004 argument set (value is an int128 fixed-point score with uint8
+// valueDecimals, NOT a USDC amount - no money decimals literal); NewFeedback
+// carries the per-agent monotonic feedbackIndex the indexer consumes.
+export const reputationAbi = [
+  {
+    type: "function",
+    name: "giveFeedback",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "agentId", type: "uint256" },
+      { name: "value", type: "int128" },
+      { name: "valueDecimals", type: "uint8" },
+      { name: "tag1", type: "string" },
+      { name: "tag2", type: "string" },
+      { name: "endpoint", type: "string" },
+      { name: "feedbackURI", type: "string" },
+      { name: "feedbackHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "feedbackCount",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "uint256" }],
+    outputs: [{ type: "uint64" }],
+  },
+  {
+    type: "event",
+    name: "NewFeedback",
+    inputs: [
+      { name: "agentId", type: "uint256", indexed: true },
+      { name: "clientAddress", type: "address", indexed: true },
+      { name: "feedbackIndex", type: "uint64", indexed: false },
+      { name: "value", type: "int128", indexed: false },
+      { name: "valueDecimals", type: "uint8", indexed: false },
+    ],
+  },
+] as const;
 
-// Phase 5 ERC-8004 reference ABI - Plan 02 fills this after the reference
-// contracts are authored and CREATE2-deployed.
-export const validationAbi = [] as const;
+// Phase 5 ERC-8004 ValidationRegistry ABI (ID-02). Field names + order copied
+// verbatim from contracts/src/ValidationRegistry.sol. validationRequest records
+// the addressed validator (read back via requestValidator) and validationResponse
+// answers a requestHash; their events feed the indexer. Validation holds no funds:
+// no decimals literal.
+export const validationAbi = [
+  {
+    type: "function",
+    name: "validationRequest",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "validator", type: "address" },
+      { name: "agentId", type: "uint256" },
+      { name: "requestURI", type: "string" },
+      { name: "requestHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "validationResponse",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "requestHash", type: "bytes32" },
+      { name: "response", type: "uint8" },
+      { name: "responseURI", type: "string" },
+      { name: "responseHash", type: "bytes32" },
+      { name: "tag", type: "string" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "requestValidator",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "bytes32" }],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "event",
+    name: "ValidationRequested",
+    inputs: [
+      { name: "validator", type: "address", indexed: true },
+      { name: "agentId", type: "uint256", indexed: true },
+      { name: "requestURI", type: "string", indexed: false },
+      { name: "requestHash", type: "bytes32", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "ValidationResponded",
+    inputs: [
+      { name: "requestHash", type: "bytes32", indexed: true },
+      { name: "validator", type: "address", indexed: true },
+      { name: "response", type: "uint8", indexed: false },
+      { name: "responseURI", type: "string", indexed: false },
+      { name: "responseHash", type: "bytes32", indexed: false },
+      { name: "tag", type: "string", indexed: false },
+    ],
+  },
+] as const;
