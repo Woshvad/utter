@@ -12,6 +12,24 @@ export { selectGenerator, ScaffoldGenerator, ClaudeGenerator } from "./generator
 export { buildAgentCard, validateAgentCard, A2A_PROTOCOL_VERSION } from "./agent-card.js";
 export type { AgentCardValidationResult } from "./agent-card.js";
 
+// The four-gate in-loop validator (GEN-01/02/04): every generated Bundle passes
+// validateBundle before the Phase 3 deploy hand-off. The four gates are also
+// exported individually so a caller can run a subset.
+export {
+  validateBundle,
+  gateShape,
+  gateStatic,
+  gateBuildSpec,
+  gateServeBehindX402,
+} from "./validate.js";
+export type {
+  ValidationResult,
+  ValidationViolation,
+  GateResult,
+  GateId,
+  ValidateBundleOpts,
+} from "./validate.js";
+
 /**
  * The public generation entry: select the backend from `env` (scaffold by default,
  * the operator-gated claude backend only when ANTHROPIC_API_KEY is present and
