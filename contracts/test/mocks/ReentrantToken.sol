@@ -30,10 +30,16 @@ contract ReentrantToken is ERC20 {
     function _update(address from, address to, uint256 value) internal override {
         super._update(from, to, value);
         if (target != address(0)) {
-            // Re-enter on transfer. The bool is intentionally ignored: the
-            // attack succeeds or the guarded target reverts the whole call.
-            (bool ok,) = target.call(payload);
-            ok;
+            // Re-enter on transfer. Bubble the inner revert so a guarded target
+            // reverts the whole call: the attack either succeeds (re-entry runs)
+            // or the nonReentrant guard reverts the entire outer transaction,
+            // which is exactly the security property the reentrancy test asserts.
+            (bool ok, bytes memory ret) = target.call(payload);
+            if (!ok) {
+                assembly {
+                    revert(add(ret, 0x20), mload(ret))
+                }
+            }
         }
     }
 }
