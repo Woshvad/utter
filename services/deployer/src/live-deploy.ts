@@ -25,6 +25,7 @@
 // SECURITY: keys + DNS credentials are read ONLY from .env.local (gitignored) and
 // are NEVER logged.
 import { config as loadEnv } from "dotenv";
+import { webcrypto } from "node:crypto";
 import {
   keccak256,
   toHex,
@@ -92,7 +93,10 @@ function requireEnv(name: string): string {
 
 /** A 0x-prefixed bytes32 random nonce (the idemKey for this live call). */
 function randomNonce(): Hex {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  // Use the explicitly-imported webcrypto (IN-04) rather than assuming a global
+  // `crypto`, so the operator script does not throw at nonce generation on a
+  // runtime where `globalThis.crypto` is absent.
+  const bytes = webcrypto.getRandomValues(new Uint8Array(32));
   return ("0x" + Buffer.from(bytes).toString("hex")) as Hex;
 }
 
@@ -114,10 +118,15 @@ function randomNonce(): Hex {
 export async function liveDeployEcho(
   fetchImpl: typeof fetch = fetch,
 ): Promise<LiveDeployResult> {
-  // (0) Operator inputs from .env.local ONLY.
+  // (0) Operator inputs from .env.local ONLY. DEPLOY_DOMAIN + the buyer key are
+  // REQUIRED (requireEnv fails closed with an operator-friendly error). ARC_RPC_URL
+  // is deliberately OPTIONAL (WR-07): createArcPublicClient/createArcWalletClient
+  // fall back to the chain's default HTTP RPC when it is absent or blank, so we do
+  // NOT route it through requireEnv — it is an explicit override, not a hard
+  // requirement.
   const domain = requireEnv("DEPLOY_DOMAIN");
   const buyerKey = requireEnv("TEST_BUYER_PRIVATE_KEY") as Hex;
-  const rpcUrl = process.env.ARC_RPC_URL;
+  const rpcUrl = process.env.ARC_RPC_URL; // optional override; chain-default fallback
 
   const publicClient = createArcPublicClient(rpcUrl) as PublicClient;
   const buyerAccount = privateKeyToAccount(buyerKey);
