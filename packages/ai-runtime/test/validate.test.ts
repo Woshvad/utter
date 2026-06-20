@@ -62,6 +62,22 @@ describe("validateBundle (GEN-01/04): four-gate acceptance over the scaffold bun
     );
   });
 
+  it("G1 fails LOUDLY when openapi declares more than one *Success/*Error schema (IN-02)", async () => {
+    // A model-authored openapi with two *Success schemas must not silently pick one
+    // by object-key order; the gate must reject it as ambiguous (deterministic).
+    const bundle = await scaffoldBundle();
+    const doc = JSON.parse(bundle["openapi.json"]!);
+    doc.components.schemas.AltSuccess = doc.components.schemas.ResourceSuccess;
+    bundle["openapi.json"] = JSON.stringify(doc, null, 2);
+    const { result } = gateShape(bundle);
+    expect(result.pass).toBe(false);
+    expect(
+      result.violations.some(
+        (v) => v.gate === "g1" && v.kind === "openapi-schema-ambiguous",
+      ),
+    ).toBe(true);
+  });
+
   it("G1 fails when the agent-card is the rejected A2A v1.0.0 supportedInterfaces shape", async () => {
     const bundle = await scaffoldBundle();
     bundle["agent-card.json"] = JSON.stringify({

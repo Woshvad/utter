@@ -129,19 +129,34 @@ interface ParsedOpenapi {
   errorRef: string;
 }
 
-/** Find a `*Success` / `*Error` component schema name in an openapi doc. */
+/**
+ * Find the `*Success` / `*Error` component schema names in an openapi doc. The
+ * choice is DETERMINISTIC (IN-02): names are sorted before matching so the result
+ * does not depend on `Object.keys` insertion order (non-deterministic across model
+ * runs). If MORE THAN ONE schema matches a suffix the result is AMBIGUOUS - we
+ * surface every match so `gateShape` can fail G1 loudly rather than silently picking
+ * one. The scaffold emits exactly one of each, so this only guards the claude path.
+ */
 function findSchemaRefs(doc: Record<string, unknown>): {
   successRef?: string;
   errorRef?: string;
+  successMatches: string[];
+  errorMatches: string[];
 } {
   const components = doc.components as { schemas?: Record<string, unknown> } | undefined;
   const schemas = components?.schemas ?? {};
-  const names = Object.keys(schemas);
-  const successName = names.find((n) => /Success$/.test(n));
-  const errorName = names.find((n) => /Error$/.test(n));
+  // Stable ordering: sort the names so the pick is deterministic regardless of the
+  // doc's object-key insertion order.
+  const names = Object.keys(schemas).sort();
+  const successMatches = names.filter((n) => /Success$/.test(n));
+  const errorMatches = names.filter((n) => /Error$/.test(n));
+  const successName = successMatches.length === 1 ? successMatches[0] : undefined;
+  const errorName = errorMatches.length === 1 ? errorMatches[0] : undefined;
   return {
     successRef: successName ? `openapi.json#/components/schemas/${successName}` : undefined,
     errorRef: errorName ? `openapi.json#/components/schemas/${errorName}` : undefined,
+    successMatches,
+    errorMatches,
   };
 }
 
@@ -176,8 +191,20 @@ export function gateShape(bundle: Bundle): {
   let openapi: ParsedOpenapi | undefined;
   try {
     const doc = JSON.parse(bundle["openapi.json"]!) as Record<string, unknown>;
-    const { successRef, errorRef } = findSchemaRefs(doc);
-    if (!successRef || !errorRef) {
+    const { successRef, errorRef, successMatches, errorMatches } = findSchemaRefs(doc);
+    if (successMatches.length > 1 || errorMatches.length > 1) {
+      // Ambiguous: more than one *Success or *Error schema. Fail loudly rather than
+      // silently picking one by key order (IN-02).
+      violations.push({
+        gate: "g1",
+        kind: "openapi-schema-ambiguous",
+        detail:
+          `openapi.json has ambiguous schema refs - ` +
+          `*Success: [${successMatches.join(", ")}], *Error: [${errorMatches.join(", ")}]; ` +
+          `exactly one of each is required`,
+        file: "openapi.json",
+      });
+    } else if (!successRef || !errorRef) {
       violations.push({
         gate: "g1",
         kind: "openapi-schema-missing",
@@ -551,10 +578,12 @@ async function signedHeader(opts: {
 
 /**
  * Build the gate `Pricing` from the spec's metered pricing. The spec carries
- * { base, perKB, max }; the gate's metering also needs a compute term and a size
- * cap. We supply a zero compute multiplier (size+base only - deterministic) and the
- * spec `max` as the response-byte cap. The signed cap (from the X-PAYMENT) is the
- * hard ceiling either way.
+ * { base, perKB, max }; the gate's metering also needs a compute term and a
+ * response-byte cap. We supply a zero compute multiplier (size+base only -
+ * deterministic) and a FIXED 1 MB response-byte cap (`maxResponseBytes`). Note
+ * `spec.pricing.max` is the USDC SPEND ceiling, not a byte count, so it is NOT wired
+ * here; the signed cap from the X-PAYMENT is the hard spend ceiling either way. The
+ * byte cap only bounds metered response size, mirroring the sandbox size cap.
  */
 function gatePricing(spec: ResourceSpec): Pricing {
   return {
@@ -574,6 +603,14 @@ function gatePricing(spec: ResourceSpec): Pricing {
  * a non-string `text` -> 400 { error, code } (the declared-error shape). This is the
  * WIRING proof (402 -> 200 behind the gate); the genuine isolated handler execution
  * is the operator-gated runsc deferral.
+ *
+ * DEPLOY-PLANE CAVEAT (IN-03): on the CLAUDE path G4 therefore proves only that the
+ * DECLARED contract serves behind x402, NOT that the model's own handler.ts does. A
+ * model handler that diverges from the echo shape would still pass G4. Phase 5 /
+ * deploy must NOT over-trust G4 for model output: the model handler's real runtime
+ * behavior is validated only under the operator-gated sandbox (runsc) at deploy.
+ * This is an inherent property of the autonomous gate (validate.ts cannot import the
+ * untrusted handler.ts as a TS module), not a fixable defect this phase.
  */
 function buildResourceApp(): Hono {
   const app = new Hono();
