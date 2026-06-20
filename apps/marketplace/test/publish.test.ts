@@ -19,6 +19,7 @@ import {
   KeywordModerator,
   createPublishPipeline,
   PublishBlocked,
+  PublishHeldForReview,
   type Hex,
 } from "../src/index.js";
 
@@ -159,6 +160,35 @@ describe("publish pipeline (createPublishPipeline)", () => {
     // The moderation decision was recorded (the control-plane log).
     const decisions = await moderationStore.listDecisions();
     expect(decisions.some((d) => d.resourceId === RESOURCE && d.decision === "block")).toBe(true);
+  });
+
+  it("WR-02: a `review` verdict holds publication (enqueued, NOT minted, NOT indexed)", async () => {
+    // "scrape ... prices" hits the REVIEW pattern (\bscrape\b) but no BLOCK pattern,
+    // so the moderator returns `review` - a gray-area match that must NOT auto-list.
+    const reviewPrompt = "Scrape product prices from public store pages";
+    const { card } = buildSpec(reviewPrompt);
+    const { pipeline, identity } = buildPipeline({ bond: 2_000_000n, probe: PASS_PROBE });
+
+    await expect(
+      pipeline.publishResource({
+        prompt: reviewPrompt,
+        resourceId: RESOURCE,
+        category: "data",
+        card,
+        cardUrl: CARD_URL,
+      }),
+    ).rejects.toBeInstanceOf(PublishHeldForReview);
+
+    // A `review` is a soft block: no mint, nothing indexed/discoverable.
+    expect(identity.calls).toBe(0);
+    expect(await indexStore.get(RESOURCE)).toBeNull();
+
+    // The decision was recorded AND the spec was enqueued to the review queue (the
+    // moderator does this) - the queue is GATING, not advisory.
+    const decisions = await moderationStore.listDecisions();
+    expect(decisions.some((d) => d.resourceId === RESOURCE && d.decision === "review")).toBe(true);
+    const queue = await moderationStore.listReviewQueue();
+    expect(queue.some((q) => q.resourceId === RESOURCE)).toBe(true);
   });
 
   it("missing bond stops publication (PublishRejected; not listed)", async () => {

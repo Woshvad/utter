@@ -53,7 +53,12 @@ export type {
 } from "./moderation/takedown.js";
 
 // --- Publish pipeline: the composed moderation->bond->score->mint->index gate (MKT-03) ---
-export { createPublishPipeline, PublishBlocked, PublishUnverified } from "./publish.js";
+export {
+  createPublishPipeline,
+  PublishBlocked,
+  PublishUnverified,
+  PublishHeldForReview,
+} from "./publish.js";
 export type {
   PublishPipeline,
   PublishPipelineDeps,

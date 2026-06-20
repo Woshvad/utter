@@ -17,6 +17,7 @@
 // module owns the ORDER + the short-circuit, never re-implementing the gates.
 //
 // This composes the EXISTING functions from 05-03..05-06; it does not re-author them.
+import { validateAgentCard } from "@utter/ai-runtime";
 import type { Moderator } from "./moderation/classifier.js";
 import type { ModerationStore } from "./moderation/review-queue.js";
 import type { IndexStore, IndexRecord, ProjectedPricing, Hex } from "./index-store.js";
@@ -129,6 +130,23 @@ export class PublishBlocked extends Error {
 }
 
 /**
+ * Publication is HELD pending human review (WR-02). A `review` moderation verdict is a
+ * gray-area match (an ambiguous prohibited-use pattern), so the resource is enqueued to
+ * the moderation review queue but is NOT bonded/probed/minted/indexed - it is not
+ * payable or discoverable until a moderator explicitly clears it to `allow`. This makes
+ * the review queue GATING, not advisory: a `review` is a soft block, never an auto-list.
+ */
+export class PublishHeldForReview extends Error {
+  /** The moderation reason that routed this spec to review. */
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`publish held for human review: ${reason}`);
+    this.name = "PublishHeldForReview";
+    this.reason = reason;
+  }
+}
+
+/**
  * Publication was refused because the initial verification probe failed. The resource
  * is NOT verified and therefore NOT listed (T-05-07-UNVERIFIED).
  */
@@ -183,15 +201,22 @@ export function createPublishPipeline(deps: PublishPipelineDeps): PublishPipelin
     async publishResource(req) {
       const { resourceId, category, cardUrl } = req;
 
-      // (1) MODERATION - the FIRST gate. A `block` stops publication here; the
-      // decision is recorded (and an ambiguous spec is enqueued) by the moderator.
-      // The resource is never bonded/probed/minted/listed on a block.
+      // (1) MODERATION - the FIRST gate. A `block` stops publication here, and a
+      // gray-area `review` HOLDS it pending human review (WR-02); the decision is
+      // recorded and (for `review`) the spec is enqueued by the moderator. ONLY an
+      // explicit `allow` proceeds down bond -> probe -> mint -> index. The resource is
+      // never bonded/probed/minted/listed on a `block` OR a `review`.
       const decision = await deps.moderator.moderate(
         { prompt: req.prompt, category, resourceId },
         deps.moderationStore,
       );
       if (decision.decision === "block") {
         throw new PublishBlocked(decision.reason);
+      }
+      if (decision.decision === "review") {
+        // The moderator already enqueued the review-queue item; hold publication until
+        // a moderator resolves it to `allow`. Not minted, not indexed, not discoverable.
+        throw new PublishHeldForReview(decision.reason);
       }
 
       // (2) BOND GATE - reads StakingVault.bonds() and rejects publication below the
@@ -223,6 +248,18 @@ export function createPublishPipeline(deps: PublishPipelineDeps): PublishPipelin
         health: { verified: true, score: null },
         bond: { posted: bondAmount > 0n, amount: bondAmount.toString() },
       };
+
+      // IN-04: re-validate the FINALIZED card (after health/bond are spread on) before
+      // it is served/indexed. publishIdentity validated the minted card, but the
+      // health/bond projection happens AFTER that, so the served card is validated at
+      // the point it is finalized - not only later at serve time (a future card-schema
+      // tightening would otherwise pass publish and fail at the route with a 500).
+      const finalizedCheck = validateAgentCard(finalizedCard);
+      if (!finalizedCheck.valid) {
+        throw new Error(
+          `publish: finalized card failed validateAgentCard: ${finalizedCheck.errors.join("; ")}`,
+        );
+      }
 
       // (6) INDEX UPSERT - the read-through projection record, active=true. The store
       // mirrors the card x402 pricing + the projected bond/reputation; it authors none
