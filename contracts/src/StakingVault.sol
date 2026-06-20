@@ -44,8 +44,14 @@ contract StakingVault is Ownable, ReentrancyGuard {
     error OverRefund();
     /// @notice A bond action was attempted by an address that is not the bond owner.
     error NotBondOwner();
+    /// @notice A deposit targeted a bond already owned by a different address.
+    error BondOwnerMismatch();
     /// @notice A slash exceeds the resource's bond balance.
     error SlashExceedsBond();
+    /// @notice A zero amount was supplied where a positive amount is required.
+    error ZeroAmount();
+    /// @notice A zero address was supplied where a real address is required.
+    error ZeroAddress();
 
     /// @notice The USDC token bonds are denominated in. Immutable after deploy.
     IERC20 public immutable usdc;
@@ -89,20 +95,29 @@ contract StakingVault is Ownable, ReentrancyGuard {
         usdc = usdc_;
     }
 
-    /// @notice Deposit into a resource's bond. Pulls USDC from the caller, who
-    /// becomes the bond owner for the resource. The resulting bond must meet the
-    /// minimum. A deposit clears any pending withdraw cooldown so a fresh bond is
-    /// not instantly withdrawable on stale request state.
+    /// @notice Deposit into a resource's bond. Pulls USDC from the caller. The
+    /// first depositor becomes the bond owner; afterwards only that owner may top
+    /// up, so a second depositor can never seize ownership of another creator's
+    /// combined bond (a resourceId is globally known, so an unconditional owner
+    /// overwrite would let an attacker capture an existing bond for the price of
+    /// MIN_BOND). The resulting bond must meet the minimum. A deposit clears any
+    /// pending withdraw cooldown so a fresh bond is not instantly withdrawable on
+    /// stale request state.
     /// @param resourceId The resource the bond backs.
     /// @param amount USDC base units to add to the bond.
     function deposit(bytes32 resourceId, uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+
+        address current = bondOwner[resourceId];
+        if (current != address(0) && current != msg.sender) revert BondOwnerMismatch();
+
         usdc.safeTransferFrom(msg.sender, address(this), amount);
 
         uint256 newBond = bonds[resourceId] + amount;
         if (newBond < MIN_BOND_BASE_UNITS) revert BelowMinBond();
 
         bonds[resourceId] = newBond;
-        bondOwner[resourceId] = msg.sender;
+        if (current == address(0)) bondOwner[resourceId] = msg.sender;
         cooldownEnds[resourceId] = 0;
 
         emit BondDeposited(resourceId, msg.sender, amount);
@@ -112,6 +127,14 @@ contract StakingVault is Ownable, ReentrancyGuard {
     /// slashed amount moves from the bond to insurancePoolBalance and stays in
     /// vault custody; no tokens leave. Permitted at any time, including during an
     /// active withdraw cooldown, which closes the withdraw-to-dodge path.
+    /// @dev The `amount` is supplied directly by the admin and is NOT reconciled
+    /// on chain against any ResourceRegistry authorization. The registry's
+    /// `slashAuthorization` event is ADVISORY-ONLY: it is an indexer signal that a
+    /// slash is intended, not an on-chain spend authorization that this function
+    /// consumes. The off-chain scorer / admin drives the real spend by calling
+    /// `slash(resourceId, amount, reason)` with consistent values. The two
+    /// contracts share no state; full on-chain coupling is an accepted
+    /// out-of-scope design item under the MVP single-key threat model (D-04).
     /// @param resourceId The resource whose bond is slashed.
     /// @param amount USDC base units to slash.
     /// @param reason Human-readable reason emitted for the indexer.
@@ -172,6 +195,8 @@ contract StakingVault is Ownable, ReentrancyGuard {
     /// @param payer The buyer to reimburse.
     /// @param amount USDC base units to pay out.
     function refund(address payer, uint256 amount) external onlyOwner nonReentrant {
+        if (payer == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
         if (amount > insurancePoolBalance) revert OverRefund();
 
         insurancePoolBalance -= amount;

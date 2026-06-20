@@ -39,6 +39,54 @@ contract StakingVaultTest is Test {
         usdc.mint(creator, 1_000_000_000); // plenty of USDC for the creator
         vm.prank(creator);
         usdc.approve(address(vault), type(uint256).max);
+
+        // The stranger is funded and approved so a takeover attempt fails on the
+        // ownership guard, not on a missing balance or allowance.
+        usdc.mint(stranger, 1_000_000_000);
+        vm.prank(stranger);
+        usdc.approve(address(vault), type(uint256).max);
+    }
+
+    /// A second depositor cannot seize an existing bond: once creator owns the
+    /// bond, a stranger's deposit reverts BondOwnerMismatch and ownership and the
+    /// bond balance are untouched. The original owner can still top up.
+    function test_deposit_rejectsBondOwnerTakeover() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        // Stranger attempts to take over the resource's bond.
+        vm.expectRevert(StakingVault.BondOwnerMismatch.selector);
+        vm.prank(stranger);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        // Ownership and bond balance are unchanged by the rejected takeover.
+        assertEq(vault.bondOwner(RESOURCE_ID), creator, "owner changed by takeover attempt");
+        assertEq(vault.bonds(RESOURCE_ID), BOND, "bond changed by takeover attempt");
+
+        // The original owner can still top up the same bond.
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+        assertEq(vault.bonds(RESOURCE_ID), BOND * 2, "owner top-up not credited");
+        assertEq(vault.bondOwner(RESOURCE_ID), creator, "owner changed by top-up");
+    }
+
+    /// A zero-amount deposit reverts ZeroAmount rather than emitting a no-op event.
+    function test_deposit_revertsOnZeroAmount() public {
+        vm.expectRevert(StakingVault.ZeroAmount.selector);
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, 0);
+    }
+
+    /// A zero-address payer refund reverts ZeroAddress (defense in depth).
+    function test_refund_revertsOnZeroAddressPayer() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, 4_000_000, "scorer:5-strikes");
+
+        vm.expectRevert(StakingVault.ZeroAddress.selector);
+        vm.prank(owner);
+        vault.refund(address(0), 1_000_000);
     }
 
     /// Deposit credits bonds[resourceId] and pulls USDC into the vault.
