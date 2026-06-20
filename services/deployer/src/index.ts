@@ -18,3 +18,12 @@ export {
   type DeploymentStore,
   type ResponseCache,
 } from "./stores/memory";
+
+// In-process x402 injection (DEP-01): wrap a resource app in the Phase 2
+// `requirePayment` escrow gate configured with this resource's pricing/escrow.
+export {
+  injectGate,
+  buildResourceQuote,
+  permissiveClassifier,
+  type InjectGateConfig,
+} from "./inject-x402";
