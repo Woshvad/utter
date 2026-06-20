@@ -75,12 +75,26 @@ function redact(match: string): string {
   return `${match.slice(0, 4)}…${match.slice(-2)} (${match.length} chars)`;
 }
 
+/** Options for {@link scanSecrets}. */
+export interface ScanSecretsOptions {
+  /**
+   * When false, the Shannon-entropy secondary pass is skipped and only the named
+   * provider rules run. Use this for declarative artifacts (openapi/agent-card/
+   * test-cases JSON) that legitimately carry public high-entropy constants - e.g.
+   * the 42-char PaymentEscrow / USDC addresses - which the entropy heuristic would
+   * false-positive on. The named rules (sk-/0x<64hex>/AKIA/...) still run, so a
+   * real embedded key is still caught. Defaults to true (full scan).
+   */
+  entropy?: boolean;
+}
+
 /**
  * Scan a bundle for embedded secrets. Returns every violation (empty == clean).
- * Rule-first (named provider patterns), then an entropy pass over long quoted
- * tokens. Pure; reads source text only.
+ * Rule-first (named provider patterns), then (when `opts.entropy` is not false) an
+ * entropy pass over long quoted tokens. Pure; reads source text only.
  */
-export function scanSecrets(bundle: Bundle): SecretViolation[] {
+export function scanSecrets(bundle: Bundle, opts: ScanSecretsOptions = {}): SecretViolation[] {
+  const entropyEnabled = opts.entropy !== false;
   const violations: SecretViolation[] = [];
 
   for (const [file, source] of Object.entries(bundle)) {
@@ -97,6 +111,8 @@ export function scanSecrets(bundle: Bundle): SecretViolation[] {
       }
 
       // Pass 2: entropy over long quoted tokens not already flagged by a rule.
+      // Skipped when entropy is disabled (declarative JSON with public constants).
+      if (!entropyEnabled) return;
       for (const token of entropyCandidates(line)) {
         if (token.length < ENTROPY_MIN_LEN) continue;
         if (shannonEntropy(token) >= ENTROPY_THRESHOLD) {

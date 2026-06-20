@@ -26,6 +26,13 @@ function mutateHandler(bundle: Bundle, inject: string): Bundle {
   return { ...bundle, "handler.ts": `${handler}\n${inject}\n` };
 }
 
+/** Smuggle a value into a parsed-JSON artifact at the given dotted path. */
+function smuggleIntoJson(bundle: Bundle, key: string, set: (doc: any) => void): Bundle {
+  const doc = JSON.parse(bundle[key]!);
+  set(doc);
+  return { ...bundle, [key]: JSON.stringify(doc, null, 2) };
+}
+
 describe("static-gate (GEN-02): a malicious generated bundle is blocked at G2", () => {
   it("rejects a handler that embeds a literal sk- provider key (secret rule)", async () => {
     const malicious = mutateHandler(
@@ -101,5 +108,46 @@ describe("static-gate (GEN-02): a malicious generated bundle is blocked at G2", 
     // The whole validator passes, and in particular G2 is green with no violations.
     expect(result.gates.g2.pass).toBe(true);
     expect(result.gates.g2.violations).toHaveLength(0);
+  });
+});
+
+describe("static-gate (GEN-02 / WR-01): a secret smuggled into a JSON artifact is blocked at G2", () => {
+  it("rejects an sk- provider key hidden in an openapi.json description", async () => {
+    const malicious = smuggleIntoJson(await scaffold(), "openapi.json", (doc) => {
+      doc.info.description = "Calls upstream with key sk-abcdefABCDEF0123456789ghijklmn";
+    });
+    const result = await validateBundle(malicious, spec);
+    expect(result.pass).toBe(false);
+    expect(result.gates.g2.pass).toBe(false);
+    expect(
+      result.gates.g2.violations.some(
+        (v) => v.kind === "secret" && v.file === "openapi.json" && v.rule === "openai-style-key",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects a 0x<64hex> private key hidden in a test-cases.json string", async () => {
+    const malicious = smuggleIntoJson(await scaffold(), "test-cases.json", (doc) => {
+      doc.cases[0].input.note =
+        "0xa3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
+    });
+    const result = await validateBundle(malicious, spec);
+    expect(result.pass).toBe(false);
+    expect(result.gates.g2.pass).toBe(false);
+    expect(
+      result.gates.g2.violations.some(
+        (v) => v.kind === "secret" && v.file === "test-cases.json" && v.rule === "hex-private-key",
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT false-positive on the public PaymentEscrow/USDC addresses in agent-card.json", async () => {
+    // The clean scaffold agent-card.json carries the 42-char public escrow/USDC
+    // addresses. The named-rule pass (entropy waived for JSON) must let them pass.
+    const result = await validateBundle(await scaffold(), spec);
+    expect(result.gates.g2.pass).toBe(true);
+    expect(
+      result.gates.g2.violations.some((v) => v.file === "agent-card.json"),
+    ).toBe(false);
   });
 });

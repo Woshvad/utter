@@ -50,7 +50,7 @@ import {
   type Pricing,
   type ResponseClass,
 } from "@utter/x402-arc";
-import { runPrePublishStaticChecks } from "@utter/sandbox";
+import { runPrePublishStaticChecks, scanSecrets } from "@utter/sandbox";
 import {
   buildResourceImage,
   assertPinnedByDigest,
@@ -272,14 +272,12 @@ export function gateShape(bundle: Bundle): {
 
 /**
  * The executable-code surface of a bundle: the files that actually run in the
- * sandbox (.ts/.js/.py). The GEN-02 static gate scans THESE - an embedded key or a
- * dangerous import in the code is the secret-exfil / escape threat. The declarative
- * JSON artifacts (openapi/agent-card/test-cases) are NOT executable surface: they
- * carry PUBLIC chain constants (e.g. the PaymentEscrow address) that are validated
- * by G1 (ajv), and feeding them to the entropy secret-scan would false-positive on a
- * public address. This mirrors the sandbox's own callers, which pass code files only
- * (services/sandbox/test/prepublish.test.ts). The Dockerfile is platform-produced
- * and digest-pinned (G3), not generated code, so it is excluded too.
+ * sandbox (.ts/.js/.py). The GEN-02 static gate runs the FULL scan over THESE
+ * (named secret rules + entropy heuristic + disallowed-import AST) - an embedded key
+ * or a dangerous import in the code is the secret-exfil / escape threat. The
+ * Dockerfile is platform-produced and digest-pinned (G3), not generated code, so it
+ * is excluded. The declarative JSON artifacts are scanned separately by
+ * {@link jsonSurface} (named secret rules only - see WR-01).
  */
 function codeSurface(bundle: Bundle): Bundle {
   const code: Bundle = {};
@@ -292,32 +290,73 @@ function codeSurface(bundle: Bundle): Bundle {
 }
 
 /**
- * G2 (static): call runPrePublishStaticChecks over the bundle's executable-code
- * surface (from @utter/sandbox) and surface its violations. This is the GEN-02 gate:
- * an embedded key, a disallowed (net/child_process) import, or process.env
- * enumeration in the generated code FAILS the bundle here, before any deploy
- * hand-off. The scanner is imported, NEVER re-implemented.
+ * The declarative-JSON surface of a bundle (openapi/agent-card/test-cases and any
+ * other .json the model emits). On the SCAFFOLD path this JSON is deterministic
+ * platform output; on the CLAUDE path it is model-authored and UNTRUSTED - a model
+ * (or a prompt-injected model) can hide a raw key in an openapi `description` or a
+ * test-case string (WR-01 / GEN-02 smuggle). These files legitimately carry PUBLIC
+ * chain constants (the 42-char PaymentEscrow / USDC addresses from @utter/chain),
+ * which the entropy heuristic would false-positive on. So we scan them with the
+ * NAMED secret rules only (entropy waived), catching sk-/0x<64hex>/AKIA literals
+ * while letting the public escrow address pass.
+ */
+function jsonSurface(bundle: Bundle): Bundle {
+  const json: Bundle = {};
+  for (const [file, source] of Object.entries(bundle)) {
+    if (/\.json$/.test(file)) {
+      json[file] = source;
+    }
+  }
+  return json;
+}
+
+/**
+ * G2 (static): run the GEN-02 static checks over the generated bundle and surface
+ * the violations. The executable-code surface gets the FULL scan
+ * (runPrePublishStaticChecks: named secret rules + entropy + disallowed-import AST).
+ * The declarative-JSON surface gets the NAMED secret rules only (entropy waived so
+ * the public escrow/USDC addresses do not false-positive, while a smuggled raw key
+ * in an openapi description or a test-case string is still REJECTED - WR-01). An
+ * embedded key, a disallowed (net/child_process) import, or process.env enumeration
+ * FAILS the bundle here, before any deploy hand-off. The scanners are imported,
+ * NEVER re-implemented.
  */
 export function gateStatic(bundle: Bundle): GateResult {
-  const r = runPrePublishStaticChecks(codeSurface(bundle));
-  const violations: ValidationViolation[] = r.violations.map((v) => {
+  const violations: ValidationViolation[] = [];
+
+  // Code surface: the full pre-publish scan (secrets + entropy + import AST).
+  const code = runPrePublishStaticChecks(codeSurface(bundle));
+  for (const v of code.violations) {
     if (v.kind === "secret") {
-      return {
+      violations.push({
         gate: "g2",
         kind: "secret",
         rule: v.rule,
         file: v.file,
         detail: `secret-scan rule "${v.rule}" fired in ${v.file}:${v.line} (${v.preview})`,
-      };
+      });
+    } else {
+      violations.push({
+        gate: "g2",
+        kind: "import",
+        rule: v.rule,
+        file: v.file,
+        detail: `import-scan rule "${v.rule}" fired in ${v.file}:${v.line} (${v.message})`,
+      });
     }
-    return {
+  }
+
+  // JSON surface: named secret rules only (entropy waived for public chain constants).
+  for (const v of scanSecrets(jsonSurface(bundle), { entropy: false })) {
+    violations.push({
       gate: "g2",
-      kind: "import",
+      kind: "secret",
       rule: v.rule,
       file: v.file,
-      detail: `import-scan rule "${v.rule}" fired in ${v.file}:${v.line} (${v.message})`,
-    };
-  });
+      detail: `secret-scan rule "${v.rule}" fired in ${v.file}:${v.line} (${v.preview})`,
+    });
+  }
+
   return gateResult(violations);
 }
 
