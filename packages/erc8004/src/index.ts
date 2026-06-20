@@ -4,6 +4,14 @@
 // agent card. It reads the ERC-8004 reference ABIs + addresses from @utter/chain
 // (identityAbi/reputationAbi/validationAbi land in Plan 02 post-CREATE2-deploy).
 //
-// This is the Wave 0 barrel: the feature waves append the identity mint/read
-// client. Nothing is exported yet.
-export {};
+// The feature waves append the identity mint/read client + the publish-time
+// composition. Task 1 exports the registry client; Task 2 adds publishIdentity.
+export {
+  createErc8004Client,
+  resolveErc8004Addresses,
+  HEALTH_VALUE_DECIMALS,
+  type Erc8004Client,
+  type Erc8004ClientOptions,
+  type Erc8004Addresses,
+  type RegisterResult,
+} from "./client.js";
