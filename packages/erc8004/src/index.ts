@@ -15,3 +15,11 @@ export {
   type Erc8004Addresses,
   type RegisterResult,
 } from "./client.js";
+
+export {
+  publishIdentity,
+  type PublishIdentityOptions,
+  type PublishIdentityResult,
+  type RegistryAdmin,
+  type ResourceConfig,
+} from "./identity.js";

@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@utter/ai-runtime": "workspace:*",
     "@utter/chain": "workspace:*",
     "viem": "2.52.2"
   }
