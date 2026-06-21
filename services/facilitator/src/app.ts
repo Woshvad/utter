@@ -36,6 +36,10 @@ import {
   type SettleResponseBody,
 } from "./settle";
 import type { RelayerPool } from "./relayer";
+import { spendCapPreReserveGate } from "./spend-cap-gate";
+import { routeDebit } from "./batch-route";
+import type { BatchSettler } from "./batch-settler";
+import type { SpendCapStore } from "@utter/data-proxy";
 
 /** Everything the app's routes need injected (stores + chain + relayer + knobs). */
 export interface AppDeps {
@@ -61,6 +65,29 @@ export interface AppDeps {
   settleBufferSeconds: number;
   /** Result retention TTL (seconds, default 24h). */
   resultTtlSeconds?: number;
+
+  // ---- CR-01: per-payer rolling-24h spend cap (the free-compute guard) ----
+  /**
+   * The rolling-24h spend store. When set (with `perPayerDayCap`), POST /verify runs
+   * the deny-by-default spend-cap gate BEFORE verifyAndReserve so an over-cap payer is
+   * rejected with ZERO reservation. UNSET (the default) = no spend cap (no-op), so
+   * existing deployments and tests are unchanged.
+   */
+  spendCapStore?: SpendCapStore;
+  /** The per-payer rolling-24h cap (USDC base-unit bigint). Required to arm the gate. */
+  perPayerDayCap?: bigint;
+  /** Injected clock (ms since epoch) for the spend-cap window + expiry. Defaults to Date.now. */
+  now?: () => number;
+
+  // ---- CR-02: sub-cent batching (route sub-threshold debits to a BatchSettler) ----
+  /**
+   * Per-resource BatchSettler registry. When set (with `minEconomicalAmount`), a
+   * sub-threshold escrow /settle ACCRUES into the resource's BatchSettler (no immediate
+   * on-chain debit) instead of settling immediately. UNSET = settle immediately as today.
+   */
+  batchSettler?: (resourceId: Hex) => BatchSettler;
+  /** The min-economical threshold (USDC base-unit bigint): below it a debit batches. */
+  minEconomicalAmount?: bigint;
 }
 
 /** Decode a request body into a typed PaymentPayload, or null if malformed. */
@@ -109,14 +136,43 @@ export function createApp(deps: AppDeps): Hono {
           : deps.maxTimeoutSeconds,
     };
 
-    const result = await verifyAndReserve(payment, requirements, {
-      store: deps.store,
-      publicClient: deps.publicClient,
-      escrowAddress: deps.escrowAddress,
-      perBuyerLock: deps.perBuyerLock,
-      maxTimeoutSeconds: requirements.maxTimeoutSeconds,
-      settleBufferSeconds: deps.settleBufferSeconds,
-    });
+    // The reserve step (verifyAndReserve) - the FREE-COMPUTE GUARD. Bound here so the
+    // spend-cap gate (CR-01) can run it ONLY on a spend-cap allow, and so the unconfigured
+    // path calls it directly (unchanged behavior).
+    const doReserve = () =>
+      verifyAndReserve(payment, requirements, {
+        store: deps.store,
+        publicClient: deps.publicClient,
+        escrowAddress: deps.escrowAddress,
+        perBuyerLock: deps.perBuyerLock,
+        maxTimeoutSeconds: requirements.maxTimeoutSeconds,
+        settleBufferSeconds: deps.settleBufferSeconds,
+      });
+
+    // CR-01: per-payer rolling-24h spend cap. When a store + cap are configured, run the
+    // deny-by-default gate BEFORE the reserve so an over-cap payer consumes ZERO compute
+    // (NO reservation). A no-op when unconfigured (the gate is not armed).
+    if (deps.spendCapStore && deps.perPayerDayCap !== undefined) {
+      const nowMs = (deps.now ?? Date.now)();
+      const gate = await spendCapPreReserveGate(
+        {
+          payer: (payment.authorization.buyer as string).toLowerCase(),
+          amount: BigInt(payment.authorization.maxAmount),
+          cap: deps.perPayerDayCap,
+          store: deps.spendCapStore,
+          now: Math.floor(nowMs / 1000),
+        },
+        { reserve: doReserve, handler: async () => undefined },
+      );
+      if (gate.decision === "deny") {
+        // Over-cap: rejected with NO reservation (the free-compute guard holds).
+        return c.json({ valid: false, reason: "over_cap" }, 402);
+      }
+      const reserved = gate.reserve!;
+      return c.json(reserved, reserved.valid ? 200 : 402);
+    }
+
+    const result = await doReserve();
     return c.json(result, result.valid ? 200 : 402);
   });
 
@@ -196,6 +252,7 @@ export function createApp(deps: AppDeps): Hono {
     if (amount < 0n) return c.json({ success: false, reason: "bad_amount" }, 400);
 
     const idemKey = payment.authorization.nonce as Hex;
+    const settleResourceId = payment.authorization.resourceId as Hex;
 
     // CR-04: RESERVE-PRECEDES-SETTLE. Reject a settle for a nonce that holds no live
     // reservation AND has no cached result - so an unreserved (replayed) authorization
@@ -217,9 +274,36 @@ export function createApp(deps: AppDeps): Hono {
     } catch {
       return c.json({ success: false, reason: "bad_authorization" }, 400);
     }
-    if (validBefore <= BigInt(Math.floor(Date.now() / 1000)) && !alreadySettled) {
+    const nowMsSettle = (deps.now ?? Date.now)();
+    if (validBefore <= BigInt(Math.floor(nowMsSettle / 1000)) && !alreadySettled) {
       await deps.store.release(idemKey);
       return c.json({ success: false, reason: "expired" }, 402);
+    }
+
+    // CR-02: route through the min-economical threshold when batching is configured. A
+    // sub-threshold debit ACCRUES into the resource's BatchSettler (NO immediate on-chain
+    // debit - the batch flushes one settle() later); an at/above-threshold debit settles
+    // immediately via the SAME settle() money guard. A no-op (immediate settle) when
+    // batching is unconfigured - the existing behavior. The reserve-precedes-settle and
+    // expiry checks above still gate BOTH paths (no unreserved/expired auth accrues).
+    if (deps.batchSettler && deps.minEconomicalAmount !== undefined) {
+      const routed = await routeDebit({
+        debit: amount,
+        minEconomical: deps.minEconomicalAmount,
+        resourceId: settleResourceId,
+        now: Math.floor(nowMsSettle / 1000),
+        batchSettler: deps.batchSettler(settleResourceId),
+        settle: { payment, amount, idemKey, deps: settleDeps, body: responseBody },
+      });
+      if (routed.path === "batched") {
+        // Accrued with NO immediate on-chain debit; the flush (if this accrual tripped a
+        // trigger) carries the batched receipt, else it settles on a later accrual.
+        return c.json(
+          { success: true, batched: true, receipt: routed.flush?.receipt ?? null },
+          200,
+        );
+      }
+      return c.json({ success: true, receipt: routed.receipt }, 200);
     }
 
     const receipt = await settle(payment, amount, idemKey, settleDeps, responseBody);

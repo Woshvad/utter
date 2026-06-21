@@ -15,6 +15,7 @@ import { config as loadEnv } from "dotenv";
 import { serve } from "@hono/node-server";
 import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
+import { InMemorySpendCapStore, type SpendCapStore } from "@utter/data-proxy";
 import { createApp, type AppDeps } from "./app";
 import { createRelayerPool } from "./relayer";
 import { createInMemoryBuyerLock } from "./verify";
@@ -59,6 +60,33 @@ export function buildDepsFromEnv(): AppDeps {
       ? createPgRedisStores({ databaseUrl, redisUrl })
       : createInMemoryStores();
 
+  // CR-01: per-payer rolling-24h spend cap. EMPTY by default (no env -> no cap -> the
+  // gate is NOT armed and /verify behaves exactly as before). Set SPEND_CAP_PER_PAYER_DAY
+  // (a USDC base-unit integer) to arm the deny-by-default free-compute guard. The store
+  // is the in-memory default; a Redis-backed SpendCapStore drops in behind the same
+  // contract when REDIS_URL is configured (operator wiring).
+  const perPayerDayCapRaw = process.env.SPEND_CAP_PER_PAYER_DAY;
+  const perPayerDayCap =
+    perPayerDayCapRaw && perPayerDayCapRaw.trim().length > 0
+      ? BigInt(perPayerDayCapRaw.trim())
+      : undefined;
+  const spendCapStore: SpendCapStore | undefined =
+    perPayerDayCap !== undefined ? new InMemorySpendCapStore() : undefined;
+
+  // CR-02: the min-economical batching threshold. EMPTY by default (no env -> no
+  // batching -> /settle settles immediately as before). Set MIN_ECONOMICAL_AMOUNT (a
+  // USDC base-unit integer) to route sub-threshold debits into a per-resource
+  // BatchSettler. The per-resource BatchSettler registry needs a per-resource buyer
+  // batch-authorization seam (the buildBatchPayment signer), which is operator-provided
+  // alongside the relayer/live wiring; until that is injected the threshold alone is a
+  // no-op (batchSettler stays undefined), so this never silently drops to immediate
+  // settle for a deployment that intended batching.
+  const minEconomicalRaw = process.env.MIN_ECONOMICAL_AMOUNT;
+  const minEconomicalAmount =
+    minEconomicalRaw && minEconomicalRaw.trim().length > 0
+      ? BigInt(minEconomicalRaw.trim())
+      : undefined;
+
   return {
     store: stores.payments,
     resultStore: stores.results,
@@ -71,6 +99,9 @@ export function buildDepsFromEnv(): AppDeps {
     maxTimeoutSeconds,
     settleBufferSeconds,
     resultTtlSeconds,
+    spendCapStore,
+    perPayerDayCap,
+    minEconomicalAmount,
   };
 }
 
