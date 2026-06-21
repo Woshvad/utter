@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { selectAdapter } from "../app/adapter/select";
 import { FixtureAdapter } from "../app/adapter/fixture";
-import { RequiresLiveServicesError } from "../app/adapter/live";
+import { LiveAdapter, RequiresLiveServicesError } from "../app/adapter/live";
 import { BUILD_STAGES, type BuildStage } from "../app/adapter/types";
 import { FIXTURE_RESOURCE_ID } from "../app/fixtures/index";
 
@@ -31,12 +31,44 @@ describe("selectAdapter", () => {
   });
 });
 
-describe("LiveAdapter (operator-gated, fail-loud)", () => {
-  it("throws RequiresLiveServicesError on a sub-call", async () => {
-    const adapter = selectAdapter({ STUDIO_DATA_ADAPTER: "live" } as NodeJS.ProcessEnv);
-    await expect(adapter.getResourceDetail("0xabc")).rejects.toBeInstanceOf(
+describe("LiveAdapter (deferred pipeline, fail-loud)", () => {
+  // The four read methods (getEscrowBalance / listMarketplace / getResourceDetail /
+  // runPlayground) are now implemented against injected deps - covered offline in
+  // live-adapter.test.ts. Here we assert ONLY the three DEFERRED pipeline methods
+  // still fail loud (the live build/revenue pipeline lands in a later increment).
+  // Construct the adapter directly with NO deps so no real env/chain is touched: the
+  // deferred methods throw before ever needing deps.
+  it("createResource still throws RequiresLiveServicesError", async () => {
+    const adapter = new LiveAdapter();
+    await expect(
+      adapter.createResource({
+        prompt: "x",
+        pricingModel: "flat",
+        basePrice: 1n,
+        bond: 1n,
+        payout: "0x1111111111111111111111111111111111111111",
+      }),
+    ).rejects.toBeInstanceOf(RequiresLiveServicesError);
+  });
+
+  it("getRevenue still throws RequiresLiveServicesError", async () => {
+    const adapter = new LiveAdapter();
+    await expect(adapter.getRevenue("0xabc")).rejects.toBeInstanceOf(
       RequiresLiveServicesError,
     );
+  });
+
+  it("subscribeBuildEvents throws on first iteration (real async generator)", async () => {
+    const adapter = new LiveAdapter();
+    let thrown: unknown;
+    try {
+      for await (const _ev of adapter.subscribeBuildEvents("0xabc")) {
+        void _ev;
+      }
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(RequiresLiveServicesError);
   });
 });
 
