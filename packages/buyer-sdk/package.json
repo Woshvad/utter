@@ -21,7 +21,8 @@
     "@utter/marketplace": "workspace:*",
     "@utter/x402-arc": "workspace:*",
     "dotenv": "17.4.2",
-    "hono": "4.12.26"
+    "hono": "4.12.26",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "viem": "2.52.2"

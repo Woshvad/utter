@@ -55,3 +55,33 @@ export {
   FIXTURE_FACILITATOR_URL,
 } from "./transport.js";
 export type { BuyerTransport, FixtureTransportDeps } from "./transport.js";
+
+// --- MCP server (Plan 03, BUY-02/BUY-03): createMcpServer over StdioServerTransport ---
+// The discovery + per-endpoint tools wrap createBuyerClient.pay; the buyer key is held in
+// the client closure (never a tool arg/return/log). The per-tool/-day budget guard layers
+// a soft cap over the on-chain signed-cap hard bound.
+export { createMcpServer, createMcpServerAsync } from "./mcp/server.js";
+export type {
+  CreateMcpServerOptions,
+  CreatedMcpServer,
+  McpBuyerClient,
+} from "./mcp/server.js";
+export {
+  buildDiscoveryTool,
+  buildEndpointTool,
+} from "./mcp/tools.js";
+export type {
+  DiscoveredCard,
+  DiscoveredPricing,
+  CardListSource,
+  BuiltTool,
+  BuiltDiscoveryTool,
+  ToolResult,
+  PayFn,
+  PrePayGuard,
+} from "./mcp/tools.js";
+export {
+  createBudgetGuard,
+  readBudgetCapsFromEnv,
+} from "./mcp/budget.js";
+export type { BudgetGuard, BudgetCaps, BudgetDecision } from "./mcp/budget.js";
