@@ -123,6 +123,6 @@ export function start(port = Number(process.env.PORT ?? "8787")): void {
 // Boot when run directly (node src/server.ts), not when imported by a test.
 // pathToFileURL normalizes process.argv[1] to the same WHATWG file:// href that
 // import.meta.url carries, so the direct-run check fires on Windows and POSIX alike.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   start();
 }

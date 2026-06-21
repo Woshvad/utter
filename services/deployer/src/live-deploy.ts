@@ -248,7 +248,7 @@ export async function liveDeployEcho(
 // file:// href import.meta.url carries, so the direct-run check fires on Windows
 // and POSIX alike (server.ts uses the same cross-platform pattern);
 // import.meta.main is a Bun-ism that is always undefined on Node.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   liveDeployEcho()
     .then((r) => {
       console.log(`[live-deploy] OK: ${r.url} 402(unpaid)->200(paid); PRX-02 unreachable=${r.nonAllowlistedUnreachable}`);
