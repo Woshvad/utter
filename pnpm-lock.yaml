@@ -389,6 +389,9 @@ importers:
       '@utter/chain':
         specifier: workspace:*
         version: link:../../packages/chain
+      '@utter/data-proxy':
+        specifier: workspace:*
+        version: link:../../packages/data-proxy
       '@utter/x402-arc':
         specifier: workspace:*
         version: link:../../packages/x402-arc
