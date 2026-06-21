@@ -41,6 +41,32 @@ export interface SpendCapStore {
    * without recording a spend.
    */
   recordSpend(payer: string, amount: bigint, now: number): Promise<bigint>;
+  /**
+   * ATOMIC check-and-reserve (WR-04): in ONE indivisible operation, read the payer's
+   * rolling-24h total, and IFF `rolling + amount <= cap` record `amount` and return
+   * `{ allowed: true }`; otherwise record NOTHING and return `{ allowed: false }`.
+   *
+   * This closes the TOCTOU hole the read-then-record gate had: two concurrent requests
+   * from the same payer that JOINTLY exceed the cap can no longer BOTH pass (each would
+   * read the pre-spend total, both pass, both record). With the atomic op the second
+   * request sees the first request's reservation and is denied. The interface is
+   * Redis-shaped (a single atomic add-if-within-cap) so a real Redis adapter implements
+   * it as one Lua/EVAL round-trip. `total` is the rolling total INCLUDING this spend on
+   * allow, or the unchanged rolling total on deny. All amounts are USDC base-unit bigint.
+   */
+  tryRecordSpend(
+    payer: string,
+    amount: bigint,
+    cap: bigint,
+    now: number,
+  ): Promise<{ allowed: boolean; total: bigint }>;
+  /**
+   * Compensating REFUND (WR-04): atomically remove a previously-reserved `amount` from
+   * the payer's window at `now`, undoing a tryRecordSpend hold when the downstream
+   * reservation is rejected (so a denied-after-reserve call does not permanently consume
+   * the payer's cap - a self-DoS). A no-op when there is nothing to refund.
+   */
+  refundSpend(payer: string, amount: bigint, now: number): Promise<bigint>;
 }
 
 /** One timestamped spend entry in a payer's rolling window. */
@@ -70,6 +96,48 @@ export class InMemorySpendCapStore implements SpendCapStore {
     if (amount !== 0n) kept.push({ at: now, amount });
     this.entries.set(payer, kept);
     // Sum the in-window base-unit amounts - bigint money, never coerced to number.
+    let total = 0n;
+    for (const e of kept) total += e.amount;
+    return total;
+  }
+
+  /**
+   * ATOMIC check-and-reserve (WR-04). In the single-threaded event loop this is
+   * indivisible because there is NO `await` between reading the window total and
+   * appending the spend - no other request can interleave between the check and the
+   * record. The Redis adapter achieves the same indivisibility with one EVAL. On allow
+   * the spend is recorded (so a concurrent second request sees it and is denied); on
+   * deny NOTHING is recorded.
+   */
+  async tryRecordSpend(
+    payer: string,
+    amount: bigint,
+    cap: bigint,
+    now: number,
+  ): Promise<{ allowed: boolean; total: bigint }> {
+    const cutoff = now - SPEND_CAP_WINDOW_SECONDS;
+    const kept = (this.entries.get(payer) ?? []).filter((e) => e.at > cutoff);
+    let rolling = 0n;
+    for (const e of kept) rolling += e.amount;
+    // Deny-by-default: only record if the spend stays within the cap. No await between
+    // this decision and the write below, so two concurrent calls cannot both pass.
+    if (rolling + amount > cap) {
+      this.entries.set(payer, kept); // persist the window trim even on deny
+      return { allowed: false, total: rolling };
+    }
+    if (amount !== 0n) kept.push({ at: now, amount });
+    this.entries.set(payer, kept);
+    return { allowed: true, total: rolling + amount };
+  }
+
+  /** Compensating refund (WR-04): remove a reserved spend of `amount` at `now`. */
+  async refundSpend(payer: string, amount: bigint, now: number): Promise<bigint> {
+    const cutoff = now - SPEND_CAP_WINDOW_SECONDS;
+    const kept = (this.entries.get(payer) ?? []).filter((e) => e.at > cutoff);
+    // Remove ONE matching reserved entry (same amount + timestamp) if present.
+    const idx = kept.findIndex((e) => e.amount === amount && e.at === now);
+    if (idx >= 0) kept.splice(idx, 1);
+    this.entries.set(payer, kept);
     let total = 0n;
     for (const e of kept) total += e.amount;
     return total;

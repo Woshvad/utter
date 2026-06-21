@@ -109,9 +109,59 @@ describe("spendCapGate deny-by-default (rolling + amount > cap)", () => {
         total += amount;
         return total;
       },
+      async tryRecordSpend(_payer, amount, cap, _now) {
+        if (total + amount > cap) return { allowed: false, total };
+        total += amount;
+        return { allowed: true, total };
+      },
+      async refundSpend(_payer, amount, _now) {
+        total -= amount;
+        return total;
+      },
     };
     expect(await spendCapGate(PAYER_A, 100n, 1000n, custom, 0)).toBe("allow");
     // The gate read (amount 0) must not mutate the total.
     expect(total).toBe(700n);
+  });
+});
+
+describe("InMemorySpendCapStore.tryRecordSpend (WR-04 atomic check-and-reserve)", () => {
+  it("records the spend and returns allowed when within the cap", async () => {
+    const store = new InMemorySpendCapStore();
+    const r = await store.tryRecordSpend(PAYER_A, 300n, 1000n, HOUR);
+    expect(r.allowed).toBe(true);
+    expect(r.total).toBe(300n);
+    // The spend is persisted (the window reflects it for the next check).
+    expect(await store.recordSpend(PAYER_A, 0n, HOUR)).toBe(300n);
+  });
+
+  it("records NOTHING and returns denied when the spend would exceed the cap", async () => {
+    const store = new InMemorySpendCapStore();
+    await store.recordSpend(PAYER_A, 900n, 0);
+    const r = await store.tryRecordSpend(PAYER_A, 200n, 1000n, HOUR);
+    expect(r.allowed).toBe(false);
+    // Deny records nothing - the window is unchanged at 900.
+    expect(await store.recordSpend(PAYER_A, 0n, HOUR)).toBe(900n);
+  });
+
+  it("is atomic under concurrency: two jointly-over-cap reservations -> exactly one allowed", async () => {
+    const store = new InMemorySpendCapStore();
+    // 600 + 600 = 1200 > 1000. The old read-then-record path let both pass; the atomic
+    // op admits exactly one (no await between the read and the record).
+    const [a, b] = await Promise.all([
+      store.tryRecordSpend(PAYER_A, 600n, 1000n, HOUR),
+      store.tryRecordSpend(PAYER_A, 600n, 1000n, HOUR),
+    ]);
+    const allowed = [a, b].filter((r) => r.allowed).length;
+    expect(allowed).toBe(1);
+    expect(await store.recordSpend(PAYER_A, 0n, HOUR)).toBe(600n);
+  });
+
+  it("refundSpend removes a reserved hold (compensating undo at the same now)", async () => {
+    const store = new InMemorySpendCapStore();
+    await store.tryRecordSpend(PAYER_A, 400n, 1000n, HOUR);
+    expect(await store.recordSpend(PAYER_A, 0n, HOUR)).toBe(400n);
+    await store.refundSpend(PAYER_A, 400n, HOUR);
+    expect(await store.recordSpend(PAYER_A, 0n, HOUR)).toBe(0n);
   });
 });

@@ -16,7 +16,7 @@
 // The clock is INJECTED (`now: number`, seconds) - there is NO Date.now() here. All
 // amounts are USDC base-unit bigint. The spend-cap money never touches the quota
 // call/byte counters (distinct stores).
-import { spendCapGate, type SpendCapStore } from "@utter/data-proxy";
+import type { SpendCapStore } from "@utter/data-proxy";
 
 /** A reservation outcome from the wrapped reserve fn (mirrors verify.ts VerifyResult). */
 export interface ReserveOutcome {
@@ -69,14 +69,21 @@ export interface SpendCapGateResult<H> {
 /**
  * Run the per-payer spend-cap check BEFORE the /verify reserve and the handler.
  *
- * Order (the free-compute guard):
- *   1. spendCapGate(payer, amount, cap, store, now) - a PURE READ of the 24h window.
- *      "deny" -> short-circuit: NO reserve, NO handler, NO spend recorded.
- *   2. "allow" -> reserve(). If the reservation is not valid -> stop: handler does NOT
- *      run and NO spend is recorded (no compute consumed).
- *   3. valid reservation -> handler(), then record the spend (store.recordSpend) so a
- *      subsequent over-cap call denies. Recording AFTER a successful reserve means a
- *      denied/rejected call never accrues against the payer's window.
+ * Order (the free-compute guard), now ATOMIC (WR-04):
+ *   1. tryRecordSpend(payer, amount, cap, now) - an ATOMIC check-and-reserve of the 24h
+ *      window. On "deny" -> short-circuit: NO reserve, NO handler, NO spend held. On
+ *      "allow" the spend is RESERVED in the same atomic op, so a concurrent second
+ *      request from the same payer that would jointly exceed the cap is denied (no
+ *      TOCTOU: the old read-then-record gate let both concurrent calls pass).
+ *   2. "allow" -> reserve(). If the reservation is not valid -> REFUND the held spend
+ *      (so a reserve-rejected call does not permanently consume the payer's cap, a
+ *      self-DoS) and stop: the handler does NOT run.
+ *   3. valid reservation -> handler(). The spend is ALREADY held from step 1 (reflecting
+ *      the call for the NEXT gate check), so nothing more is recorded here.
+ *
+ * The held spend is a provisional reservation: it is refunded on a rejected reservation.
+ * A settle-failure refund (if the buyer never settles) is the caller's concern keyed on
+ * the same nonce; the gate's job is the deny-before-reserve atomicity + no-TOCTOU.
  */
 export async function spendCapPreReserveGate<H>(
   input: SpendCapGateInput,
@@ -84,23 +91,25 @@ export async function spendCapPreReserveGate<H>(
 ): Promise<SpendCapGateResult<H>> {
   const { payer, amount, cap, store, now } = input;
 
-  // (1) The deny-by-default spend-cap check runs FIRST - before any compute.
-  const decision = await spendCapGate(payer, amount, cap, store, now);
-  if (decision === "deny") {
+  // (1) ATOMIC deny-by-default check-and-reserve - before any compute. On allow the
+  // spend is held in the SAME op so concurrent over-cap calls cannot both pass.
+  const { allowed } = await store.tryRecordSpend(payer, amount, cap, now);
+  if (!allowed) {
     return { decision: "deny" };
   }
 
   // (2) Allowed -> reserve. Reserve PRECEDES the handler (Phase 2 invariant).
   const reserve = await downstream.reserve();
   if (!reserve.valid) {
-    // A rejected reservation: the handler must NOT run and NO spend is recorded.
+    // A rejected reservation: refund the provisional hold (no permanent cap consumption)
+    // and stop - the handler must NOT run.
+    await store.refundSpend(payer, amount, now);
     return { decision: "reserve_rejected", reserve };
   }
 
-  // (3) Valid reservation -> run the handler, then record the payer's spend so the
-  // rolling-24h window reflects this call for the NEXT gate check.
+  // (3) Valid reservation -> run the handler. The spend was already held atomically in
+  // step 1, so the rolling-24h window already reflects this call for the next check.
   const handlerResult = await downstream.handler();
-  await store.recordSpend(payer, amount, now);
 
   return { decision: "allow", reserve, handlerResult };
 }
