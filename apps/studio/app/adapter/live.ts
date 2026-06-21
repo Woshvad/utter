@@ -7,14 +7,20 @@
 // the SAME pure filterResources the FixtureAdapter uses, and the playground reuses the
 // runPlaygroundHarness VERBATIM so the reserve-before-run escrow gate stays intact.
 //
-// The three pipeline methods (createResource, subscribeBuildEvents, getRevenue) stay
-// fail-loud: the live build/revenue pipeline lands in a later increment (1g). They
-// NEVER return fake data; subscribeBuildEvents stays a real async generator that
-// throws on first iteration, acceptable only while no live SSE route is exercised.
+// createResource + subscribeBuildEvents are now REAL in local-real mode (increment
+// 1g): createResource scaffold-generates a bundle (no ANTHROPIC key), runs the four-
+// gate validateBundle, publishes an IndexRecord into the SHARED singleton store, and
+// kicks off the build-stage stream into the per-resource channel; subscribeBuildEvents
+// is a real async generator that delegates to the channel (yields Generate..Live, then
+// terminates, never throws before its first yield). getRevenue stays fail-loud: the
+// live revenue aggregation lands later. None of these touch an operator-gated live
+// service: the generator is the offline scaffold, the Deploy/Mint stages are labeled
+// local-sim (no container, no on-chain mint), and the publish is the local index upsert.
 //
 // LiveDeps is imported TYPE-ONLY from live-deps.server.js so the class never bundles
 // the server module (T-mdx-01); the deps are injected by select.ts (production) or a
 // test (offline). All money is base-unit bigint; there is NO 1e6/6/18 literal here.
+import { createHash } from "node:crypto";
 import { filterResources, type IndexRecord } from "@utter/marketplace";
 import { readUsdcBalance } from "@utter/chain";
 import type { Address } from "viem";
@@ -49,6 +55,55 @@ export class RequiresLiveServicesError extends Error {
     );
     this.name = "RequiresLiveServicesError";
   }
+}
+
+/** The ordered local-real build-stage script. Mirrors fixtures/index.ts
+ *  FIXTURE_BUILD_EVENTS (a running->ok pair per stage for Generate..Publish, then a
+ *  single Live->ok). The Generate stage reflects the real scaffold generate+validate
+ *  that already ran; Deploy and Mint are labeled local-sim HONESTLY (no container, no
+ *  on-chain mint); Publish reflects the real index upsert that already ran. The logs
+ *  carry only non-secret human prose (BuildEvent.log contract). */
+const LOCAL_REAL_BUILD_EVENTS: readonly BuildEvent[] = [
+  { stage: "Generate", status: "running", log: "scaffold-generating handler bundle" },
+  { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" },
+  { stage: "Deploy", status: "running", log: "deploy (local-sim): in-process, no container" },
+  { stage: "Deploy", status: "ok", log: "deploy (local-sim): sandbox simulated up" },
+  { stage: "Verify", status: "running", log: "verify (local-sim): replaying gate checks" },
+  { stage: "Verify", status: "ok", log: "verify (local-sim): gates already passed" },
+  { stage: "Mint", status: "running", log: "mint (local id): no on-chain registry write" },
+  { stage: "Mint", status: "ok", log: "mint (local id): local-dev agentId assigned" },
+  { stage: "Publish", status: "running", log: "publishing agent card + index" },
+  { stage: "Publish", status: "ok", log: "listed for discovery (shared local index)" },
+  { stage: "Live", status: "ok", log: "resource is live (local-real)" },
+] as const;
+
+/** A small await gap between stage emits so the SSE reader observes stages streaming
+ *  rather than all at once, mirroring the fixture's delay(1). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Derive a valid 0x-prefixed 32-byte (64 hex) resourceId from the prompt plus a
+ *  monotonic local counter, so repeated identical prompts get distinct ids. This is a
+ *  LOCAL-DEV id (a sha256 digest), NEVER an on-chain mint; the Mint stage is labeled
+ *  local-sim and downstream never treats it as a canonical on-chain identity. */
+let localResourceCounter = 0;
+function deriveLocalResourceId(prompt: string): Hex {
+  const seed = `${prompt}#${localResourceCounter++}#${Date.now()}`;
+  const digest = createHash("sha256").update(seed).digest("hex");
+  return `0x${digest}` as Hex;
+}
+
+/** Derive a bounded discovery slug from the prompt: lowercase, alnum-hyphen, trimmed,
+ *  collapsed, length-capped. Falls back to a stable local slug for an empty result. */
+function deriveSlug(prompt: string): string {
+  const slug = prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "");
+  return slug.length > 0 ? slug : "local-resource";
 }
 
 /** A clearly-labeled LOCAL-DEV default owner/payout address for the seeded index.
@@ -124,16 +179,88 @@ export class LiveAdapter implements StudioDataAdapter {
     return this.deps;
   }
 
-  async createResource(_spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
-    // Deferred: the live compose/build pipeline lands in increment 1g.
-    throw new RequiresLiveServicesError("createResource");
+  async createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
+    const deps = this.requireDeps();
+
+    // 1. Translate the ComposeSpec into the ai-runtime ResourceSpec. The validator's
+    //    G4 (gatePricing) REQUIRES model "metered", so the pricing handed to the
+    //    runtime is ALWAYS metered regardless of spec.pricingModel; basePrice is a
+    //    base-unit bigint, so we carry it through as a string (no 1e6/decimals
+    //    literal). spec.pricingModel only shapes the DISPLAYED IndexRecord pricing in
+    //    step 4, not this validation pricing.
+    const base = spec.basePrice.toString();
+    const resourceSpec = {
+      prompt: spec.prompt,
+      runtime: "node" as const,
+      pricing: { model: "metered" as const, base, perKB: "0", max: base },
+    };
+
+    // 2. Scaffold-generate the bundle (no ANTHROPIC key on the default seam path).
+    const bundle = await deps.generate(resourceSpec);
+
+    // 3. Four-gate validate BEFORE any publish or stage emit. On failure, throw a clear
+    //    error naming the first violation (gate + kind + detail) and publish nothing
+    //    (reject-before-publish, T-1g-01). create.tsx surfaces the thrown reason.
+    const validation = await deps.validate(bundle, resourceSpec);
+    if (!validation.pass) {
+      const first = validation.violations[0];
+      const reason = first
+        ? `${first.gate}/${first.kind}: ${first.detail}`
+        : "validation failed with no reported violation";
+      throw new Error(`createResource: bundle failed validation (${reason})`);
+    }
+
+    // 4. Derive a valid bytes32 LOCAL-DEV resourceId + slug, build the IndexRecord, and
+    //    publish it into the SHARED singleton store. agentId is a clearly-local decimal
+    //    string (not an on-chain agentId). pricing.model reflects the COMPOSE choice
+    //    (what the UI displays); base/max are the base-unit basePrice as strings,
+    //    perKB "0". cardUrl is local-dev-shaped, mirroring the seed. No money/identity
+    //    value is authored beyond the read-through projection.
+    const resourceId = deriveLocalResourceId(spec.prompt);
+    const slug = deriveSlug(spec.prompt);
+    const record: IndexRecord = {
+      resourceId,
+      agentId: "0",
+      slug,
+      category: "data",
+      pricing: { model: spec.pricingModel, base, perKB: "0", max: base },
+      reputation: 0n,
+      uptime: 1,
+      health: { verified: true, score: 1 },
+      bond: spec.bond,
+      cardUrl: `https://${slug}.resources.example.com/.well-known/agent-card.json`,
+      active: true,
+    };
+    await deps.indexStore.upsert(record);
+
+    // 5. Kick off the build-stage stream into the per-resource channel WITHOUT blocking
+    //    the return: emit the scripted stages with small awaited gaps, then complete the
+    //    channel so a draining reader terminates. The emit is guarded so an unexpected
+    //    error still completes the channel rather than leaking it (T-1g-02).
+    const channel = deps.buildChannel;
+    void (async () => {
+      try {
+        for (const event of LOCAL_REAL_BUILD_EVENTS) {
+          channel.emit(resourceId, event);
+          await delay(1);
+        }
+      } finally {
+        channel.complete(resourceId);
+      }
+    })();
+
+    return { resourceId, eventsUrl: `/resources/${resourceId}/events` };
   }
 
-  async *subscribeBuildEvents(_resourceId: string): AsyncIterable<BuildEvent> {
-    // Deferred: a real async generator that throws on first iteration. This is
-    // acceptable only while no live SSE route is exercised; the live build stream
-    // lands in increment 1g.
-    throw new RequiresLiveServicesError("subscribeBuildEvents");
+  async *subscribeBuildEvents(resourceId: string): AsyncIterable<BuildEvent> {
+    const deps = this.requireDeps();
+    // Delegate to the per-resource channel: yield each BuildEvent the channel emits,
+    // terminating when the channel completes. The channel's subscribe reaches a yield
+    // (or a clean return for an unknown id) WITHOUT throwing first, so the SSE route
+    // never 500s on a throw-before-yield (T-1g-02).
+    for await (const event of deps.buildChannel.subscribe(resourceId)) {
+      yield event;
+    }
   }
 
   async getResourceDetail(resourceId: string): Promise<ResourceDetail> {
