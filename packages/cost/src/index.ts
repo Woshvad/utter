@@ -16,3 +16,10 @@ export {
   type CostBreakdown,
   type ComparableDecimals,
 } from "./cost-attributor";
+
+export {
+  priceFloor,
+  type FloorResult,
+  type FloorMode,
+  type PriceFloorOptions,
+} from "./price-floor";
