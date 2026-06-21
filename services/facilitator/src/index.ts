@@ -41,3 +41,13 @@ export {
   type SpendCapGateResult,
   type ReserveOutcome,
 } from "./spend-cap-gate";
+
+// SCL-02 batch route: the min-economical threshold branch that routes a sub-cent debit
+// into the Plan 08-03 BatchSettler (accrue, no immediate debit) vs an immediate settle().
+// A mutually-exclusive branch (no double-settle); the threshold is injected config.
+export {
+  routeDebit,
+  type RouteDebitInput,
+  type RouteDebitResult,
+  type RouteSettleArgs,
+} from "./batch-route";
