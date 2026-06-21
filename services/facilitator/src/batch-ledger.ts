@@ -1,7 +1,7 @@
 // batch-ledger.ts (SCL-02) - the persisted pending-accrual store under the
 // BatchSettler. It accumulates exact USDC base-unit legs per (resource, payee-leg)
-// and carries the sub-unit split remainder FORWARD (persisted) so the reconciliation
-// invariant holds across sequential batches and survives a process restart.
+// so the reconciliation invariant holds across sequential batches and survives a
+// process restart.
 //
 // THE SPLIT IS NOT RE-DERIVED. It is the SAME split the on-chain PaymentEscrow.debit
 // computes (contracts/src/PaymentEscrow.sol ~line 189):
@@ -10,11 +10,19 @@
 // We reconcile a batch to that split; we never invent a different one. The off-chain
 // precedent is packages/buyer-sdk/test/client.test.ts ((amount * 7000n) / 10000n).
 //
-// REMAINDER CARRY-FORWARD (RESEARCH Pattern 3 / Pitfall 3): flooring the creator
-// share PER DEBIT then summing loses sub-units versus the creator share a single
-// batch-level split would yield. That difference is the CARRIED REMAINDER. It is
-// accumulated, persisted, and added into the next batch so nothing leaks and nothing
-// is double-counted: batchCreatorLeg + batchTreasuryLeg + carriedRemainder == sum(debits).
+// NO PHANTOM CARRY (CR-03 fix / RESEARCH Pattern 3 / Pitfall 3): the batch flushes
+// with ONE on-chain PaymentEscrow.debit(batchAmount), and that contract call splits
+// `toCreator = floor(batchAmount * creatorBps / 10000)` then `toTreasury = batchAmount
+// - toCreator` (the treasury gets the WHOLE remainder; there is NO second floor and NO
+// sub-unit withheld). Reconciliation MUST mirror that EXACTLY: the treasury leg is the
+// remainder `settleAmount - creatorLeg`, never an independent second floor. The two
+// legs therefore always sum to the settled amount and there is NO genuine sub-unit to
+// carry: batchCreatorLeg + batchTreasuryLeg == settleAmount == sum(debits).
+// The earlier model floored BOTH legs and carried the leftover dust forward; that
+// carry was FICTION - the contract already paid that dust to the treasury this batch -
+// and carrying it inflated the NEXT batch's on-chain debit, over-charging the buyer
+// across the batch boundary (off-ledger value leak). With the contract-faithful split,
+// carriedRemainder is always 0n and markFlushed seeds nothing into the next window.
 //
 // PERSISTENCE SEAM (RESEARCH Pitfall 6): this mirrors stores/memory.ts - an
 // in-memory default (InMemoryBatchLedger) behind a BatchLedgerStore interface a
@@ -64,45 +72,48 @@ export interface PendingBatch {
   carriedRemainderIn: bigint;
 }
 
-/** The reconciled legs of a batch + the sub-unit remainder it carries forward. */
+/** The reconciled legs of a batch (matching the single on-chain debit's split). */
 export interface BatchReconciliation {
-  /** The creator leg that settles this batch (per-debit floored sum). */
+  /** The creator leg the batch debit pays: floor(settleAmount * creatorBps / 10000). */
   creatorLeg: bigint;
-  /** The treasury leg that settles this batch (per-debit floored sum). */
+  /** The treasury leg the batch debit pays: settleAmount - creatorLeg (the remainder). */
   treasuryLeg: bigint;
   /**
-   * The sub-unit remainder carried FORWARD: the creator sub-units lost to per-debit
-   * flooring (the batch-level creator share minus the summed per-debit creator legs),
-   * plus any remainder carried IN. Persisted, never dropped, never double-counted.
+   * Always 0n (CR-03): the on-chain debit(batchAmount) routes the whole remainder to
+   * the treasury this batch, so NO sub-unit is withheld and nothing is carried forward.
+   * Retained in the shape for the markFlushed seam (which now seeds nothing) and the
+   * BatchFlushResult contract; a non-zero value here would be phantom over-credit.
    */
   carriedRemainder: bigint;
 }
 
 /**
- * Reconcile a pending batch to the canonical split. The reconciliation invariant the
- * tests assert directly is:
- *   creatorLeg + treasuryLeg + carriedRemainder == sum(individual debits)
- *                                               == accruedTotal + carriedRemainderIn
+ * Reconcile a pending batch to the canonical on-chain split. The invariant the tests
+ * assert directly is the one that governs the SETTLED funds:
+ *   creatorLeg + treasuryLeg == settleAmount == sum(individual debits)
+ *                            == accruedTotal + carriedRemainderIn
  *
- * The split is computed at BATCH granularity exactly as PaymentEscrow.debit computes
- * it per debit - `creatorLeg = floor(settleAmount * creatorBps / 10000)` - but a batch
- * fixes the per-debit rounding leakage: settling the whole window once means the
- * sub-unit dust each per-debit floor shaved off is recovered. `treasuryLeg` is the
- * floored treasury share `floor(settleAmount * (10000 - creatorBps) / 10000)`; the
- * leftover dust `settleAmount - creatorLeg - treasuryLeg` is the `carriedRemainder` -
- * carried INTO the next batch (persisted), never given to one payee as a windfall,
- * never floored away (leakage), never double-counted. Over many batches the carry
- * eventually rolls a whole sub-unit into a leg, so nothing leaks long-run either.
+ * The split is computed at BATCH granularity EXACTLY as PaymentEscrow.debit computes
+ * it on the single `debit(batchAmount)` this batch submits:
+ *   creatorLeg  = floor(settleAmount * creatorBps / 10000)
+ *   treasuryLeg = settleAmount - creatorLeg            (the WHOLE remainder; CR-03)
+ * The treasury leg is the remainder, NOT a second independent floor, so the two legs
+ * always sum to the settled amount and there is NO sub-unit to carry. Settling the
+ * whole window once already recovers the per-debit rounding leakage; the contract pays
+ * every base unit out this batch, so `carriedRemainder` is always 0n. (Double-flooring
+ * the treasury leg and carrying the leftover forward was the CR-03 defect: that carry
+ * was phantom value the contract had already settled, and it inflated the next batch's
+ * debit, over-charging the buyer across the batch boundary.)
  */
 export function reconcileBatch(pending: PendingBatch): BatchReconciliation {
   const settleAmount = pending.accruedTotal + pending.carriedRemainderIn;
-  // The canonical PaymentEscrow split, applied once at batch granularity.
+  // The canonical PaymentEscrow.debit split, applied once at batch granularity:
+  // floor the creator share, route the WHOLE remainder to the treasury (CR-03) so the
+  // two legs sum to settleAmount exactly as the on-chain debit(batchAmount) does.
   const creatorLeg = (settleAmount * pending.creatorBps) / BPS_DENOMINATOR;
-  const treasuryLeg =
-    (settleAmount * (BPS_DENOMINATOR - pending.creatorBps)) / BPS_DENOMINATOR;
-  // The sub-unit dust the two floors leave behind - carried forward, never dropped.
-  const carriedRemainder = settleAmount - creatorLeg - treasuryLeg;
-  return { creatorLeg, treasuryLeg, carriedRemainder };
+  const treasuryLeg = settleAmount - creatorLeg; // matches PaymentEscrow.debit
+  // No sub-unit is withheld on-chain, so nothing is carried forward.
+  return { creatorLeg, treasuryLeg, carriedRemainder: 0n };
 }
 
 /**

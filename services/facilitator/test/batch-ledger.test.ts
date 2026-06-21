@@ -59,10 +59,13 @@ describe("InMemoryBatchLedger accrual + reconciliation", () => {
     expect(pending!.accruedTotal).toBe(15n);
   });
 
-  it("reconciliation invariant: creatorLeg + treasuryLeg + carriedRemainder == sum(individual debits)", async () => {
+  it("CR-03: creatorLeg + treasuryLeg == settleAmount (treasury is the remainder, no second floor, zero carry)", async () => {
     const key = `${RESOURCE}:batch-1`;
-    // Debits whose batch-level split leaves a genuine sub-unit remainder: sum=5,
-    // creator = floor(5*7000/10000)=3, treasury = floor(5*3000/10000)=1, dust=1 carried.
+    // The exact amounts that USED to expose the double-floor bug: sum=5,
+    // creator = floor(5*7000/10000)=3. The OLD model floored treasury too
+    // (floor(5*3000/10000)=1) and reported a phantom dust=1 to carry forward.
+    // The on-chain debit(5) actually pays treasury = 5 - 3 = 2 and withholds NOTHING,
+    // so the contract-faithful reconciliation must report treasuryLeg=2, carry=0.
     const tricky = [1n, 1n, 1n, 1n, 1n];
     let sum = 0n;
     for (const d of tricky) {
@@ -72,21 +75,26 @@ describe("InMemoryBatchLedger accrual + reconciliation", () => {
     const pending = await ledger.getPending(key);
     expect(pending).not.toBeNull();
     const { creatorLeg, treasuryLeg, carriedRemainder } = reconcileBatch(pending!);
-    // THE invariant: the two settled legs + the carried dust reconcile to the whole.
-    expect(creatorLeg + treasuryLeg + carriedRemainder).toBe(sum);
-    // The split is the canonical batch-level PaymentEscrow split (not re-derived).
+    // THE on-chain invariant: the two settled legs sum to the whole settle amount,
+    // exactly as PaymentEscrow.debit(amount) does. NO sub-unit is withheld.
+    expect(creatorLeg + treasuryLeg).toBe(sum);
+    // creator is the floor; treasury is the REMAINDER, never an independent second floor.
     expect(creatorLeg).toBe((sum * CREATOR_BPS) / 10000n);
-    expect(treasuryLeg).toBe((sum * (10000n - CREATOR_BPS)) / 10000n);
-    // A real sub-unit remainder exists here and is carried (not floored away).
-    expect(carriedRemainder).toBe(1n);
+    expect(treasuryLeg).toBe(sum - creatorLeg);
+    // The previously-phantom carry is GONE (the contract already paid that dust).
+    expect(carriedRemainder).toBe(0n);
+    // Regression guard against the double-floor: treasury is NOT floor(sum*3000/10000)=1.
+    expect(treasuryLeg).toBe(2n);
+    expect(treasuryLeg).not.toBe((sum * (10000n - CREATOR_BPS)) / 10000n);
     // A single-debit split still partitions cleanly via the precedent helper.
     const s = expectedSplit(7n);
     expect(s.toCreator + s.toTreasury).toBe(7n);
   });
 
-  it("carries the sub-unit remainder from batch K into batch K+1 (never dropped, never double-counted)", async () => {
-    // Batch K: five 1-unit debits. Per-debit creator floor = 0 each; the lost creator
-    // sub-units (5 * 0.7 = 3.5 -> 3 whole + 0.5 carry) are carried, NOT given to treasury here.
+  it("CR-03: two sequential batches sum on-chain to exactly the sum of individual debits (no phantom inflation)", async () => {
+    // Batch K: five 1-unit debits -> debit(5). On-chain: creator=floor(5*0.7)=3,
+    // treasury=5-3=2, total=5, nothing withheld. The OLD model would have carried a
+    // phantom 1 into K+1, inflating the next batch's debit and over-charging the buyer.
     const keyK = `${RESOURCE}:batch-K`;
     const keyK1 = `${RESOURCE}:batch-K+1`;
     const batchK = [1n, 1n, 1n, 1n, 1n];
@@ -97,17 +105,15 @@ describe("InMemoryBatchLedger accrual + reconciliation", () => {
     }
     const pendingK = await ledger.getPending(keyK);
     const reconK = reconcileBatch(pendingK!);
-    expect(reconK.creatorLeg + reconK.treasuryLeg + reconK.carriedRemainder).toBe(sumK);
+    // Batch K's on-chain debit pays out the WHOLE batch amount, withholds nothing.
+    expect(reconK.creatorLeg + reconK.treasuryLeg).toBe(sumK);
+    expect(reconK.carriedRemainder).toBe(0n);
 
-    // Flush K, carrying its remainder forward into K+1.
+    // Flush K. The carry is 0, so NOTHING is seeded into K+1 (no phantom inflation).
     await ledger.markFlushed(keyK, keyK1, reconK.carriedRemainder);
-    // After flush, batch K's pending entry is consumed.
     expect(await ledger.getPending(keyK)).toBeNull();
-
-    // Batch K+1 starts seeded with the carried remainder.
-    const seeded = await ledger.getPending(keyK1);
-    expect(seeded).not.toBeNull();
-    expect(seeded!.carriedRemainderIn).toBe(reconK.carriedRemainder);
+    // K+1 is NOT pre-seeded by a phantom carry: it does not exist until its first debit.
+    expect(await ledger.getPending(keyK1)).toBeNull();
 
     const batchK1 = [1n, 1n, 1n];
     let sumK1 = 0n;
@@ -116,16 +122,18 @@ describe("InMemoryBatchLedger accrual + reconciliation", () => {
       sumK1 += d;
     }
     const pendingK1 = await ledger.getPending(keyK1);
+    expect(pendingK1!.carriedRemainderIn).toBe(0n); // no carry-in
     const reconK1 = reconcileBatch(pendingK1!);
-    // CUMULATIVE reconciliation across both batches: the carried-in remainder is added,
-    // never double-counted. Total settled value across K and K+1 equals total debits.
+    expect(reconK1.creatorLeg + reconK1.treasuryLeg).toBe(sumK1);
+    expect(reconK1.carriedRemainder).toBe(0n);
+
+    // sum(legs) across BOTH on-chain debits == sum(individual debits) exactly, with
+    // ZERO phantom inflation across the batch boundary.
     const totalSettled =
-      reconK.creatorLeg +
-      reconK.treasuryLeg +
-      reconK1.creatorLeg +
-      reconK1.treasuryLeg +
-      reconK1.carriedRemainder;
+      reconK.creatorLeg + reconK.treasuryLeg + reconK1.creatorLeg + reconK1.treasuryLeg;
     expect(totalSettled).toBe(sumK + sumK1);
+    // And the second on-chain debit equals K+1's own debits, NOT inflated by a phantom 1.
+    expect(reconK1.creatorLeg + reconK1.treasuryLeg).toBe(sumK1);
   });
 
   it("is restart-safe: re-reading a persisted pending entry after a simulated restart returns the same accrued legs + carry", async () => {
