@@ -11,6 +11,7 @@ import { type RouteConfig, route } from "@react-router/dev/routes";
 
 export default [
   route("create", "routes/create.tsx"),
+  route("discover", "routes/discover.tsx"),
   route("resources/:id", "routes/resources.$id.tsx"),
   route("resources/:id/events", "routes/resources.$id.events.ts"),
   route("auth", "routes/auth.tsx"),
