@@ -26,17 +26,24 @@ import {
 const RECIPIENT = ("0x" + "ab".repeat(20)) as Address;
 const SRC_CHAIN = "ethereum-sepolia";
 
-/** A mock chain writer recording the burn/receive calls (no real chain). */
-function mockChainWriter(): CctpChainWriter & {
+/**
+ * A mock chain writer recording the burn/receive calls (no real chain). The mint is
+ * the AUTHORITATIVE on-chain mint: the writer reports what it minted (WR-03). By
+ * default it mints the burned amount (no fee); `opts.mintedAmount` simulates a CCTP
+ * fee (attested mint < requested burn) or a lying/buggy writer (mint > burn).
+ */
+function mockChainWriter(opts: { mintedAmount?: bigint } = {}): CctpChainWriter & {
   burns: Array<{ address: Address; destinationDomain: number; amount: bigint }>;
   receives: Array<{ address: Address; message: Hex; attestation: Hex }>;
 } {
   const burns: Array<{ address: Address; destinationDomain: number; amount: bigint }> = [];
   const receives: Array<{ address: Address; message: Hex; attestation: Hex }> = [];
+  let lastBurnAmount = 0n;
   return {
     burns,
     receives,
     async depositForBurn(args) {
+      lastBurnAmount = args.amount;
       burns.push({
         address: args.tokenMessenger,
         destinationDomain: args.destinationDomain,
@@ -51,7 +58,10 @@ function mockChainWriter(): CctpChainWriter & {
         message: args.message,
         attestation: args.attestation,
       });
-      return { mintedAmount: args.mintedAmount, txHash: ("0x" + "33".repeat(32)) as Hex };
+      // The mint reports the AUTHORITATIVE minted amount (the attested message value).
+      // Default: the full burn (no fee). Override simulates a fee or an over-mint.
+      const mintedAmount = opts.mintedAmount ?? lastBurnAmount;
+      return { mintedAmount, txHash: ("0x" + "33".repeat(32)) as Hex };
     },
   };
 }
@@ -92,6 +102,37 @@ describe("CctpFunder.fund (burn -> mock-attest -> receiveMessage -> credit)", ()
     expect(writer.receives[0]!.address.toLowerCase()).toBe(
       CCTP_MESSAGE_TRANSMITTER.toLowerCase(),
     );
+  });
+
+  it("WR-03: credits the ATTESTED minted amount, not the requested burn (respects CCTP fees)", async () => {
+    // The attested mint is LESS than the requested burn (a CCTP fee was deducted).
+    const requested = 7_000_000n;
+    const minted = 6_900_000n; // requested minus a 0.1 USDC fee
+    const writer = mockChainWriter({ mintedAmount: minted });
+    const escrow = mockEscrowStore();
+    const funder = new CctpFunder({ writer, escrow, attestation: new MockAttestation() });
+
+    const result = await funder.fund(SRC_CHAIN, requested, RECIPIENT);
+
+    // The escrow is credited the SMALLER attested amount, never the requested burn -
+    // so a buyer is never credited USDC the protocol did not actually deliver on-chain.
+    expect(result.minted).toBe(minted);
+    expect(escrow.balances.get(RECIPIENT.toLowerCase())).toBe(minted);
+    expect(escrow.balances.get(RECIPIENT.toLowerCase())).not.toBe(requested);
+  });
+
+  it("WR-03: rejects an over-mint (writer reports minted > burn) - no over-credit", async () => {
+    // A lying/buggy writer claims it minted MORE than was burned: refuse to credit.
+    const requested = 1_000_000n;
+    const writer = mockChainWriter({ mintedAmount: requested + 1n });
+    const escrow = mockEscrowStore();
+    const funder = new CctpFunder({ writer, escrow, attestation: new MockAttestation() });
+
+    await expect(funder.fund(SRC_CHAIN, requested, RECIPIENT)).rejects.toThrow(
+      /exceeds the requested burn|WR-03/i,
+    );
+    // Nothing was credited - the over-mint never reached the escrow balance.
+    expect(escrow.balances.size).toBe(0);
   });
 
   it("uses the CCTP destination domain 26 from the pinned constant (never a literal 7)", async () => {

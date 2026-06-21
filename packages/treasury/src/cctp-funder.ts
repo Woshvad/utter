@@ -60,12 +60,17 @@ export interface CctpChainWriter {
     recipient: Address;
     srcChain: string;
   }): Promise<{ message: Hex; txHash: Hex }>;
-  /** Mint on Arc by consuming the attestation (MessageTransmitterV2.receiveMessage). */
+  /**
+   * Mint on Arc by consuming the attestation (MessageTransmitterV2.receiveMessage).
+   * The on-chain transmitter mints the amount encoded in the ATTESTED burn message
+   * (possibly less than the requested burn after a CCTP fee); the caller does NOT
+   * dictate the minted amount. The writer returns the AUTHORITATIVE `mintedAmount`
+   * the mint actually produced (WR-03) - the funder credits that, never the request.
+   */
   receiveMessage(args: {
     messageTransmitter: Address;
     message: Hex;
     attestation: Hex;
-    mintedAmount: bigint;
   }): Promise<{ mintedAmount: bigint; txHash: Hex }>;
 }
 
@@ -186,14 +191,27 @@ export class CctpFunder {
     assertSignedAttestation(att);
 
     // (3) MINT on Arc via receiveMessage (poll-and-credit: explicit, no auto-hook).
+    // The transmitter mints the amount encoded in the ATTESTED message - we do NOT pass
+    // the requested `amount` in as the minted amount (WR-03). CCTP can deduct a fee, so
+    // the actual mint is frequently < the requested burn.
     const mint = await this.deps.writer.receiveMessage({
       messageTransmitter: CCTP_MESSAGE_TRANSMITTER,
       message: att.message,
       attestation: att.signature,
-      mintedAmount: amount,
     });
 
-    // (4) CREDIT the escrow balance by the minted amount (strictly after the mint).
+    // WR-03: the minted amount can never EXCEED the requested burn (you cannot mint more
+    // than you burned). Reject an over-mint so a buggy/lying writer cannot over-credit the
+    // escrow with USDC the protocol never delivered on-chain.
+    if (mint.mintedAmount > amount) {
+      throw new Error(
+        "CctpFunder: refusing to credit - the attested minted amount exceeds the " +
+          "requested burn (a CCTP mint can never exceed the burn; WR-03)",
+      );
+    }
+
+    // (4) CREDIT the escrow balance by the AMOUNT ACTUALLY MINTED (strictly after the
+    // mint), so CCTP fees are respected and the credit never exceeds what was minted.
     await this.deps.escrow.credit(recipient, mint.mintedAmount);
 
     return { minted: mint.mintedAmount, burnTx: burn.txHash, mintTx: mint.txHash };
