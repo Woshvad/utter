@@ -15,7 +15,15 @@
 import type { PublicClient } from "viem";
 import { createArcPublicClient } from "@utter/chain";
 import { InMemoryIndexStore, type IndexRecord, type IndexStore } from "@utter/marketplace";
+import {
+  selectGenerator,
+  validateBundle,
+  type Bundle,
+  type ResourceSpec,
+  type ValidationResult,
+} from "@utter/ai-runtime";
 import { runPlaygroundHarness, type PlaygroundHarnessResult } from "./playground-harness.js";
+import { BuildEventChannel } from "./build-channel.js";
 import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
 
 /**
@@ -27,10 +35,61 @@ import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
 export interface LiveDeps {
   /** The Arc public client the escrow read flows through (readUsdcBalance). */
   publicClient: PublicClient;
-  /** The discovery index the marketplace + detail reads project from. */
+  /** The discovery index the marketplace + detail reads project from. A MODULE
+   *  SINGLETON in production, so a resource createResource upserts is visible to a
+   *  LATER request's listMarketplace/getResourceDetail (select.ts builds fresh deps
+   *  per request, but they share this one store instance). */
   indexStore: IndexStore;
+  /** The per-resource build-event channel createResource emits stages into and
+   *  subscribeBuildEvents drains. A MODULE SINGLETON so the create action (one
+   *  selectAdapter call) and the SSE route (a separate selectAdapter call) share the
+   *  SAME channel and the buffered stages reach a late SSE subscriber. */
+  buildChannel: BuildEventChannel;
+  /** Scaffold-generate a bundle from a ResourceSpec (no ANTHROPIC key on the default
+   *  path). Bound to selectGenerator(env).generate so the adapter stays env-free. */
+  generate: (spec: ResourceSpec) => Promise<Bundle>;
+  /** Four-gate validate a generated bundle before publish. Bound to validateBundle. */
+  validate: (bundle: Bundle, spec: ResourceSpec) => Promise<ValidationResult>;
   /** The reserve-before-run playground harness, bound verbatim. */
   runPlayground: (resourceId: string, req: unknown) => Promise<PlaygroundHarnessResult>;
+}
+
+/**
+ * The module-singleton IndexStore. Created and seeded once on first buildLiveDeps
+ * call; every later call returns the SAME instance so a created resource persists
+ * across per-request deps builds. This is the load-bearing visibility fix for 1g.
+ */
+let sharedStore: IndexStore | undefined;
+
+/** Return the singleton IndexStore, seeding it with the projected fixture rows on the
+ *  first call only (re-seeding on later calls would duplicate the seed). */
+function getSharedIndexStore(): IndexStore {
+  if (!sharedStore) {
+    const store = new InMemoryIndexStore();
+    // Seed the local-dev index once. upsert resolves synchronously (Map.set) so the
+    // entries are queryable by the time the adapter awaits list()/get(); we void the
+    // promise rather than block, since buildLiveDeps stays synchronous.
+    for (const rec of seedRecords()) {
+      void store.upsert(rec);
+    }
+    sharedStore = store;
+  }
+  return sharedStore;
+}
+
+/**
+ * The module-singleton BuildEventChannel. One shared channel so createResource (write,
+ * in the create action's selectAdapter call) and subscribeBuildEvents (read, in the
+ * SSE route's separate selectAdapter call) reach the same per-resource buffers.
+ */
+let sharedBuildChannel: BuildEventChannel | undefined;
+
+/** Return the singleton BuildEventChannel, constructing it once on first call. */
+function getSharedBuildChannel(): BuildEventChannel {
+  if (!sharedBuildChannel) {
+    sharedBuildChannel = new BuildEventChannel();
+  }
+  return sharedBuildChannel;
 }
 
 /**
@@ -60,28 +119,30 @@ function seedRecords(): IndexRecord[] {
  * Build the real LiveDeps from the environment. Synchronous so select.ts can call it
  * inside its synchronous live branch:
  *   1. Build the Arc public client (createArcPublicClient honors ARC_RPC_URL).
- *   2. Construct an InMemoryIndexStore and seed it with the projected fixture rows.
- *      InMemoryIndexStore.upsert sets a Map entry before its promise settles, so the
- *      records are present synchronously enough for the adapter's later list()/get()
- *      reads. The seed is local-dev-only and read-through-shaped, never a live money
- *      source.
- *   3. Bind runPlayground to runPlaygroundHarness verbatim (reused like the fixture),
+ *   2. Reuse the MODULE-SINGLETON IndexStore (seeded once with the projected fixture
+ *      rows). A resource createResource upserts into this store on one request is
+ *      therefore visible to a LATER request's listMarketplace/getResourceDetail,
+ *      because select.ts builds fresh deps per request but they all share this one
+ *      store instance. The seed is local-dev-only and read-through-shaped, never a
+ *      live money source.
+ *   3. Reuse the MODULE-SINGLETON BuildEventChannel so the create action and the SSE
+ *      route share the same per-resource stage buffers.
+ *   4. Bind generate to selectGenerator(env).generate (scaffold by default, no
+ *      ANTHROPIC key) and validate to validateBundle, so the adapter stays env-free.
+ *   5. Bind runPlayground to runPlaygroundHarness verbatim (reused like the fixture),
  *      keeping the reserve-before-run escrow gate intact (T-mdx-02).
  */
 export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
   const publicClient = createArcPublicClient(env.ARC_RPC_URL) as unknown as PublicClient;
 
-  const indexStore = new InMemoryIndexStore();
-  // Seed the local-dev index. upsert resolves synchronously (Map.set) so the entries
-  // are queryable by the time the adapter awaits list()/get(); we still void the
-  // promise rather than block, since buildLiveDeps must stay synchronous.
-  for (const rec of seedRecords()) {
-    void indexStore.upsert(rec);
-  }
-
   return {
     publicClient,
-    indexStore,
+    indexStore: getSharedIndexStore(),
+    buildChannel: getSharedBuildChannel(),
+    // selectGenerator returns the scaffold backend whenever ANTHROPIC_API_KEY is
+    // absent (the autonomous default), so generate stays offline with no model call.
+    generate: (spec) => selectGenerator(env).generate(spec),
+    validate: (bundle, spec) => validateBundle(bundle, spec),
     runPlayground: runPlaygroundHarness,
   };
 }
