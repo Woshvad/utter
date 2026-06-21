@@ -243,8 +243,10 @@ export async function liveDeployEcho(
 }
 
 // Operator entry point: only runs when invoked directly (never on import in the
-// autonomous suite). `import.meta.main` is set when run via `node live-deploy.ts`.
-if ((import.meta as { main?: boolean }).main) {
+// autonomous suite). The guard compares import.meta.url to the file argv[1] was
+// resolved from, the Node-correct check (server.ts uses the same pattern);
+// import.meta.main is a Bun-ism that is always undefined on Node.
+if (import.meta.url === `file://${process.argv[1]}`) {
   liveDeployEcho()
     .then((r) => {
       console.log(`[live-deploy] OK: ${r.url} 402(unpaid)->200(paid); PRX-02 unreachable=${r.nonAllowlistedUnreachable}`);
