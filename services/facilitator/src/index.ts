@@ -29,3 +29,15 @@ export {
   type Receipt,
   type SettleScheme,
 } from "./settle";
+
+// SCL-05 pre-reserve spend-cap gate: the data-proxy spendCapGate mounted AHEAD of
+// /verify reserve + handler dispatch (deny-by-default free-compute guard; threat
+// T-08-FREECOMPUTE). Additive in front of the reserve path - it never touches the
+// money guard itself.
+export {
+  spendCapPreReserveGate,
+  type SpendCapGateInput,
+  type SpendCapDownstream,
+  type SpendCapGateResult,
+  type ReserveOutcome,
+} from "./spend-cap-gate";
