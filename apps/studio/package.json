@@ -27,7 +27,8 @@
     "react-router": "7.18.0",
     "siwe": "3.0.0",
     "viem": "2.52.2",
-    "wagmi": "2.19.5"
+    "wagmi": "2.19.5",
+    "isbot": "^5"
   },
   "devDependencies": {
     "@react-router/dev": "7.18.0",

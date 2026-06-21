@@ -99,6 +99,9 @@ importers:
       '@utter/x402-arc':
         specifier: workspace:*
         version: link:../../packages/x402-arc
+      isbot:
+        specifier: ^5
+        version: 5.1.43
       react:
         specifier: 18.3.1
         version: 18.3.1
