@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "test:chain": "vitest run packages/chain",
     "test:x402": "vitest run packages/x402-arc",
     "test:facilitator": "vitest run services/facilitator",
