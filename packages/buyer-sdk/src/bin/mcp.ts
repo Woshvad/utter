@@ -90,7 +90,15 @@ async function main(): Promise<void> {
     );
   }
 
-  const client = createBuyerClient({ transport, buyerWallet: wallet, env });
+  // CR-01: the buyer-configured per-call ceiling in WHOLE USDC tokens, read from
+  // .env.local (never from a card). It caps what the client will EVER sign regardless of a
+  // poisoned card's advertised pricing.max. Empty/blank = no buyer ceiling (the card cap is
+  // the only bound). The bin reads it once into the client config; it is non-secret.
+  const rawMaxCap = env.BUYER_MAX_CAP_TOKENS;
+  const maxCapTokens =
+    rawMaxCap && rawMaxCap.trim() !== "" ? BigInt(rawMaxCap.trim()) : undefined;
+
+  const client = createBuyerClient({ transport, buyerWallet: wallet, env, maxCapTokens });
   const budget = createBudgetGuard(readBudgetCapsFromEnv(env));
 
   const created = await createMcpServerAsync({

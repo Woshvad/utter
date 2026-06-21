@@ -45,6 +45,18 @@ export interface CreateBuyerClientOptions {
   cardSource?: CardSource;
   /** The env (for the live path / config). Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The buyer-configured per-call ceiling expressed in WHOLE USDC tokens (human units),
+   * INDEPENDENT of any card (CR-01 / T-07-OVERCHARGE). A hostile card can advertise an
+   * arbitrarily large pricing.max; this ceiling caps what the buyer will ever sign. At
+   * pay() time it is scaled to base units by the RUNTIME decimals() read
+   * (ceiling = tokens * 10n**decimals - no 6/18/1e6 literal, IN-01) and the signed
+   * maxAmount becomes min(card cap, ceiling). A card cap above the ceiling is clamped
+   * DOWN to the ceiling and never signs above it. Unset/`<= 0` = unbounded by the buyer
+   * (the card cap stands as the only bound). Sourced from .env.local via
+   * BUYER_MAX_CAP_TOKENS (read in the bin), never from the card.
+   */
+  maxCapTokens?: bigint;
 }
 
 /** A reference to a discoverable resource: either its card URL or a marketplace resourceId. */
@@ -156,6 +168,11 @@ const ECHO_OPENAPI: Record<string, unknown> = {
  */
 export function createBuyerClient(opts: CreateBuyerClientOptions): BuyerClient {
   const { transport, buyerWallet, cardSource } = opts;
+  // The buyer-configured per-call ceiling in WHOLE USDC tokens (independent of the card,
+  // CR-01). <= 0 / unset means the buyer imposes no ceiling and the card cap is the only
+  // bound. Scaled to base units by the RUNTIME decimals() read inside pay() (IN-01).
+  const maxCapTokens =
+    opts.maxCapTokens !== undefined && opts.maxCapTokens > 0n ? opts.maxCapTokens : null;
   const publicClient: PublicClient = transport.publicClient;
   const buyer = buyerWallet.account.address as Hex;
 
@@ -193,20 +210,32 @@ export function createBuyerClient(opts: CreateBuyerClientOptions): BuyerClient {
     const { cardInputs } = await discoverResource(req.resource);
 
     // (2) CAP from a RUNTIME decimals() read (Pitfall 3 / CHAIN-03 - never a 1e6 literal).
-    // baseUnit is the precision witness derived from the runtime read; the cap value is
-    // the card's escrow max (already base units). A 0 cap throws BEFORE any sign
-    // (T-07-OVERCHARGE: the client never signs a non-positive / unbounded cap).
+    // baseUnit is derived from the runtime read and is GENUINELY load-bearing (IN-01): the
+    // buyer-configured per-call ceiling is expressed in WHOLE USDC tokens and scaled to
+    // base units HERE (ceiling = maxCapTokens * baseUnit), so the "cap from a runtime
+    // decimals read" property is real, not a grep-satisfying no-op.
     const decimals = (await publicClient.readContract({
       address: USDC,
       abi: erc20Abi,
       functionName: "decimals",
     })) as number;
     const baseUnit = 10n ** BigInt(decimals);
-    void baseUnit;
-    const cap = cardInputs.cap;
-    if (cap <= 0n) {
-      throw new Error(`pay: card pricing.max ${cap} is not a positive cap (refusing to sign)`);
+
+    // A 0/negative card cap throws BEFORE any sign (T-07-OVERCHARGE: the client never
+    // signs a non-positive / unbounded cap). The card cap string was already validated as
+    // a base-unit integer in discover (WR-05), so this is a pure positivity check.
+    const cardCap = cardInputs.cap;
+    if (cardCap <= 0n) {
+      throw new Error(`pay: card pricing.max ${cardCap} is not a positive cap (refusing to sign)`);
     }
+
+    // (2a) CR-01: enforce the BUYER-CONFIGURED per-call ceiling, INDEPENDENT of the card.
+    // A hostile card can advertise an arbitrarily large pricing.max; the buyer ceiling
+    // (scaled from whole tokens via the runtime baseUnit) is the upper bound the buyer
+    // ever signs. The signed cap is min(card cap, ceiling) and NEVER above the ceiling -
+    // a card cap above the ceiling is clamped DOWN to it. When unset, the card cap stands.
+    const buyerCeiling = maxCapTokens !== null ? maxCapTokens * baseUnit : null;
+    const cap = buyerCeiling !== null && cardCap > buyerCeiling ? buyerCeiling : cardCap;
 
     // (3) The in-process facilitator bound to the CARD-derived escrow/asset (memoized per
     // resource so the SAME store backs the pay POST and the recovery). Build the resource

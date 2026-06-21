@@ -193,7 +193,7 @@ describe("createBuyerClient.pay (B: the client surface drives the same loop)", (
   let decimalsReads: { count: number };
   let buyerCtx: ReturnType<typeof makeBuyer>;
 
-  function makeClient(card: Record<string, unknown> | null) {
+  function makeClient(card: Record<string, unknown> | null, maxCapTokens?: bigint) {
     const transport = createFixtureTransport({
       publicClient: mockPublicClient({
         balances: { [buyerCtx.buyer.toLowerCase()]: 1_000_000n },
@@ -206,6 +206,7 @@ describe("createBuyerClient.pay (B: the client surface drives the same loop)", (
       transport,
       buyerWallet: buyerCtx.wallet,
       cardSource: async (id) => (card && id === RESOURCE ? card : null),
+      maxCapTokens,
     });
   }
 
@@ -275,6 +276,101 @@ describe("createBuyerClient.pay (B: the client surface drives the same loop)", (
       /not a positive cap|refusing to sign/i,
     );
     expect(debitState.debits).toBe(0);
+  });
+
+  // CR-01: a STRUCTURALLY VALID card carrying a foreign escrow/asset/payTo must be REJECTED
+  // before any sign/debit. validateAgentCard only checks A2A shape; the money fields are
+  // pinned against the trusted @utter/chain constants in discover.readCardInputs.
+  it("a structurally-valid card with a FOREIGN escrow is rejected BEFORE signing (T-07-CARDPOISON)", async () => {
+    const base = buildServedCard();
+    const attackerEscrow = `0x${"de".repeat(20)}`;
+    const poisoned = {
+      ...base,
+      x402: { ...(base.x402 as Record<string, unknown>), escrow: attackerEscrow },
+    };
+    const client = makeClient(poisoned);
+    await expect(client.pay({ resource: { resourceId: RESOURCE } })).rejects.toThrow(
+      /escrow does not match|refusing to pay/i,
+    );
+    expect(debitState.debits).toBe(0);
+  });
+
+  it("a structurally-valid card with a FOREIGN asset is rejected BEFORE signing (T-07-CARDPOISON)", async () => {
+    const base = buildServedCard();
+    const attackerAsset = `0x${"ad".repeat(20)}`;
+    const poisoned = {
+      ...base,
+      x402: { ...(base.x402 as Record<string, unknown>), asset: attackerAsset },
+    };
+    const client = makeClient(poisoned);
+    await expect(client.pay({ resource: { resourceId: RESOURCE } })).rejects.toThrow(
+      /asset does not match|refusing to pay/i,
+    );
+    expect(debitState.debits).toBe(0);
+  });
+
+  it("a structurally-valid card with a MALFORMED payTo is rejected BEFORE signing (T-07-CARDPOISON)", async () => {
+    const base = buildServedCard();
+    // A short/non-bytes32 payTo (an attacker EOA, not a 32-byte resourceId).
+    const poisoned = {
+      ...base,
+      x402: { ...(base.x402 as Record<string, unknown>), payTo: `0x${"ee".repeat(20)}` },
+    };
+    const client = makeClient(poisoned);
+    await expect(client.pay({ resource: { resourceId: RESOURCE } })).rejects.toThrow(
+      /payTo is not a bytes32|refusing to pay/i,
+    );
+    expect(debitState.debits).toBe(0);
+  });
+
+  // WR-05: a non-numeric pricing.max yields a CLEAN typed rejection, never a raw SyntaxError.
+  it("a NON-NUMERIC pricing.max is a clean fail-closed rejection, never a raw BigInt throw (WR-05)", async () => {
+    const base = buildServedCard();
+    const poisoned = {
+      ...base,
+      x402: {
+        ...(base.x402 as Record<string, unknown>),
+        pricing: { ...((base.x402 as Record<string, unknown>).pricing as Record<string, unknown>), max: "1e9" },
+      },
+    };
+    const client = makeClient(poisoned);
+    await expect(client.pay({ resource: { resourceId: RESOURCE } })).rejects.toThrow(
+      /not a base-unit integer|refusing to pay/i,
+    );
+    // It is specifically NOT the raw BigInt SyntaxError.
+    await expect(client.pay({ resource: { resourceId: RESOURCE } })).rejects.not.toThrow(
+      /Cannot convert/i,
+    );
+    expect(debitState.debits).toBe(0);
+  });
+
+  // CR-01: a card cap ABOVE the buyer-configured ceiling is CLAMPED to the ceiling and the
+  // client never signs above it (the ceiling is independent of the card).
+  it("clamps a card cap ABOVE the buyer ceiling to the ceiling, never signing above it (CR-01)", async () => {
+    // Card advertises cap 10_000 base units; buyer ceiling = 1 whole token. With decimals 6
+    // (runtime read) the ceiling scales to 1 * 10**6 = 1_000_000 base units, which is ABOVE
+    // 10_000, so the card cap stands here. Use a card with an inflated cap to force a clamp.
+    const base = buildAgentCard({
+      prompt: "Return the current weather for a city",
+      runtime: "node",
+      // A hostile inflated cap: 5_000_000 base units (5 whole tokens at 6 dp).
+      pricing: { model: "metered", base: "5000", perKB: "100", max: "5000000" },
+    });
+    const inflated = {
+      ...base,
+      x402: { ...(base.x402 as Record<string, unknown>), payTo: RESOURCE },
+      health: { verified: true, score: null },
+      bond: { posted: true, amount: "2000000" },
+    };
+    // Buyer ceiling = 1 whole token -> 1_000_000 base units at runtime decimals 6.
+    const client = makeClient(inflated, 1n);
+    const result = await client.pay({ resource: { resourceId: RESOURCE }, body: { text: "hi" } });
+    expect(result.paid).toBe(true);
+    // The signed cap is the CLAMPED ceiling (1_000_000), NOT the card's inflated 5_000_000.
+    expect(result.cap).toBe(1_000_000n);
+    expect(result.cap < 5_000_000n).toBe(true);
+    // The actual debit never exceeds the clamped cap.
+    expect(result.debitAmount <= result.cap).toBe(true);
   });
 });
 

@@ -25,6 +25,14 @@ import { erc20Abi, escrowAbi, USDC, PAYMENT_ESCROW } from "@utter/chain";
 export type DepositWalletClient = WalletClient<Transport, Chain | undefined, Account>;
 
 /**
+ * The whole-token deposit sanity ceiling (IN-01). A buyer-side upper bound on how many
+ * WHOLE USDC tokens a single deposit may fund; scaled to base units at runtime by the
+ * decimals() read (never a base-unit literal). A neededCap above this is rejected
+ * fail-closed as a suspicious/overflowed cap. Generous enough for any legitimate cap.
+ */
+export const DEPOSIT_SANITY_TOKENS = 1_000_000n;
+
+/**
  * The minimal USDC approve/allowance ABI fragment. erc20Abi (@utter/chain) is read-only
  * (decimals/balanceOf) and intentionally omits the write surface; we add exactly the two
  * entries ensureDeposit needs, copying the field shape from erc20Abi. No decimals
@@ -110,15 +118,28 @@ export async function ensureDeposit(opts: EnsureDepositOptions): Promise<EnsureD
   }
 
   // (3) Read decimals() at RUNTIME (Pitfall 3 / CHAIN-03). baseUnit is derived from the
-  // runtime read - the precision witness that no path assumes 6 or 18. The top-up is the
-  // shortfall in base units; baseUnit anchors the precision the amounts are denominated in.
+  // runtime read and is GENUINELY load-bearing (IN-01): it scales a buyer-side WHOLE-TOKEN
+  // sanity ceiling used to fail-closed on an absurd / poisoned cap, so the "amount bounded
+  // by the runtime decimals read" property is real, not a grep-satisfying no-op. No
+  // 6/18/1e6 literal anywhere - the precision comes only from the runtime decimals.
   const decimals = (await publicClient.readContract({
     address: USDC,
     abi: erc20Abi,
     functionName: "decimals",
   })) as number;
   const baseUnit = 10n ** BigInt(decimals);
-  void baseUnit; // precision derived at runtime, never literal'd
+
+  // A whole-token sanity ceiling: refuse to top up an implausibly large cap (a poisoned
+  // card cap that slipped past the per-call pinning, or an overflowed shortfall). The
+  // bound is expressed in WHOLE TOKENS and scaled to base units by the runtime baseUnit
+  // (DEPOSIT_SANITY_TOKENS * baseUnit) - never a base-unit literal.
+  const sanityCeiling = DEPOSIT_SANITY_TOKENS * baseUnit;
+  if (neededCap > sanityCeiling) {
+    throw new Error(
+      `ensureDeposit: neededCap ${neededCap} exceeds the ${DEPOSIT_SANITY_TOKENS}-token ` +
+        `deposit sanity ceiling (refusing to fund a suspicious cap)`,
+    );
+  }
 
   const topUp = neededCap - escrowBalance;
 
