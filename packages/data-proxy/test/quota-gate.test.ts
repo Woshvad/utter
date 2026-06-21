@@ -9,6 +9,7 @@ import {
   createDataProxy,
   mintResourceToken,
   InMemoryQuotaStore,
+  quotaGate,
   type DnsLookupAll,
   type QuotaBudget,
   type QuotaStore,
@@ -198,5 +199,48 @@ describe("data-proxy quota gate (PRX-03)", () => {
     });
     for (let i = 0; i < 5; i++) await app.request(containerRequest(TARGET));
     expect(upstreamFetch).toHaveBeenCalledTimes(5);
+  });
+});
+
+// quotaGate (SCL-05): the deny-on-exhaustion ceiling check as a reusable gate over the
+// EXISTING QuotaStore seam (the same store the proxy uses). It increments via the store
+// and returns "deny" once the running total crosses the configured ceiling - the unit
+// core the spend-cap plan exports alongside spendCapGate. Counters stay PLAIN NUMBERS
+// (call/byte accounting) and are NEVER summed with the spend-cap bigint money.
+describe("quotaGate deny-on-exhaustion (ceiling over the existing QuotaStore seam)", () => {
+  const RES = "resource-quota-gate-1";
+
+  it("allows within the ceiling and denies once a counter crosses it", async () => {
+    const store = new InMemoryQuotaStore();
+    const ceiling: QuotaBudget = { calls: 2, bytes: 1_000_000 };
+    expect(await quotaGate(RES, { calls: 1, bytes: 10 }, ceiling, store)).toBe("allow");
+    expect(await quotaGate(RES, { calls: 1, bytes: 10 }, ceiling, store)).toBe("allow");
+    // The third call pushes calls to 3 > ceiling.calls=2 -> deny.
+    expect(await quotaGate(RES, { calls: 1, bytes: 10 }, ceiling, store)).toBe("deny");
+  });
+
+  it("denies when EITHER the call OR the byte ceiling is exceeded", async () => {
+    const store = new InMemoryQuotaStore();
+    // A single big-byte request blows the byte ceiling immediately.
+    const ceiling: QuotaBudget = { calls: 1000, bytes: 100 };
+    expect(await quotaGate(RES, { calls: 1, bytes: 101 }, ceiling, store)).toBe("deny");
+  });
+
+  it("keeps per-resource counters independent (reuses the existing per-resource store)", async () => {
+    const store = new InMemoryQuotaStore();
+    const ceiling: QuotaBudget = { calls: 1, bytes: 1_000_000 };
+    expect(await quotaGate("res-x", { calls: 1, bytes: 5 }, ceiling, store)).toBe("allow");
+    // res-x is now at its ceiling; res-y still has room (counters are per-resource).
+    expect(await quotaGate("res-x", { calls: 1, bytes: 5 }, ceiling, store)).toBe("deny");
+    expect(await quotaGate("res-y", { calls: 1, bytes: 5 }, ceiling, store)).toBe("allow");
+  });
+
+  it("counters stay plain numbers (never bigint money) - the value the store returns is a number", async () => {
+    const store = new InMemoryQuotaStore();
+    const ceiling: QuotaBudget = { calls: 5, bytes: 5_000 };
+    await quotaGate(RES, { calls: 1, bytes: 100 }, ceiling, store);
+    const totals = await store.increment(RES, { calls: 0, bytes: 0 });
+    expect(typeof totals.calls).toBe("number");
+    expect(typeof totals.bytes).toBe("number");
   });
 });

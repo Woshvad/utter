@@ -50,3 +50,31 @@ export class InMemoryQuotaStore implements QuotaStore {
     return next;
   }
 }
+
+/**
+ * Per-resource quota gate: a deny-on-exhaustion ceiling check over the EXISTING
+ * QuotaStore seam (SCL-05). It increments the resource's counters by `budget` via the
+ * SAME store the /proxy flow uses (no fork), then returns "deny" once the new running
+ * total crosses EITHER the call OR the byte `ceiling`, else "allow". This is the
+ * reusable unit core the spend-cap plan exports alongside spendCapGate; the /proxy
+ * route keeps its own 429 fail-closed wiring (quota-gate.test) - this gate is the same
+ * decision factored out so the facilitator/data-proxy can share one ceiling check.
+ *
+ * Counters are PLAIN call/byte numbers - request accounting, never USDC money. They are
+ * NEVER summed with the spend-cap bigint amounts (distinct stores; threat T-08-UNITMIX).
+ *
+ * @param resourceId The resource whose per-resource counters this checks.
+ * @param budget     The calls/bytes this request would consume.
+ * @param ceiling    The configured per-resource call + byte ceiling.
+ * @param store      The QuotaStore (InMemory default or a Redis adapter).
+ */
+export async function quotaGate(
+  resourceId: string,
+  budget: QuotaBudget,
+  ceiling: QuotaBudget,
+  store: QuotaStore,
+): Promise<"allow" | "deny"> {
+  const totals = await store.increment(resourceId, budget);
+  if (totals.calls > ceiling.calls || totals.bytes > ceiling.bytes) return "deny";
+  return "allow";
+}

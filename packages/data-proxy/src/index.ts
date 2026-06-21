@@ -51,6 +51,18 @@ export {
 // behind the same QuotaStore contract.
 export {
   InMemoryQuotaStore,
+  quotaGate,
   type QuotaStore,
   type QuotaBudget,
 } from "./quota";
+
+// SCL-05 per-payer rolling-24h spend cap (USDC base-unit bigint money, injected clock).
+// The MONEY sibling of the quota counter; the facilitator mounts spendCapGate BEFORE
+// /verify reserve + handler dispatch (deny-by-default free-compute guard). Distinct from
+// the quota call/byte counters - the two accounting surfaces are never summed.
+export {
+  InMemorySpendCapStore,
+  spendCapGate,
+  SPEND_CAP_WINDOW_SECONDS,
+  type SpendCapStore,
+} from "./spend-cap";
