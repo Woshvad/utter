@@ -9,6 +9,7 @@
 // All money is base-unit bigint; there is NO 1e6/10**6/6/18 literal in any amount
 // path here.
 import { filterResources, type FilterCriteria, type IndexRecord } from "@utter/marketplace";
+import { runPlaygroundHarness } from "./playground-harness.js";
 import type {
   BuildEvent,
   ComposeSpec,
@@ -110,14 +111,21 @@ export class FixtureAdapter implements StudioDataAdapter {
     return { ...FIXTURE_ESCROW_BALANCE };
   }
 
-  async runPlayground(_resourceId: string, _req: unknown): Promise<PlaygroundResult> {
-    // Deterministic 402 pay-flow beat: a paid call debiting <= cap. The real
-    // criterion-3 harness (runTestEndpoint + in-process createApp + mock chain)
-    // is wired in the playground feature plan; the scaffold beat asserts the shape.
+  async runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult> {
+    // The criterion-3 pay-flow beat, proven in LOGIC: reuse the FROZEN Phase-5
+    // runTestEndpoint harness VERBATIM (in-process facilitator createApp + mock chain +
+    // a debit-counting relayer) - the buyer reads EVERY pay input ONLY from the served
+    // agent card, the gate reserves the cap BEFORE the handler runs (reserve-before-run,
+    // T-06-FREECOMPUTE), and EXACTLY ONE debit <= cap settles. The cap derives from a
+    // RUNTIME decimals() read (no 1e6 literal). The live funded-wallet HTTPS half stays
+    // operator-gated and is never invoked here.
+    const harness = await runPlaygroundHarness(resourceId, req);
     return {
-      paid: true,
-      debitAmount: BigInt(FIXTURE_RESOURCE_DETAIL.pricing.base),
-      body: { ok: true },
+      paid: harness.result.paid,
+      // The single on-chain debit (<= the signed cap), in base units.
+      debitAmount: harness.result.debitAmount,
+      // The response body the gated handler returned (the buyer's paid result).
+      body: harness.result.receipt ?? { ok: harness.result.paid },
     };
   }
 }
