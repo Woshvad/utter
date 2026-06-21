@@ -61,11 +61,14 @@ export function buildDepsFromEnv(): AppDeps {
       : createInMemoryStores();
 
   // CR-01: per-payer rolling-24h spend cap. EMPTY by default (no env -> no cap -> the
-  // gate is NOT armed and /verify behaves exactly as before). Set SPEND_CAP_PER_PAYER_DAY
-  // (a USDC base-unit integer) to arm the deny-by-default free-compute guard. The store
-  // is the in-memory default; a Redis-backed SpendCapStore drops in behind the same
-  // contract when REDIS_URL is configured (operator wiring).
-  const perPayerDayCapRaw = process.env.SPEND_CAP_PER_PAYER_DAY;
+  // gate is NOT armed and /verify behaves exactly as before). Set the DOCUMENTED
+  // SPEND_CAP_PER_PAYER_24H_BASE_UNITS (a USDC base-unit integer, the name in
+  // .env.example) to arm the deny-by-default free-compute guard; SPEND_CAP_PER_PAYER_DAY
+  // is kept as a back-compat fallback for older .env.local files. The store is the
+  // in-memory default; a Redis-backed SpendCapStore drops in behind the same contract
+  // when REDIS_URL is configured (operator wiring).
+  const perPayerDayCapRaw =
+    process.env.SPEND_CAP_PER_PAYER_24H_BASE_UNITS ?? process.env.SPEND_CAP_PER_PAYER_DAY;
   const perPayerDayCap =
     perPayerDayCapRaw && perPayerDayCapRaw.trim().length > 0
       ? BigInt(perPayerDayCapRaw.trim())
