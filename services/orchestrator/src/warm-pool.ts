@@ -70,4 +70,16 @@ export class WarmPool {
   warmCount(resourceId: string): number {
     return this.pool.get(resourceId)?.length ?? 0;
   }
+
+  /**
+   * Remove and return ALL warm sandboxes for `resourceId` (the pool is emptied for
+   * that resource). The caller stops each through the SandboxRunner - this is how the
+   * idle reaper drains the warm pool so an idle resource truly scales to zero (WR-01)
+   * instead of leaving pre-warmed sandboxes running past the idle TTL.
+   */
+  drain(resourceId: string): RunHandle[] {
+    const warm = this.pool.get(resourceId) ?? [];
+    this.pool.delete(resourceId);
+    return warm;
+  }
 }

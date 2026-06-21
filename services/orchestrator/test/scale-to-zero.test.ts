@@ -86,18 +86,24 @@ describe("IdleReaper (injected-clock TTL, scale-to-zero)", () => {
       reaper,
     });
 
-    // Traffic at t=0: a sandbox launches for resource R1.
+    // Traffic at t=0: a sandbox launches for resource R1 and the pool is replenished.
     const handle = await driver.schedule("R1", makeSpec());
     reaper.touch("R1", handle.id, 0); // record activity at the injected t=0
-    expect(run).toHaveBeenCalledTimes(1);
     expect(running.has(handle.id)).toBe(true);
+    // Let the off-hot-path warm-pool top-up settle (WR-01): the request launch plus the
+    // replenish launch that fills the size-1 pool back up = 2 launches total.
+    await driver.warmupSettled("R1");
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(driver.warmCount("R1")).toBe(1);
 
     // No traffic. Advance the injected clock just past the TTL and reap.
     await driver.reap(61);
 
-    // Scale-to-zero: the stop spy fired and the runner reports zero running.
+    // Scale-to-zero: the request sandbox is stopped AND the warm pool is drained, so the
+    // runner reports zero running and the pool is empty (true scale-to-zero, WR-01).
     expect(stop).toHaveBeenCalledWith(handle.id);
     expect(running.size).toBe(0);
+    expect(driver.warmCount("R1")).toBe(0);
     expect(reaper.runningCount("R1")).toBe(0);
   });
 
@@ -108,6 +114,7 @@ describe("IdleReaper (injected-clock TTL, scale-to-zero)", () => {
 
     const handle = await driver.schedule("R2", makeSpec());
     reaper.touch("R2", handle.id, 0);
+    await driver.warmupSettled("R2"); // let the off-hot-path top-up settle
 
     await driver.reap(30); // still inside the 60s window
     expect(stop).not.toHaveBeenCalled();
@@ -146,18 +153,58 @@ describe("WarmPool (bounds cold-start under the timeout budget)", () => {
     const tBefore = 0;
     const handle = await driver.schedule("R4", makeSpec());
     const tAfter = 1; // the warm acquire is O(1); modeled as 1s on the fake clock
-
-    // No new launch happened (the warm sandbox was reused).
+    // No REQUEST-path launch happened (the warm sandbox was reused for the call). The
+    // off-hot-path replenishment has not run yet (schedule does not await it).
     expect(run).not.toHaveBeenCalled();
     expect(handle.id).toBe(prewarmed.id);
     // The cold-start-after-idle stayed under the handler timeout budget.
     expect(tAfter - tBefore).toBeLessThan(MAX_TIMEOUT_SECONDS);
+
+    // After the top-up settles the pool is refilled to `size` for the NEXT call.
+    await driver.warmupSettled("R4");
+    expect(driver.warmCount("R4")).toBe(2);
   });
 
-  it("cold-launches when the pool is empty for the resource", async () => {
+  it("cold-launches when the pool is empty, then replenishes the pool (WR-01 live path)", async () => {
     const { runner, run } = makeSpyRunner();
     const driver = new LocalDriver({ runner, warmPool: new WarmPool({ size: 1 }) });
-    await driver.schedule("R5", makeSpec()); // empty pool -> runner.run
+    const handle = await driver.schedule("R5", makeSpec()); // empty pool -> runner.run
+    // The REQUEST launched exactly one sandbox (the pool was empty - a true cold start).
     expect(run).toHaveBeenCalledTimes(1);
+    expect(driver.warmCount("R5")).toBe(0); // nothing warm yet at return time
+    // The live LocalDriver REPLENISHES the pool off the hot path so the NEXT call after
+    // idle is served warm (WR-01: the pool is actually populated in production, not just
+    // by a test fixture). One replenish launch tops the size-1 pool back up.
+    await driver.warmupSettled("R5");
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(driver.warmCount("R5")).toBe(1);
+    expect(handle.id).not.toBe("");
+  });
+
+  it("WR-01: a SECOND call after the first is served WARM from the replenished pool (bounded cold-start)", async () => {
+    const { runner, run, running } = makeSpyRunner();
+    const driver = new LocalDriver({ runner, warmPool: new WarmPool({ size: 1 }) });
+
+    // First call: cold-launch + off-hot-path replenish (no manual release in the test;
+    // the LIVE driver populates the pool itself - the gap WR-01 fixes).
+    await driver.schedule("R6", makeSpec());
+    await driver.warmupSettled("R6");
+    expect(driver.warmCount("R6")).toBe(1);
+
+    // The warm spare is some already-launched sandbox. Snapshot the running ids; the
+    // SECOND call must be served from THIS set (a pre-warmed sandbox), not a fresh
+    // request-path cold launch (whose id would be new and absent from this snapshot).
+    const alreadyLaunched = new Set(running);
+
+    const handle2 = await driver.schedule("R6", makeSpec());
+    // Served WARM: the handle is a previously-launched (pre-warmed) sandbox, so the
+    // cold-start-after-idle is bounded - the request itself did NOT cold-launch.
+    expect(alreadyLaunched.has(handle2.id)).toBe(true);
+    // The warm sandbox was consumed by the call (pool momentarily empty before top-up).
+    // (warmCount is read after the await; the next top-up may already be refilling, so
+    // we assert the served handle's warm provenance above rather than a transient count.)
+    expect(handle2.id).not.toBe("");
+    await driver.warmupSettled("R6"); // refilled again for the next call
+    expect(driver.warmCount("R6")).toBe(1);
   });
 });

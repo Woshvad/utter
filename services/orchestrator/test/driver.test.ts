@@ -115,10 +115,16 @@ describe("LocalDriver schedules the Phase 3 RunSpec verbatim (T-08-UNHARDENED)",
     const spec = makeSpec();
     const handle = await orch.schedule("res-1", spec);
 
-    expect(run).toHaveBeenCalledTimes(1);
-    // Identity: the orchestrator passes the spec THROUGH untouched (no re-build).
+    // The REQUEST-path launch is the first run() call, with the spec passed THROUGH
+    // untouched (no re-build). The handle is served from that launch.
     expect(run.mock.calls[0]?.[0]).toBe(spec);
     expect(handle.id).toBe("run-utter/resource:abc@v1");
+    // The off-hot-path warm-pool top-up also passes the SAME spec object through
+    // verbatim (WR-01): every run() call - request AND replenish - receives `spec`.
+    await orch.warmupSettled("res-1");
+    for (const call of run.mock.calls) {
+      expect(call[0]).toBe(spec);
+    }
   });
 
   it("does not mutate any RunSpec hardening field", async () => {
@@ -127,6 +133,7 @@ describe("LocalDriver schedules the Phase 3 RunSpec verbatim (T-08-UNHARDENED)",
     const spec = makeSpec();
     const snapshot = JSON.stringify(spec);
     await orch.schedule("res-1", spec);
+    await orch.warmupSettled("res-1"); // include the replenish launches in the check
     expect(JSON.stringify(spec)).toBe(snapshot);
   });
 });
