@@ -98,7 +98,12 @@ export class FixtureAdapter implements StudioDataAdapter {
   }
 
   async getRevenue(_resourceId: string): Promise<RevenueSummary> {
-    return { ...FIXTURE_REVENUE };
+    // Shallow copy + per-row copy of the receipts so a caller mutation cannot
+    // poison the fixture seed (the InMemoryIndexStore idiom).
+    return {
+      ...FIXTURE_REVENUE,
+      receipts: FIXTURE_REVENUE.receipts.map((r) => ({ ...r })),
+    };
   }
 
   async getEscrowBalance(_address: Hex): Promise<UsdcBalance> {

@@ -134,6 +134,27 @@ export interface ResourceCardData {
   active: boolean;
 }
 
+/** Whether a settlement receipt is a debit (settle) or a refund. */
+export type ReceiptKind = "settle" | "refund";
+
+/**
+ * One settlement/refund receipt row for the STU-04 dashboard's ArcScan links. The
+ * `amount` is the projected receipt amount in base units (NOT recomputed) and `tx`
+ * is the on-chain transaction hash the dashboard links to ArcScan. These rows are
+ * read THROUGH the facilitator stores via the adapter (deterministic fixtures in the
+ * autonomous path); they are never invented at render time.
+ */
+export interface RevenueReceipt {
+  /** The on-chain transaction hash (0x-prefixed) for the ArcScan TxLink. */
+  tx: Hex;
+  /** settle (debit) or refund. */
+  kind: ReceiptKind;
+  /** The receipt amount in base units (the projected receipt value, not recomputed). */
+  amount: bigint;
+  /** The payment idemKey the receipt settled under. */
+  idemKey: string;
+}
+
 /** The revenue dashboard projection (STU-04). All money is base-unit bigint. */
 export interface RevenueSummary {
   resourceId: Hex;
@@ -147,6 +168,12 @@ export interface RevenueSummary {
   platformShare: bigint;
   /** Total refunded USDC, base units. */
   refunds: bigint;
+  /**
+   * The settle/refund receipt rows backing the ArcScan TxLinks. Read through the
+   * facilitator stores; each carries its own on-chain tx hash. The creator/platform
+   * split above equals the sum of the settle receipt amounts (not recomputed here).
+   */
+  receipts: RevenueReceipt[];
 }
 
 /** An escrow USDC balance read (STU-06 / wallet). Base units + runtime decimals. */

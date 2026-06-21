@@ -11,6 +11,8 @@ import type {
   RevenueSummary,
   UsdcBalance,
 } from "../adapter/types.js";
+// RevenueReceipt is referenced structurally in FIXTURE_REVENUE.receipts (typed via
+// RevenueSummary); no separate runtime import needed.
 
 /** The deterministic fixture resourceId every fixture read keys off. */
 export const FIXTURE_RESOURCE_ID =
@@ -89,7 +91,13 @@ export const FIXTURE_MARKETPLACE: readonly ResourceCardData[] = [
   },
 ] as const;
 
-/** The revenue summary fixture (STU-04). All money base-unit bigint. */
+/**
+ * The revenue summary fixture (STU-04). All money base-unit bigint. The settle
+ * receipts sum to `gross` and the refund receipt sums to `refunds`; the
+ * creator/platform split is the projected aggregate (not recomputed at render).
+ * Each receipt carries a deterministic fixture tx hash for the ArcScan TxLinks -
+ * these are CLEARLY-fixture values (a1..-suffixed), never faked live numbers.
+ */
 export const FIXTURE_REVENUE: RevenueSummary = {
   resourceId: FIXTURE_RESOURCE_ID,
   calls: 128,
@@ -97,6 +105,26 @@ export const FIXTURE_REVENUE: RevenueSummary = {
   creatorShare: 896000n,
   platformShare: 384000n,
   refunds: 20000n,
+  receipts: [
+    {
+      tx: "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a101",
+      kind: "settle",
+      amount: 800000n,
+      idemKey: "idem-settle-1",
+    },
+    {
+      tx: "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a102",
+      kind: "settle",
+      amount: 480000n,
+      idemKey: "idem-settle-2",
+    },
+    {
+      tx: "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a103",
+      kind: "refund",
+      amount: 20000n,
+      idemKey: "idem-refund-1",
+    },
+  ],
 };
 
 /** The escrow balance fixture (STU-06). Raw base units + runtime-style decimals. */
