@@ -228,6 +228,19 @@ importers:
         specifier: 2.52.2
         version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)
 
+  packages/cost:
+    dependencies:
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../chain
+      '@utter/observability':
+        specifier: workspace:*
+        version: link:../observability
+    devDependencies:
+      viem:
+        specifier: 2.52.2
+        version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)
+
   packages/data-proxy:
     dependencies:
       '@hono/node-server':
@@ -280,6 +293,22 @@ importers:
       '@utter/chain':
         specifier: workspace:*
         version: link:../chain
+      viem:
+        specifier: 2.52.2
+        version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)
+
+  packages/treasury:
+    dependencies:
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../chain
+      '@utter/facilitator':
+        specifier: workspace:*
+        version: link:../../services/facilitator
+      '@utter/x402-arc':
+        specifier: workspace:*
+        version: link:../x402-arc
+    devDependencies:
       viem:
         specifier: 2.52.2
         version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)
@@ -382,6 +411,19 @@ importers:
       '@types/pg':
         specifier: 8.20.0
         version: 8.20.0
+
+  services/orchestrator:
+    dependencies:
+      '@utter/chain':
+        specifier: workspace:*
+        version: link:../../packages/chain
+      '@utter/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
+    devDependencies:
+      viem:
+        specifier: 2.52.2
+        version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)
 
   services/sandbox:
     dependencies:
