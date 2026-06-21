@@ -32,43 +32,16 @@ describe("selectAdapter", () => {
 });
 
 describe("LiveAdapter (deferred pipeline, fail-loud)", () => {
-  // The four read methods (getEscrowBalance / listMarketplace / getResourceDetail /
-  // runPlayground) are now implemented against injected deps - covered offline in
-  // live-adapter.test.ts. Here we assert ONLY the three DEFERRED pipeline methods
-  // still fail loud (the live build/revenue pipeline lands in a later increment).
-  // Construct the adapter directly with NO deps so no real env/chain is touched: the
-  // deferred methods throw before ever needing deps.
-  it("createResource still throws RequiresLiveServicesError", async () => {
-    const adapter = new LiveAdapter();
-    await expect(
-      adapter.createResource({
-        prompt: "x",
-        pricingModel: "flat",
-        basePrice: 1n,
-        bond: 1n,
-        payout: "0x1111111111111111111111111111111111111111",
-      }),
-    ).rejects.toBeInstanceOf(RequiresLiveServicesError);
-  });
-
+  // The four read methods plus createResource + subscribeBuildEvents are now
+  // implemented against injected deps (the local-real create flow) - covered offline
+  // in live-adapter.test.ts. Here we assert ONLY getRevenue still fails loud: the live
+  // revenue aggregation lands in a later increment. getRevenue throws
+  // RequiresLiveServicesError BEFORE touching deps, so a no-deps construction suffices.
   it("getRevenue still throws RequiresLiveServicesError", async () => {
     const adapter = new LiveAdapter();
     await expect(adapter.getRevenue("0xabc")).rejects.toBeInstanceOf(
       RequiresLiveServicesError,
     );
-  });
-
-  it("subscribeBuildEvents throws on first iteration (real async generator)", async () => {
-    const adapter = new LiveAdapter();
-    let thrown: unknown;
-    try {
-      for await (const _ev of adapter.subscribeBuildEvents("0xabc")) {
-        void _ev;
-      }
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(RequiresLiveServicesError);
   });
 });
 
