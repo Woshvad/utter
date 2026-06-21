@@ -18,6 +18,7 @@ const config: Config = {
         ink: "var(--ink)",
         "ink-muted": "var(--ink-muted)",
         "ink-faint": "var(--ink-faint)",
+        paper: "var(--paper)",
         "paper-bg": "var(--paper-bg)",
         "paper-ink": "var(--paper-ink)",
         red: "var(--red)",

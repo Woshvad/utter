@@ -22,6 +22,7 @@
   --ink: #eceae3; /* primary text (warm off-white), AAA on canvas */
   --ink-muted: #9c988e; /* secondary text, labels */
   --ink-faint: #6a6760; /* tertiary text, disabled, meta */
+  --paper: #eceae3; /* warm off-white foreground/fill ON triad surfaces (text-paper/bg-paper, the Run-triangle fill) - the brief's "paper" off-white ink, distinct from the --paper-bg inverted block */
 
   /* --- Paper (inverted emphasis blocks, sparingly) --- */
   --paper-bg: #f2efe6; /* inverted block bg */
