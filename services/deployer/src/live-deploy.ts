@@ -26,6 +26,7 @@
 // are NEVER logged.
 import { config as loadEnv } from "dotenv";
 import { webcrypto } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import {
   keccak256,
   toHex,
@@ -243,10 +244,11 @@ export async function liveDeployEcho(
 }
 
 // Operator entry point: only runs when invoked directly (never on import in the
-// autonomous suite). The guard compares import.meta.url to the file argv[1] was
-// resolved from, the Node-correct check (server.ts uses the same pattern);
+// autonomous suite). pathToFileURL normalizes process.argv[1] to the same WHATWG
+// file:// href import.meta.url carries, so the direct-run check fires on Windows
+// and POSIX alike (server.ts uses the same cross-platform pattern);
 // import.meta.main is a Bun-ism that is always undefined on Node.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   liveDeployEcho()
     .then((r) => {
       console.log(`[live-deploy] OK: ${r.url} 402(unpaid)->200(paid); PRX-02 unreachable=${r.nonAllowlistedUnreachable}`);

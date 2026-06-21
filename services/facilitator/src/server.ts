@@ -12,6 +12,7 @@
 // adapter is used; otherwise the in-memory default (the test/dev fallback). The
 // route logic is identical against either adapter (the shared store contract).
 import { config as loadEnv } from "dotenv";
+import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
@@ -120,6 +121,8 @@ export function start(port = Number(process.env.PORT ?? "8787")): void {
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL normalizes process.argv[1] to the same WHATWG file:// href that
+// import.meta.url carries, so the direct-run check fires on Windows and POSIX alike.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   start();
 }
