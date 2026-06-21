@@ -6,15 +6,29 @@
 // escrow/relayer chain-balance gauges render 0 in the autonomous path, never an
 // invented value (Pitfall 8 / T-06-FAKEMETRICS). The test asserts names + format,
 // not invented live values.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { OBS_METRIC_NAMES } from "@utter/observability";
+
+// WR-03: /metrics is now gated by a bearer token (or a creator session). The OBS-01
+// content tests authorize with the token; a dedicated test below asserts the 401 path.
+const METRICS_TOKEN = "test-metrics-bearer-token-not-for-prod";
+
+beforeAll(() => {
+  process.env.METRICS_TOKEN = METRICS_TOKEN;
+  process.env.SESSION_SECRET = "test-session-secret-which-is-long-enough-32b";
+});
+
+/** An authorized GET carrying the operator metrics bearer token. */
+function tokenRequest(url = "http://x/metrics"): Request {
+  return new Request(url, { headers: { Authorization: `Bearer ${METRICS_TOKEN}` } });
+}
 
 describe("/metrics resource route (OBS-01)", () => {
   it("returns Prometheus text with the correct content-type", async () => {
     const { loader } = await import("../app/routes/metrics");
     const res = await loader({
       params: {},
-      request: new Request("http://x/metrics"),
+      request: tokenRequest(),
       context: {},
     } as never);
 
@@ -31,7 +45,7 @@ describe("/metrics resource route (OBS-01)", () => {
     const { loader } = await import("../app/routes/metrics");
     const res = await loader({
       params: {},
-      request: new Request("http://x/metrics"),
+      request: tokenRequest(),
       context: {},
     } as never);
     const body = await res.text();
@@ -46,7 +60,7 @@ describe("/metrics resource route (OBS-01)", () => {
     const { loader } = await import("../app/routes/metrics");
     const res = await loader({
       params: {},
-      request: new Request("http://x/metrics"),
+      request: tokenRequest(),
       context: {},
     } as never);
     const body = await res.text();
@@ -59,5 +73,79 @@ describe("/metrics resource route (OBS-01)", () => {
     // the seeded gross/creator/platform render their fixture values (format exercised)
     expect(body).toContain("gross_usdc 1.28");
     expect(body).toContain("creator_usdc 0.896");
+  });
+});
+
+// WR-03: the money-path metric set must be fail-closed. These tests fail against the
+// pre-fix (ungated) loader and pass after the bearer/session gate is installed.
+describe("/metrics access gate (WR-03)", () => {
+  it("returns 401 with no token and no session (unauthenticated)", async () => {
+    const { loader } = await import("../app/routes/metrics");
+    const res = (await loader({
+      params: {},
+      request: new Request("http://x/metrics"),
+      context: {},
+    } as never)) as Response;
+    expect(res.status).toBe(401);
+    // the body must NOT contain the money-path exposition
+    const body = await res.text();
+    expect(body).not.toContain("gross_usdc");
+  });
+
+  it("returns 401 for a wrong bearer token (constant-time compare, no leak)", async () => {
+    const { loader } = await import("../app/routes/metrics");
+    const res = (await loader({
+      params: {},
+      request: new Request("http://x/metrics", {
+        headers: { Authorization: "Bearer the-wrong-token-entirely" },
+      }),
+      context: {},
+    } as never)) as Response;
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 200 with the correct bearer token", async () => {
+    const { loader } = await import("../app/routes/metrics");
+    const res = (await loader({
+      params: {},
+      request: tokenRequest(),
+      context: {},
+    } as never)) as Response;
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("gross_usdc");
+  });
+
+  it("authorizes a valid creator session even without a token", async () => {
+    const { sessionStorage } = await import("../app/auth/session.server");
+    const session = await sessionStorage.getSession();
+    session.set("address", "0x1111111111111111111111111111111111111111");
+    const cookie = (await sessionStorage.commitSession(session)).split(";")[0]!;
+
+    const { loader } = await import("../app/routes/metrics");
+    const res = (await loader({
+      params: {},
+      request: new Request("http://x/metrics", { headers: { Cookie: cookie } }),
+      context: {},
+    } as never)) as Response;
+    expect(res.status).toBe(200);
+  });
+
+  it("disables the bearer path when METRICS_TOKEN is empty (empty can never authorize)", async () => {
+    const prev = process.env.METRICS_TOKEN;
+    process.env.METRICS_TOKEN = "";
+    try {
+      const { loader } = await import("../app/routes/metrics");
+      // present an empty bearer to mimic an empty-env scraper - must still 401
+      const res = (await loader({
+        params: {},
+        request: new Request("http://x/metrics", {
+          headers: { Authorization: "Bearer " },
+        }),
+        context: {},
+      } as never)) as Response;
+      expect(res.status).toBe(401);
+    } finally {
+      process.env.METRICS_TOKEN = prev;
+    }
   });
 });

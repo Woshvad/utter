@@ -8,9 +8,44 @@
 // USDC) are operator-gated - the gauge is exposed here, the live on-chain read is the
 // deferred half (Pitfall 8 / T-06-FAKEMETRICS). We never fake live numbers: the test
 // asserts the registered metric NAMES + the text format, not invented values.
+import { timingSafeEqual } from "node:crypto";
 import type { LoaderFunctionArgs } from "react-router";
 import { Registry } from "@utter/observability";
 import { selectAdapter } from "../adapter/select.js";
+import { getAuthAddress } from "../auth/session.server.js";
+
+/**
+ * Access gate for /metrics (WR-03). The Prometheus exposition leaks the full
+ * money-path posture (gross/creator/platform/relayer USDC, settle failures), so the
+ * route is fail-closed: a caller is authorized iff EITHER
+ *   - it carries a valid creator session (an operator browsing in-app), OR
+ *   - it presents the operator metrics bearer token (METRICS_TOKEN, .env.local only)
+ *     in `Authorization: Bearer <token>`, compared CONSTANT-TIME.
+ * Anything else gets 401. METRICS_TOKEN is never logged and ships EMPTY in
+ * .env.example; when it is unset the bearer path is disabled entirely (a Prometheus
+ * scraper must be configured with a real token), so an empty env can never authorize.
+ */
+async function isMetricsAuthorized(request: Request): Promise<boolean> {
+  // 1. A valid creator session authorizes (operator browsing the metrics in-app).
+  const address = await getAuthAddress(request);
+  if (address) return true;
+
+  // 2. Otherwise require the operator bearer token, constant-time compared.
+  const configured = process.env.METRICS_TOKEN;
+  if (!configured || configured.length === 0) return false; // bearer path disabled
+
+  const header = request.headers.get("Authorization") ?? "";
+  const prefix = "Bearer ";
+  if (!header.startsWith(prefix)) return false;
+  const presented = header.slice(prefix.length);
+
+  // timingSafeEqual needs equal-length buffers; a length mismatch is a definite
+  // non-match (and avoids a length side channel / a throw on differing lengths).
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(configured, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 /**
  * Build the registry to render. In the autonomous (fixture) path this seeds the
@@ -44,7 +79,16 @@ function buildRegistry(backend: "fixture" | "live"): Registry {
  * decimals read through the adapter (no literal). Content-Type is the Prometheus
  * exposition version the registry emits.
  */
-export async function loader(_args: LoaderFunctionArgs): Promise<Response> {
+export async function loader({ request }: LoaderFunctionArgs): Promise<Response> {
+  // Fail-closed access gate (WR-03): operator session OR the metrics bearer token.
+  // Unauthenticated callers get 401 - the money-path metric set is never world-readable.
+  if (!(await isMetricsAuthorized(request))) {
+    return new Response(JSON.stringify({ error: "unauthenticated" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   const adapter = selectAdapter(process.env);
 
   // Runtime money scale read through the adapter (no 6/1e6 literal in the render).
