@@ -13,6 +13,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { useAccount } from "wagmi";
 import { selectAdapter } from "../adapter/select.js";
+import { requireCreator } from "../auth/requireCreator.server.js";
 import { useEscrowBalance } from "../wallet/useEscrowBalance.js";
 import { AddArcTestnet } from "../wallet/AddArcTestnet.js";
 import { EscrowBalanceWidget } from "../components/wallet/EscrowBalanceWidget.js";
@@ -23,7 +24,11 @@ export interface WalletData {
   decimals: number;
 }
 
-export async function loader(_args: LoaderFunctionArgs): Promise<WalletData> {
+export async function loader({ request }: LoaderFunctionArgs): Promise<WalletData> {
+  // Access gate (CR-01): the wallet/escrow + payout surface is creator-only.
+  // requireCreator throws redirect(/auth) or 401 before any balance read.
+  await requireCreator(request);
+
   const adapter = selectAdapter(process.env);
   // Runtime money scale read through the adapter (no 6/1e6 literal). The live path
   // reads decimals() on-chain; the fixture returns deterministic decimals.

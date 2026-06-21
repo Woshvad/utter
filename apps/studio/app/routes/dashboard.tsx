@@ -19,6 +19,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { arcTestnet } from "@utter/chain";
 import { selectAdapter } from "../adapter/select.js";
+import { requireCreator } from "../auth/requireCreator.server.js";
 import type { RevenueSummary } from "../adapter/types.js";
 import { RevenuePanel } from "../components/dashboard/RevenuePanel.js";
 import {
@@ -56,6 +57,10 @@ export interface DashboardData {
 }
 
 export async function loader({ request }: LoaderFunctionArgs): Promise<DashboardData> {
+  // Access gate (CR-01): the revenue dashboard is creator-only. requireCreator throws
+  // redirect(/auth) or 401 before any revenue is read, so anon never sees the figures.
+  await requireCreator(request);
+
   const adapter = selectAdapter(process.env);
 
   // The dashboard reads a single resource's revenue; the resourceId comes from the

@@ -6,19 +6,36 @@
 // creator/platform split equals the projected receipt amounts (not recomputed,
 // T-06-REDERIVE); (3) a TxLink per settle/refund row points at ARC_EXPLORER + the
 // receipt hash; (4) a source grep finds no 1e6/6/18 money literal in the render path.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// The dashboard loader is now gated by requireCreator (CR-01); the loader tests must
+// carry a valid session cookie.
+beforeAll(() => {
+  process.env.SESSION_SECRET = "test-session-secret-which-is-long-enough-32b";
+});
+
+const CREATOR = "0x1111111111111111111111111111111111111111";
+
+/** An authenticated GET Request (carries a committed session for CREATOR). */
+async function authedGet(url: string): Promise<Request> {
+  const { sessionStorage } = await import("../app/auth/session.server");
+  const session = await sessionStorage.getSession();
+  session.set("address", CREATOR);
+  const setCookie = await sessionStorage.commitSession(session);
+  return new Request(url, { headers: { Cookie: setCookie.split(";")[0]! } });
+}
+
 describe("dashboard loader (read-through revenue)", () => {
   it("aggregates calls/gross/creator+platform/refunds + receipts through the adapter", async () => {
     const { loader } = await import("../app/routes/dashboard");
     const data = await loader({
       params: {},
-      request: new Request("http://x/dashboard"),
+      request: await authedGet("http://x/dashboard"),
       context: {},
     } as never);
 
@@ -46,7 +63,7 @@ describe("dashboard loader (read-through revenue)", () => {
     const { loader } = await import("../app/routes/dashboard");
     const data = await loader({
       params: {},
-      request: new Request("http://x/dashboard"),
+      request: await authedGet("http://x/dashboard"),
       context: {},
     } as never);
     // creator + platform sums to gross (the projected split, not a recomputed one)
@@ -62,7 +79,7 @@ describe("dashboard loader (read-through revenue)", () => {
     const { loader } = await import("../app/routes/dashboard");
     const bad = await loader({
       params: {},
-      request: new Request("http://x/dashboard?resource=../../etc/passwd"),
+      request: await authedGet("http://x/dashboard?resource=../../etc/passwd"),
       context: {},
     } as never);
     // a malformed resource param does not throw; it falls back to the canonical id
@@ -75,7 +92,7 @@ describe("dashboard screen (mono money + ArcScan TxLinks)", () => {
     const { loader } = await import("../app/routes/dashboard");
     const data = await loader({
       params: {},
-      request: new Request("http://x/dashboard"),
+      request: await authedGet("http://x/dashboard"),
       context: {},
     } as never);
 

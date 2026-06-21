@@ -5,12 +5,29 @@
 // (reject-before-create, T-06-INPUTVAL); (2) a valid spec parses bond/price to
 // base-unit bigints with no money literal; (3) the action runs validation first and
 // only calls adapter.createResource on success, returning { resourceId, eventsUrl }.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll } from "vitest";
 import {
   validateComposeSpec,
   parseUsdcToBaseUnits,
   PROMPT_MAX,
 } from "../app/validation/compose";
+
+// The /create action is now gated by requireCreator (CR-01); these action tests must
+// carry a valid session cookie. A long SESSION_SECRET makes the signed cookie stable.
+beforeAll(() => {
+  process.env.SESSION_SECRET = "test-session-secret-which-is-long-enough-32b";
+});
+
+/** Commit a session for the given address and return its Cookie header value. */
+async function sessionCookie(address: string): Promise<string> {
+  const { sessionStorage } = await import("../app/auth/session.server");
+  const session = await sessionStorage.getSession();
+  session.set("address", address);
+  const setCookie = await sessionStorage.commitSession(session);
+  return setCookie.split(";")[0]!;
+}
+
+const CREATOR = "0x1111111111111111111111111111111111111111";
 
 const GOOD = {
   prompt: "return the current weather for a city",
@@ -104,12 +121,15 @@ describe("validateComposeSpec", () => {
 });
 
 describe("create action", () => {
-  /** Build a POST Request with a urlencoded body the action can read. */
-  function postRequest(fields: Record<string, string>): Request {
+  /** Build an authenticated POST Request with a urlencoded body the action can read. */
+  async function postRequest(fields: Record<string, string>): Promise<Request> {
     const body = new URLSearchParams(fields).toString();
     return new Request("http://localhost/create", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: await sessionCookie(CREATOR),
+      },
       body,
     });
   }
@@ -117,7 +137,7 @@ describe("create action", () => {
   it("returns { resourceId, eventsUrl } for a valid submit (calls adapter.createResource)", async () => {
     const { action } = await import("../app/routes/create");
     const result = await action({
-      request: postRequest(GOOD),
+      request: await postRequest(GOOD),
       params: {},
       context: {},
     } as never);
@@ -139,7 +159,7 @@ describe("create action", () => {
     );
 
     const result = await action({
-      request: postRequest({ ...GOOD, payout: "not-an-address", bond: "0" }),
+      request: await postRequest({ ...GOOD, payout: "not-an-address", bond: "0" }),
       params: {},
       context: {},
     } as never);

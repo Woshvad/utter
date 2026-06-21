@@ -17,6 +17,7 @@ import * as React from "react";
 import type { ActionFunctionArgs } from "react-router";
 import { useActionData, useNavigation } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
+import { requireCreator } from "../auth/requireCreator.server.js";
 import {
   validateComposeSpec,
   type ComposeFieldErrors,
@@ -30,6 +31,11 @@ export type CreateActionData =
   | { ok: true; resourceId: string; eventsUrl: string };
 
 export async function action({ request }: ActionFunctionArgs): Promise<CreateActionData> {
+  // Access gate (CR-01 / T-06-PRIVESC): an unauthenticated request must NOT reach
+  // adapter.createResource. requireCreator throws redirect(/auth) for a document
+  // navigation or a 401 for a data/fetch request, so anon can never mint a resource.
+  await requireCreator(request);
+
   const adapter = selectAdapter(process.env);
 
   // Runtime money scale: read decimals through the adapter (no 6/1e6 literal). The
