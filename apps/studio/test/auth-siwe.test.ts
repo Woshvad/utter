@@ -108,7 +108,8 @@ describe("session cookie storage", () => {
     expect(setCookie).toMatch(/Secure/i);
     expect(setCookie).toMatch(/SameSite=Lax/i);
     // round-trips through the signed cookie
-    const round = await sessionStorage.getSession(setCookie.split(";")[0].replace("__utter_session=", "__utter_session="));
+    const cookiePair = setCookie.split(";")[0]!;
+    const round = await sessionStorage.getSession(cookiePair);
     expect(round).toBeDefined();
   });
 
@@ -117,7 +118,7 @@ describe("session cookie storage", () => {
     const session = await sessionStorage.getSession();
     session.set("address", account.address);
     const setCookie = await sessionStorage.commitSession(session);
-    const cookieHeader = setCookie.split(";")[0];
+    const cookieHeader = setCookie.split(";")[0]!;
     const req = new Request("http://localhost/", { headers: { Cookie: cookieHeader } });
     const addr = await getAuthAddress(req);
     expect(addr?.toLowerCase()).toBe(account.address.toLowerCase());

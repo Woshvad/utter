@@ -3,6 +3,7 @@
 //   /create                  -> the composer action + screen (STU-01)
 //   /resources/:id           -> the resource-detail loader + screen (STU-03)
 //   /resources/:id/events    -> the SSE build-stream resource route (STU-02)
+//   /auth                    -> the SIWE handshake (GET nonce / POST verify, STU-05)
 //
 // The events route is a resource route (loader only, no default component); it sits
 // at a distinct path segment so it does not collide with the detail route.
@@ -12,4 +13,5 @@ export default [
   route("create", "routes/create.tsx"),
   route("resources/:id", "routes/resources.$id.tsx"),
   route("resources/:id/events", "routes/resources.$id.events.ts"),
+  route("auth", "routes/auth.tsx"),
 ] satisfies RouteConfig;
