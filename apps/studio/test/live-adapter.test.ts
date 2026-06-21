@@ -12,9 +12,18 @@
 import { describe, it, expect } from "vitest";
 import type { PublicClient } from "viem";
 import { InMemoryIndexStore, type IndexRecord } from "@utter/marketplace";
+import {
+  ScaffoldGenerator,
+  validateBundle,
+  type Bundle,
+  type ResourceSpec,
+  type ValidationResult,
+} from "@utter/ai-runtime";
 import { LiveAdapter } from "../app/adapter/live";
 import { RequiresLiveServicesError } from "../app/adapter/live";
+import { BuildEventChannel } from "../app/adapter/build-channel";
 import { runPlaygroundHarness } from "../app/adapter/playground-harness";
+import type { ComposeSpec } from "../app/adapter/types";
 import { FIXTURE_MARKETPLACE, FIXTURE_RESOURCE_ID } from "../app/fixtures/index";
 
 /** A clearly-fake unknown id for the not-found case (never seeded). */
@@ -60,8 +69,20 @@ function seedRecords(): IndexRecord[] {
   }));
 }
 
-/** Build a LiveAdapter with injected offline deps + a freshly seeded index store. */
-async function makeLiveAdapter(): Promise<LiveAdapter> {
+/** The real offline scaffold generator (no ANTHROPIC key, no network). */
+const scaffold = new ScaffoldGenerator();
+const scaffoldGenerate = (spec: ResourceSpec): Promise<Bundle> => scaffold.generate(spec);
+
+/**
+ * Build a LiveAdapter with injected offline deps + a freshly seeded index store + a
+ * shared BuildEventChannel + the real scaffold generate seam + the real validateBundle
+ * seam. The SAME indexStore instance backs both the seeded reads and the create publish,
+ * so the post-create visibility assertion is real. An optional `validate` override lets
+ * one case force a validation failure without affecting the others.
+ */
+async function makeLiveAdapter(
+  validate: (bundle: Bundle, spec: ResourceSpec) => Promise<ValidationResult> = validateBundle,
+): Promise<LiveAdapter> {
   const indexStore = new InMemoryIndexStore();
   for (const rec of seedRecords()) {
     await indexStore.upsert(rec);
@@ -69,9 +90,25 @@ async function makeLiveAdapter(): Promise<LiveAdapter> {
   return new LiveAdapter({
     publicClient: makeStubPublicClient(),
     indexStore,
+    buildChannel: new BuildEventChannel(),
+    generate: scaffoldGenerate,
+    validate,
     // Inject the REAL harness so the escrow reserve-before-run gate is proven, not faked.
     runPlayground: runPlaygroundHarness,
   });
+}
+
+/** A ComposeSpec for the create-flow cases. All money is base-unit bigint (no literal
+ *  decimals); payout is a 0x...40hex checksummed-shaped address. */
+function makeComposeSpec(overrides: Partial<ComposeSpec> = {}): ComposeSpec {
+  return {
+    prompt: "echo the caller's text back with its length",
+    pricingModel: "metered",
+    basePrice: 10_000n,
+    bond: 5_000_000n,
+    payout: "0x1111111111111111111111111111111111111111",
+    ...overrides,
+  };
 }
 
 describe("LiveAdapter read path (injected offline deps)", () => {
@@ -136,37 +173,103 @@ describe("LiveAdapter read path (injected offline deps)", () => {
 });
 
 describe("LiveAdapter deferred path (fail loud, never fake data)", () => {
-  it("createResource still throws RequiresLiveServicesError", async () => {
-    const adapter = await makeLiveAdapter();
-    await expect(
-      adapter.createResource({
-        prompt: "x",
-        pricingModel: "flat",
-        basePrice: 1n,
-        bond: 1n,
-        payout: "0x1111111111111111111111111111111111111111",
-      }),
-    ).rejects.toBeInstanceOf(RequiresLiveServicesError);
-  });
-
+  // createResource and subscribeBuildEvents are now REAL in local-real mode (covered by
+  // the create-flow block below). getRevenue stays deferred: the live revenue
+  // aggregation lands later, so it must still fail loud rather than return fake data.
   it("getRevenue still throws RequiresLiveServicesError", async () => {
     const adapter = await makeLiveAdapter();
     await expect(adapter.getRevenue(FIXTURE_RESOURCE_ID)).rejects.toBeInstanceOf(
       RequiresLiveServicesError,
     );
   });
+});
 
-  it("subscribeBuildEvents throws on first iteration (real async generator)", async () => {
+describe("LiveAdapter create flow (local-real, injected deps)", () => {
+  it("createResource(spec) returns { resourceId(bytes32), eventsUrl }", async () => {
     const adapter = await makeLiveAdapter();
-    let thrown: unknown;
-    try {
-      for await (const _ev of adapter.subscribeBuildEvents(FIXTURE_RESOURCE_ID)) {
-        // The generator throws before yielding; this body never runs.
-        void _ev;
-      }
-    } catch (e) {
-      thrown = e;
+    const { resourceId, eventsUrl } = await adapter.createResource(makeComposeSpec());
+    expect(resourceId).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(eventsUrl).toBe(`/resources/${resourceId}/events`);
+  });
+
+  it("the created resource is visible in listMarketplace + getResourceDetail (shared store)", async () => {
+    const adapter = await makeLiveAdapter();
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    // Visible in discovery: the SAME singleton-shaped store backs both reads and the
+    // create publish, so the new id appears alongside the seeded cards.
+    const cards = await adapter.listMarketplace({});
+    expect(cards.map((c) => c.resourceId)).toContain(resourceId);
+
+    // Visible in detail: a real ResourceDetail projection (bigint bond, truthy pricing).
+    const detail = await adapter.getResourceDetail(resourceId);
+    expect(detail.resourceId).toBe(resourceId);
+    expect(detail.bond).toBeTypeOf("bigint");
+    expect(detail.pricing.base).toBeTruthy();
+  });
+
+  it("subscribeBuildEvents(newId) drains Generate..Live and terminates (no throw/hang)", async () => {
+    const adapter = await makeLiveAdapter();
+    // createResource emits the stages fire-and-forget, so await it first; the channel
+    // buffers earlier events, so a slightly-late subscriber still sees Generate.
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string }[] = [];
+    // The channel completes after Live, so this loop terminates naturally (no hang). If
+    // it hung, the test's own timeout would fail it.
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status });
     }
-    expect(thrown).toBeInstanceOf(RequiresLiveServicesError);
+
+    const stages = collected.map((e) => e.stage);
+    // The full ordered sequence is present, starting at Generate and ending at Live.
+    expect(stages[0]).toBe("Generate");
+    expect(stages.at(-1)).toBe("Live");
+    expect(stages).toContain("Deploy");
+    expect(stages).toContain("Verify");
+    expect(stages).toContain("Mint");
+    expect(stages).toContain("Publish");
+    // Exactly one terminal Live(ok) event.
+    const liveOk = collected.filter((e) => e.stage === "Live" && e.status === "ok");
+    expect(liveOk.length).toBe(1);
+  });
+
+  it("the created resource is playable through runPlayground", async () => {
+    const adapter = await makeLiveAdapter();
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+    // The harness builds its OWN served card for any valid bytes32 id, so the derived
+    // local-dev resourceId is playable end-to-end through the reserve-before-run gate.
+    const res = await adapter.runPlayground(resourceId, { text: "hello" });
+    expect(res.paid).toBe(true);
+    expect(res.debitAmount).toBeGreaterThan(0n);
+  });
+
+  it("a validation failure rejects WITHOUT publishing the resource", async () => {
+    // Force a validation failure via an injected validate stub on a SEPARATE adapter so
+    // the other cases keep the real four-gate validator.
+    const failingValidate = async (): Promise<ValidationResult> => ({
+      pass: false,
+      gates: {
+        g1: { pass: false, violations: [] },
+        g2: { pass: true, violations: [] },
+        g3: { pass: true, violations: [] },
+        g4: { pass: true, violations: [] },
+      },
+      violations: [{ gate: "g1", kind: "forced", detail: "forced failure for the test" }],
+    });
+    const adapter = await makeLiveAdapter(failingValidate);
+
+    const before = (await adapter.listMarketplace({})).map((c) => c.resourceId);
+    await expect(adapter.createResource(makeComposeSpec())).rejects.toThrow(/forced/);
+    // Reject-before-publish: no new card was added to the store.
+    const after = (await adapter.listMarketplace({})).map((c) => c.resourceId);
+    expect(after).toEqual(before);
+  });
+
+  it("getRevenue still throws RequiresLiveServicesError (deferred)", async () => {
+    const adapter = await makeLiveAdapter();
+    await expect(adapter.getRevenue(FIXTURE_RESOURCE_ID)).rejects.toBeInstanceOf(
+      RequiresLiveServicesError,
+    );
   });
 });
