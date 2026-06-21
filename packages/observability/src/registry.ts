@@ -138,6 +138,12 @@ export const OBS_METRIC_NAMES = [
   "platform_usdc",
   "refund_usdc",
   "sandbox_denials_total",
+  // SCL-06 cost attribution: per-call cost and per-resource cost, both 6dp USDC
+  // base units surfaced through the same runtime-decimals discipline as the other
+  // USDC gauges. Native-18dp relayer gas is NOT surfaced here as a USDC gauge - it
+  // lives in the CostAttributor's separate gas lane (Pitfall 5).
+  "cost_call_usdc",
+  "cost_resource_usdc",
 ] as const;
 
 /**
@@ -169,6 +175,12 @@ export class Registry {
   readonly platformUsdc = new UsdcGauge();
   readonly refundUsdc = new UsdcGauge();
 
+  // SCL-06 cost gauges - 6dp USDC base units (per-call cost, per-resource cost).
+  // Fed by @utter/cost CostAttributor. Native-18dp gas is kept out of these
+  // gauges - it never mixes with 6dp USDC (Pitfall 5).
+  readonly costCallUsdc = new UsdcGauge();
+  readonly costResourceUsdc = new UsdcGauge();
+
   /**
    * Render the OBS-01 metric set as Prometheus text. `decimals` is the runtime
    * USDC decimals read (e.g. via @utter/chain readUsdcBalance) - it is applied to
@@ -191,6 +203,10 @@ export class Registry {
       platform_usdc: { value: Number(this.platformUsdc.format(decimals)) },
       refund_usdc: { value: Number(this.refundUsdc.format(decimals)) },
       sandbox_denials_total: { value: this.sandboxDenialsTotal.value },
+      cost_call_usdc: { value: Number(this.costCallUsdc.format(decimals)) },
+      cost_resource_usdc: {
+        value: Number(this.costResourceUsdc.format(decimals)),
+      },
     };
     return renderPrometheus(metrics);
   }
