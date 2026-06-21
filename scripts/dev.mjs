@@ -74,6 +74,16 @@ if (relayerKeys.length > 0) {
   );
 }
 
+// (4) ALWAYS start the deployer and marketplace control planes. They boot with the
+// in-memory store defaults and read no secrets, so they need no env gate. startChild
+// already tracks each handle and tears the rest down if one dies, so the existing
+// clean-kill-all on SIGINT/SIGTERM covers them too.
+startChild("deployer", ["--filter", "@utter/deployer", "start"]);
+console.log("deployer starting on http://localhost:8788 (server.ts PORT default)");
+
+startChild("marketplace", ["--filter", "@utter/marketplace", "start"]);
+console.log("marketplace starting on http://localhost:8789 (server.ts PORT default)");
+
 // Kill children cleanly on Ctrl-C / terminate.
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
