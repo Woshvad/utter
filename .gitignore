@@ -13,6 +13,9 @@ build/
 out/
 .cache/
 
+# React Router dev-generated types directory
+apps/studio/.react-router/
+
 # The build-stream UI lives at apps/studio/app/components/build/ — it is SOURCE,
 # not build output. Negate the bare build/ rule for this path so it is tracked.
 !apps/studio/app/components/build/
