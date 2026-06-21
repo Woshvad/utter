@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/server.ts",
+    "./index": "./src/index.ts",
+    "./batch": "./src/index.ts",
     "./app": "./src/app.ts",
     "./verify": "./src/verify.ts",
     "./settle": "./src/settle.ts",

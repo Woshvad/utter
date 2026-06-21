@@ -149,6 +149,7 @@ describe("BatchSettler hybrid flush trigger (first-wins)", () => {
       ledger: new InMemoryBatchLedger(),
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 3,
       maxBatchSeconds: 9999, // far away - the count trigger wins
@@ -171,6 +172,7 @@ describe("BatchSettler hybrid flush trigger (first-wins)", () => {
       ledger: new InMemoryBatchLedger(),
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 9999, // far away - the time trigger wins
       maxBatchSeconds: 60,
@@ -191,6 +193,7 @@ describe("BatchSettler hybrid flush trigger (first-wins)", () => {
       ledger: new InMemoryBatchLedger(),
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 9999,
       maxBatchSeconds: 9999,
@@ -219,6 +222,7 @@ describe("BatchSettler settles exactly one debit per batch through settle()", ()
       ledger: new InMemoryBatchLedger(),
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 2,
       maxBatchSeconds: 9999,
@@ -240,6 +244,7 @@ describe("BatchSettler settles exactly one debit per batch through settle()", ()
       ledger,
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 2,
       maxBatchSeconds: 9999,
@@ -263,6 +268,7 @@ describe("BatchSettler settles exactly one debit per batch through settle()", ()
       ledger: new InMemoryBatchLedger(),
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 1,
       maxBatchSeconds: 9999,
@@ -287,6 +293,7 @@ describe("BatchSettler crash mid-flush is exactly-once (idempotent key + persist
       ledger,
       deps: h.deps,
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 2,
       maxBatchSeconds: 9999,
@@ -306,12 +313,15 @@ describe("BatchSettler crash mid-flush is exactly-once (idempotent key + persist
       ledger: restartedLedger,
       deps: h.deps, // same stores -> the result-cache short-circuit applies
       buildBatchPayment: h.buildBatchPayment,
+      resourceId: RESOURCE,
       creatorBps: CREATOR_BPS,
       maxBatchCount: 2,
       maxBatchSeconds: 9999,
       minEconomicalThreshold: 1_000_000n,
     });
 
+    // Recovery flush after a restart: the new instance re-derives the SAME deterministic
+    // batch key/nonce from the fixed resourceId + seq.
     const replay = await settlerB.flushBatch(flushed!.batchSeq);
     expect(replay).not.toBeNull();
     expect(replay!.receipt.idemKey).toBe(flushed!.receipt.idemKey);
