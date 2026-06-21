@@ -5,9 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./server": "./src/server.ts",
     "./stores/memory": "./src/stores/memory.ts"
   },
   "scripts": {
+    "start": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/server.ts",
     "test": "vitest run"
   },
   "dependencies": {
