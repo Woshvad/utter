@@ -1,12 +1,15 @@
 // The real Postgres + Redis store adapter (PAY-09, PAY-11).
 //
-// HONESTY FLAG: this adapter ships BEHAVIOR-UNVERIFIED in Phase 2. It is
-// type-checked and conforms to the shared `PaymentStore` / `ResultStore` interface
-// (the same contract the in-memory adapter satisfies and the full default test
-// suite exercises), but its LIVE behavior against a real Postgres/Redis is verified
-// only when those services are provisioned (Phase 3+ infra). The default test run
-// uses the in-memory adapter and does NOT require Docker/pg/Redis. Do not treat
-// this as production-ready.
+// HONESTY FLAG: this adapter's COMMAND LOGIC is now verified by a faithful-fake
+// conformance suite (services/facilitator/test/pg-redis-store.test.ts) that EXECUTES
+// PgRedisPaymentStore + PgRedisResultStore offline against hand-rolled pg.Pool /
+// ioredis.Redis fakes, asserting the same `PaymentStore` / `ResultStore` contract the
+// in-memory adapter satisfies: SET NX no-double-reserve, MULTI atomicity in
+// markNonceSpent, per-buyer outstanding accounting with lazy TTL prune, settle-tx
+// first-write-wins, and pg INSERT...ON CONFLICT idempotency. That suite runs in the
+// default test run and needs no Docker/pg/Redis. It is STILL NOT verified against
+// LIVE Postgres/Redis; live behavior is confirmed only when those services are
+// provisioned (operator-gated Phase 3+ infra). Logic-verified, not live-infra-verified.
 //
 // Split of responsibilities (per SPEC §11 + CONTEXT):
 //   - Postgres (`pg.Pool`): durable `payments` + `results` tables (parameterized
