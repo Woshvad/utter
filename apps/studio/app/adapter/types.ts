@@ -184,7 +184,11 @@ export interface UsdcBalance {
   decimals: number;
 }
 
-/** A playground call result (the 402 pay-flow beat). */
+/**
+ * A playground call result (the 402 pay-flow beat). When `paid` is false because the
+ * buyer is unfunded, `paywall` carries the 402 accepts quote the PaywallSheet renders
+ * the price from (read-through; never recomputed).
+ */
 export interface PlaygroundResult {
   /** True iff the call was paid (a debit settled). */
   paid: boolean;
@@ -192,6 +196,17 @@ export interface PlaygroundResult {
   debitAmount: bigint;
   /** The response body the endpoint returned. */
   body: unknown;
+  /** The handler response size in bytes (drives the metered ticker), when known. */
+  bodyBytes?: number;
+  /** The handler wall-clock duration in ms (latency + the metered compute term), when known. */
+  handlerMs?: number;
+  /**
+   * Present when the call was challenged with a 402 and not auto-paid: the accepts quote
+   * the PaywallSheet reads the price from. The `quote` is the escrow accepts entry; its
+   * shape mirrors @utter/x402-arc AcceptsEntry (declared `unknown` here to keep the
+   * adapter surface free of a direct x402 runtime import).
+   */
+  paywall?: { quote: unknown };
 }
 
 /**
