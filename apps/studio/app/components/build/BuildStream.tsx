@@ -47,6 +47,23 @@ function initialStages(): StageMap {
   return map;
 }
 
+/**
+ * Return the liveUrl only when it parses as an http(s) URL, else null (IN-01). React
+ * escapes text but does NOT block `javascript:`/`data:` schemes in an href; if a live
+ * adapter ever surfaces a resource-controlled URL here it would be a reflected-URL XSS
+ * sink. Validating the scheme at the single render surface closes that off - a
+ * non-http(s) value renders as plain text instead of a clickable anchor.
+ */
+export function safeHttpUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Apply one streamed BuildEvent to the stage map (pure - testable). */
 export function applyStage(prev: StageMap, ev: BuildEvent): StageMap {
   return {
@@ -103,6 +120,8 @@ export function BuildStream({
   }, [eventsUrl, eventSourceFactory]);
 
   const isLive = stages.Live?.status === "done";
+  // IN-01: only render the live URL as a clickable anchor when its scheme is http(s).
+  const safeLiveUrl = safeHttpUrl(liveUrl);
 
   return (
     <div data-testid="build-stream" className="flex flex-col gap-sm">
@@ -138,14 +157,22 @@ export function BuildStream({
             style={{ width: 16, height: 16, background: "var(--red)" }}
           />
           <span className="text-label font-display text-ink lowercase">live</span>
-          {liveUrl ? (
+          {safeLiveUrl ? (
             <a
-              href={liveUrl}
+              href={safeLiveUrl}
               data-testid="build-live-url"
               className="font-mono text-caption-mono text-blue underline"
             >
-              {liveUrl}
+              {safeLiveUrl}
             </a>
+          ) : liveUrl ? (
+            // Non-http(s) scheme: render as inert text, never a clickable href (IN-01).
+            <span
+              data-testid="build-live-url-text"
+              className="font-mono text-caption-mono text-ink-muted"
+            >
+              {liveUrl}
+            </span>
           ) : null}
           {priceBaseUnits !== undefined && decimals !== undefined ? (
             <span className="font-mono text-caption-mono text-ink-muted">
