@@ -32,6 +32,17 @@ export const CCTP_TOKEN_MESSENGER = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA"
 /** CCTP `MessageTransmitterV2` - cross-chain message receipt (Phase 8). */
 export const CCTP_MESSAGE_TRANSMITTER = "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275" as const;
 
+/** CCTP `TokenMinterV2` - mint authority on the Arc destination (Phase 8). */
+export const CCTP_TOKEN_MINTER = "0xb43db544E2c27092c107639Ad201b3dEfAbcF192" as const;
+
+/**
+ * Arc CCTP destination domain id - the pinned value SCL-04's CctpFunder reads so
+ * no plan ever hardcodes a bare literal. Authoritative value is 26 (confirmed by
+ * Circle's supported-chains page and docs.arc.io); the "7" search snippet is wrong
+ * and must never appear near CCTP code (Phase 8).
+ */
+export const CCTP_DOMAIN = 26 as const;
+
 /** StableFX `FxEscrow` - USDC↔EURC settlement for EURC payouts (Phase 8). */
 export const STABLEFX_FX_ESCROW = "0x867650F5eAe8df91445971f14d89fd84F0C9a9f8" as const;
 
