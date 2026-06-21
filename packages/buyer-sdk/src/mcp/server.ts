@@ -20,7 +20,7 @@
 // writes anywhere in this file - stdout is the JSON-RPC channel (Pitfall 1 / T-07-STDOUT).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import type { BudgetGuard } from "./budget.js";
+import type { BudgetGuard, BudgetReservation } from "./budget.js";
 import {
   buildDiscoveryTool,
   buildEndpointTool,
@@ -82,14 +82,28 @@ function endpointToolFor(opts: CreateMcpServerOptions, card: DiscoveredCard): Bu
   // The tool name is needed for the budget key; build once and close over it.
   const tool = buildEndpointTool(
     card,
-    // payFn: pay via the client (key in the client closure), then record the debit.
+    // payFn: pay via the client (key in the client closure). The budget commit/release now
+    // happens in the handler's reserve-before-pay lifecycle (WR-02), NOT here - so the
+    // debit is recorded exactly once and a failed pay releases the reservation.
     async (req) => {
       const result = await opts.client.pay(req);
-      opts.budget.record(tool.name, result.debitAmount);
       return { response: result.response, debitAmount: result.debitAmount };
     },
-    // prePay: the budget guard checks the per-call cap (the card cap = the hard bound).
+    // prePay: kept for the no-reservation fallback path (unused when lifecycle is wired).
     () => opts.budget.check(tool.name, card.capBaseUnits),
+    // WR-02: the RESERVE-before-pay lifecycle. reserve() holds the per-call cap atomically;
+    // commit() reconciles to the actual debit after a successful pay; release() undoes the
+    // reservation on a pay failure. The reservation basis is the card cap (the hard bound).
+    {
+      reserve: () => {
+        const r = opts.budget.reserve(tool.name, card.capBaseUnits);
+        if (!r.ok) return { ok: false, reason: r.reason };
+        return { ok: true, handle: r };
+      },
+      commit: (handle, actualAmount) =>
+        opts.budget.commit(handle as BudgetReservation, actualAmount),
+      release: (handle) => opts.budget.release(handle as BudgetReservation),
+    },
   );
   return tool;
 }
@@ -110,7 +124,16 @@ function registerOne(
     handler: (args: Record<string, unknown>) => Promise<ToolResult>;
   },
 ): void {
-  if (handlers.has(tool.name)) return;
+  // WR-01: a name collision is a REAL error (two resources deriving the same tool name),
+  // not a silent skip - silently dropping made a discovered endpoint invisible with no
+  // signal. With the full-resourceId derivation a collision means a duplicate resourceId
+  // in the snapshot; surface it as a thrown error so the operator sees it.
+  if (handlers.has(tool.name)) {
+    throw new Error(
+      `MCP tool name collision: "${tool.name}" is already registered ` +
+        `(two resources derive the same tool name - duplicate resourceId?)`,
+    );
+  }
   handlers.set(tool.name, tool.handler);
   names.push(tool.name);
   server.registerTool(

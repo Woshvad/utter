@@ -18,7 +18,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import { createBudgetGuard } from "../src/mcp/budget.js";
-import { buildDiscoveryTool, buildEndpointTool, type DiscoveredCard } from "../src/mcp/tools.js";
+import {
+  buildDiscoveryTool,
+  buildEndpointTool,
+  endpointToolName,
+  type DiscoveredCard,
+} from "../src/mcp/tools.js";
 import { createMcpServer, createMcpServerAsync } from "../src/mcp/server.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -103,6 +108,39 @@ describe("createBudgetGuard (T-07-DENIALOFWALLET)", () => {
     // per-tool now full; the day cap still has 3000 room but the tool is capped.
     expect(guard.check("t", 1n).ok).toBe(false);
   });
+
+  // WR-02: RESERVE-before-pay closes the concurrency gap. N parallel reservations all see
+  // each other's PENDING spend, so the cap is never collectively overshot.
+  it("reserve() admits only as many concurrent calls as the cap allows (WR-02 concurrency)", () => {
+    // Per-day cap admits exactly 3 calls of 1000 each (cap 3000); the per-tool cap is open.
+    const guard = createBudgetGuard({ perDayCapBaseUnits: 3000n });
+    // Simulate 5 PARALLEL reservations BEFORE any commits (the TOCTOU window): each reserves
+    // 1000. Only 3 may be admitted; the 4th and 5th must be denied even though nothing has
+    // been committed yet (the old check-then-record path would admit all 5).
+    const outcomes = Array.from({ length: 5 }, () => guard.reserve("t", 1000n));
+    const admitted = outcomes.filter((o) => o.ok);
+    const denied = outcomes.filter((o) => !o.ok);
+    expect(admitted.length).toBe(3);
+    expect(denied.length).toBe(2);
+    // Committing the admitted reservations to a metered actual (800 each) keeps the day
+    // total <= cap; the released (denied) reservations never consumed room.
+    for (const o of admitted) if (o.ok) guard.commit(o, 800n);
+    expect(guard.spentForDay()).toBe(2400n);
+    expect(guard.spentForDay() <= 3000n).toBe(true);
+  });
+
+  it("release() returns reserved room so a failed pay does not leak budget (WR-02/WR-03)", () => {
+    const guard = createBudgetGuard({ perDayCapBaseUnits: 1000n });
+    const r1 = guard.reserve("t", 1000n);
+    expect(r1.ok).toBe(true);
+    // While r1 is held, a second reservation is denied (the cap is fully reserved).
+    expect(guard.reserve("t", 1n).ok).toBe(false);
+    // The pay fails -> release r1; the room is now free again.
+    if (r1.ok) guard.release(r1);
+    expect(guard.reserve("t", 1000n).ok).toBe(true);
+    // A released reservation committed nothing.
+    expect(guard.spentForDay()).toBe(0n);
+  });
 });
 
 describe("buildEndpointTool (BUY-02): inputSchema from openapi + price/reputation in metadata", () => {
@@ -136,6 +174,36 @@ describe("buildEndpointTool (BUY-02): inputSchema from openapi + price/reputatio
     const bad = await built.handler({ wrongField: 1 });
     expect(bad.isError).toBe(true);
     expect(paid).toBe(false);
+  });
+
+  // WR-04: a SCHEMALESS (passthrough) endpoint must receive the UNWRAPPED body, not the
+  // double-wrapped `{ args: {...} }` envelope the passthrough inputSchema advertises.
+  it("unwraps the passthrough envelope so a schemaless endpoint gets the intended body (WR-04)", async () => {
+    // A card whose openapi carries NO request schema -> deriveInputShape falls back to the
+    // passthrough `{ args }` envelope.
+    const schemaless = discoveredCard({ openapi: { openapi: "3.1.0", info: {}, paths: {} } });
+    let postedBody: unknown = null;
+    const built = buildEndpointTool(schemaless, async (req) => {
+      postedBody = req.body;
+      return { response: "{}", debitAmount: 1n };
+    });
+    // The model passes the passthrough envelope `{ args: { city: "Berlin" } }`.
+    await built.handler({ args: { city: "Berlin" } });
+    // The body POSTed to the seller is the INNER payload, not the wrapper.
+    expect(postedBody).toEqual({ city: "Berlin" });
+    expect(postedBody).not.toHaveProperty("args");
+  });
+
+  it("forwards the validated args directly when the openapi DOES carry a schema (no unwrap)", async () => {
+    const card = discoveredCard(); // OPENAPI has a city schema (property-derived shape)
+    let postedBody: unknown = null;
+    const built = buildEndpointTool(card, async (req) => {
+      postedBody = req.body;
+      return { response: "{}", debitAmount: 1n };
+    });
+    await built.handler({ city: "Paris" });
+    // The schema-derived case forwards the args object directly (no envelope).
+    expect(postedBody).toEqual({ city: "Paris" });
   });
 });
 
@@ -254,10 +322,58 @@ describe("createMcpServer (BUY-02/BUY-03): registration + handler->pay + key hyg
       cardSource: async () => [discoveredCard()],
       budget: createBudgetGuard({}),
     });
-    // invoke awaits the lazy snapshot internally before dispatching.
-    const res = await invoke("utter_call_e7e7e7e7", { city: "Rome" });
+    // invoke awaits the lazy snapshot internally before dispatching. The tool name is the
+    // full-resourceId derivation (WR-01), so derive it rather than hardcoding a prefix.
+    const res = await invoke(endpointToolName(discoveredCard()), { city: "Rome" });
     expect(res.isError).toBeFalsy();
     expect(payCalls).toBe(1);
+  });
+
+  // WR-02: N PARALLEL tool invocations against a per-day cap that admits fewer must NOT
+  // collectively exceed the cap. With reserve-before-pay, the reservations are placed
+  // BEFORE the (slow) pay resolves, so the excess calls are denied at the gate and never
+  // pay - the old check-then-pay-then-record path would let all N through.
+  it("N parallel tool calls never collectively exceed the per-day cap (WR-02)", async () => {
+    // A slow client: pay yields (so all invocations reach the reserve gate before any
+    // commit), then settles 8000 base units. The card cap is 10_000.
+    const slowClient = {
+      async pay(req: { resource: { resourceId: string }; body: unknown }) {
+        payCalls += 1;
+        void req;
+        await new Promise((r) => setTimeout(r, 5));
+        return {
+          paid: true,
+          status: 200,
+          response: JSON.stringify({ echo: "ok" }),
+          debitAmount: 8000n,
+          cap: 10_000n,
+          idemKey: `0x${"ab".repeat(32)}`,
+          receipt: { amount: "8000" },
+          cardInputs: {},
+        };
+      },
+    };
+    // The cap reserves against the CARD cap (10_000) per call; a 25_000 day cap admits 2
+    // reservations (2*10_000=20_000 <= 25_000) and denies the 3rd (30_000 > 25_000).
+    const budget = createBudgetGuard({ perDayCapBaseUnits: 25_000n });
+    const { invoke, toolNames } = await createMcpServerAsync({
+      client: slowClient,
+      cardSource: async () => [discoveredCard()],
+      budget,
+    });
+    const endpointTool = toolNames.find((n) => /utter_call/i.test(n))!;
+    // Fire 4 in parallel against a cap that admits only 2.
+    const results = await Promise.all(
+      [0, 1, 2, 3].map(() => invoke(endpointTool, { city: "Berlin" })),
+    );
+    const ok = results.filter((r) => !r.isError);
+    const denied = results.filter((r) => r.isError);
+    expect(ok.length).toBe(2); // only 2 admitted
+    expect(denied.length).toBe(2); // the excess 2 denied at the reserve gate
+    expect(payCalls).toBe(2); // the denied calls NEVER paid
+    // The committed spend (2 * 8000 metered) is within the cap.
+    expect(budget.spentForDay()).toBe(16_000n);
+    expect(budget.spentForDay() <= 25_000n).toBe(true);
   });
 });
 

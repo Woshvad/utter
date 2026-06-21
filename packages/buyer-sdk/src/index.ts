@@ -69,6 +69,7 @@ export type {
 export {
   buildDiscoveryTool,
   buildEndpointTool,
+  endpointToolName,
 } from "./mcp/tools.js";
 export type {
   DiscoveredCard,
@@ -79,9 +80,16 @@ export type {
   ToolResult,
   PayFn,
   PrePayGuard,
+  BudgetLifecycle,
 } from "./mcp/tools.js";
 export {
   createBudgetGuard,
   readBudgetCapsFromEnv,
 } from "./mcp/budget.js";
-export type { BudgetGuard, BudgetCaps, BudgetDecision } from "./mcp/budget.js";
+export type {
+  BudgetGuard,
+  BudgetCaps,
+  BudgetDecision,
+  BudgetReservation,
+  ReserveResult,
+} from "./mcp/budget.js";
