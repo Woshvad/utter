@@ -1,0 +1,29 @@
+{
+  "name": "@utter/buyer-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./mcp": "./src/mcp/server.ts"
+  },
+  "bin": {
+    "utter-buyer-mcp": "./src/bin/mcp.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@utter/ai-runtime": "workspace:*",
+    "@utter/chain": "workspace:*",
+    "@utter/facilitator": "workspace:*",
+    "@utter/marketplace": "workspace:*",
+    "@utter/x402-arc": "workspace:*",
+    "dotenv": "17.4.2",
+    "hono": "4.12.26"
+  },
+  "devDependencies": {
+    "viem": "2.52.2"
+  }
+}
