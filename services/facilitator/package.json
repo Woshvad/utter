@@ -12,7 +12,8 @@
     "./stores/memory": "./src/stores/memory.ts"
   },
   "scripts": {
-    "start": "node --experimental-strip-types src/server.ts"
+    "start": "node --experimental-strip-types src/server.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@hono/node-server": "2.0.5",
