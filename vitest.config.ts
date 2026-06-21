@@ -27,6 +27,7 @@ export default defineConfig({
             "packages/*/test/**/*.test.ts",
             "services/*/test/**/*.test.ts",
             "apps/*/test/**/*.test.ts",
+            "scripts/test/**/*.test.ts",
           ],
           // apps/studio runs under its own jsdom project (below); exclude it here
           // so its .test.ts suites are not collected twice.
