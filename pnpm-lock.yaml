@@ -26,6 +26,9 @@ importers:
 
   apps/marketplace:
     dependencies:
+      '@hono/node-server':
+        specifier: 2.0.5
+        version: 2.0.5(hono@4.12.26)
       '@utter/ai-runtime':
         specifier: workspace:*
         version: link:../../packages/ai-runtime

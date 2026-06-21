@@ -20,6 +20,20 @@ export async function resolve(specifier, context, nextResolve) {
     return await nextResolve(specifier, context);
   }
 
+  // A relative ".js" specifier (for example ./foo.js): this is the TypeScript
+  // ESM convention where the SOURCE is ./foo.ts but the import carries the emitted
+  // ".js" extension. Under native --experimental-strip-types there is no emitted
+  // ".js" sibling, so first try the ".ts" source. Only the resolution error from
+  // this attempt is caught; on miss we fall back to the original ".js" specifier so
+  // Node still produces its normal, accurate error (we never mask a real failure).
+  if (specifier.endsWith(".js")) {
+    try {
+      return await nextResolve(specifier.slice(0, -3) + ".ts", context);
+    } catch {
+      return await nextResolve(specifier, context);
+    }
+  }
+
   // Already-extensioned relative specifiers (for example ./foo.ts, ./data.json):
   // pass through unchanged. We do not catch errors here.
   if (HAS_JS_TS_EXT.test(specifier) || specifier.endsWith(".json")) {

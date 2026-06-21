@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
   },
   "scripts": {
+    "start": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/server.ts",
     "test": "vitest run"
   },
   "dependencies": {
+    "@hono/node-server": "2.0.5",
     "@utter/ai-runtime": "workspace:*",
     "@utter/ai-scorer": "workspace:*",
     "@utter/chain": "workspace:*",
