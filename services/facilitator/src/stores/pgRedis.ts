@@ -41,10 +41,13 @@ const SETTLE_TX_PREFIX = "settletx:"; // nonce -> settle tx hash (WR-02 receipt 
 
 /** Postgres-backed PaymentStore with Redis reservation locks + spent-nonce cache. */
 export class PgRedisPaymentStore implements PaymentStore {
-  constructor(
-    private readonly pg: Pool,
-    private readonly redis: Redis,
-  ) {}
+  private readonly pg: Pool;
+  private readonly redis: Redis;
+
+  constructor(pg: Pool, redis: Redis) {
+    this.pg = pg;
+    this.redis = redis;
+  }
 
   async reserve(lock: ReservationLock): Promise<boolean> {
     // Spent nonces can never be re-reserved (the on-chain usedNonce is the final
@@ -167,7 +170,11 @@ export class PgRedisPaymentStore implements PaymentStore {
 
 /** Postgres-backed ResultStore (durable persisted settle results; TTL-pruned). */
 export class PgRedisResultStore implements ResultStore {
-  constructor(private readonly pg: Pool) {}
+  private readonly pg: Pool;
+
+  constructor(pg: Pool) {
+    this.pg = pg;
+  }
 
   async get(idemKey: Hex): Promise<StoredResult | null> {
     const { rows } = await this.pg.query<{

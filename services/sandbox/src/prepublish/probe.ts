@@ -65,12 +65,15 @@ export const DEFAULT_PROBE_TARGETS: readonly ProbeTarget[] = [
  */
 export class ContainmentFailureError extends Error {
   readonly code = "containmentFailure" as const;
-  constructor(public readonly reachable: ProbeTarget[]) {
+  public readonly reachable: ProbeTarget[];
+
+  constructor(reachable: ProbeTarget[]) {
     super(
       "Sandbox containment FAILED: the following blocked hosts were reachable from " +
         `inside the container netns: ${reachable.map((t) => `${t.name} (${t.host})`).join(", ")}. ` +
         "The egress firewall (host nftables / --network=none veth) is not enforcing the block set.",
     );
+    this.reachable = reachable;
     this.name = "ContainmentFailureError";
   }
 }

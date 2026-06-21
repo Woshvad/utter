@@ -71,7 +71,11 @@ export interface PayoutRouterDeps {
  * token's decimals() at runtime - this module contains no decimals literal.
  */
 export class PayoutRouter {
-  constructor(private readonly deps: PayoutRouterDeps) {}
+  private readonly deps: PayoutRouterDeps;
+
+  constructor(deps: PayoutRouterDeps) {
+    this.deps = deps;
+  }
 
   /**
    * Route `amount` (USDC base units) to `config.payee` in the payee's configured

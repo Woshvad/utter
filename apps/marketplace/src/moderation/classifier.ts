@@ -104,8 +104,11 @@ export class KeywordModerator implements Moderator {
 export class ModelModerator implements Moderator {
   readonly backend = "model" as const;
   private readonly keyword = new KeywordModerator();
+  private readonly config: { apiKey: string; model?: string };
 
-  constructor(private readonly config: { apiKey: string; model?: string }) {}
+  constructor(config: { apiKey: string; model?: string }) {
+    this.config = config;
+  }
 
   async moderate(
     spec: ModerationSpec & { resourceId: string },

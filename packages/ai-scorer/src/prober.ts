@@ -71,7 +71,11 @@ export type FixtureSpec = ProbeResult | Record<string, ProbeResult>;
  */
 export class FixtureProber implements ResourceProber {
   readonly backend = "fixture" as const;
-  constructor(private readonly spec: FixtureSpec) {}
+  private readonly spec: FixtureSpec;
+
+  constructor(spec: FixtureSpec) {
+    this.spec = spec;
+  }
 
   async probe(target: ProbeTarget): Promise<ProbeResult> {
     if (isProbeResult(this.spec)) return this.spec;

@@ -162,7 +162,11 @@ const MOCK_SIG_BYTES = 65;
  * escrow - it never assumes a CCTP hook auto-credits (08-RESEARCH Pitfall 2).
  */
 export class CctpFunder {
-  constructor(private readonly deps: CctpFunderDeps) {}
+  private readonly deps: CctpFunderDeps;
+
+  constructor(deps: CctpFunderDeps) {
+    this.deps = deps;
+  }
 
   /**
    * Fund the escrow balance of `recipient` by burning `amount` USDC base units on

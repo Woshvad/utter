@@ -26,12 +26,11 @@ import type { RunErrorSink, RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunn
  */
 export class DockerDevRunner implements SandboxRunner {
   readonly backend = "docker-dev" as const;
+  private readonly docker: Docker;
   private readonly onError: RunErrorSink;
 
-  constructor(
-    private readonly docker: Docker,
-    onError?: RunErrorSink,
-  ) {
+  constructor(docker: Docker, onError?: RunErrorSink) {
+    this.docker = docker;
     // A failed timeout-kill means an untrusted, possibly over-budget container kept
     // running past its deadline — surface it, never swallow (WR-06). Default sink is
     // a non-secret console.warn (id + message only).

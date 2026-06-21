@@ -25,12 +25,11 @@ import type { RunErrorSink, RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunn
  */
 export class GvisorRunner implements SandboxRunner {
   readonly backend = "gvisor" as const;
+  private readonly docker: Docker;
   private readonly onError: RunErrorSink;
 
-  constructor(
-    private readonly docker: Docker,
-    onError?: RunErrorSink,
-  ) {
+  constructor(docker: Docker, onError?: RunErrorSink) {
+    this.docker = docker;
     // On the trusted boundary a failed timeout-kill is especially important: it
     // means an untrusted container ran past its enforced deadline. Surface it,
     // never swallow (WR-06). Default sink is a non-secret console.warn.

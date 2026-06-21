@@ -85,7 +85,11 @@ const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
  * never reaches the output even if a caller passes it by mistake (T-06-LOGLEAK).
  */
 export class StructuredLogger {
-  constructor(private readonly sink: LogSink) {}
+  private readonly sink: LogSink;
+
+  constructor(sink: LogSink) {
+    this.sink = sink;
+  }
 
   log(record: LogRecord): void {
     const safe: Record<string, unknown> = {};

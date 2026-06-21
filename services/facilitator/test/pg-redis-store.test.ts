@@ -44,7 +44,11 @@ type MultiOp = () => void;
 
 class FakeMulti {
   private readonly ops: MultiOp[] = [];
-  constructor(private readonly redis: FakeRedis) {}
+  private readonly redis: FakeRedis;
+
+  constructor(redis: FakeRedis) {
+    this.redis = redis;
+  }
 
   del(key: string): this {
     this.ops.push(() => this.redis._delString(key));
