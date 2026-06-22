@@ -30,6 +30,33 @@ export const erc20Abi = [
     inputs: [{ name: "account", type: "address" }],
     outputs: [{ type: "uint256" }],
   },
+  // approve(spender, amount) - the standard ERC-20 allowance grant. The studio
+  // deposit flow approves PAYMENT_ESCROW to pull `amount` base units before
+  // calling deposit (escrow uses transferFrom). amount is USDC base units; this
+  // entry never encodes a decimals literal.
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ type: "bool" }],
+  },
+  // allowance(owner, spender) - the standard ERC-20 allowance read. The deposit
+  // flow may read this to skip a redundant approve when the existing allowance
+  // already covers `amount`.
+  {
+    type: "function",
+    name: "allowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ type: "uint256" }],
+  },
 ] as const;
 
 // PaymentEscrow write-path ABI - the Phase 2 facilitator settle surface (PAY-09,
@@ -58,6 +85,18 @@ export const escrowAbi = [
   {
     type: "function",
     name: "deposit",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+  // withdraw(amount) - pulls `amount` USDC base units out of the caller's internal
+  // escrow balance (balanceOf[msg.sender] -= amount, then safeTransfer to the
+  // caller; Solidity 0.8 underflow reverts an overdraw). Copied verbatim from
+  // contracts/src/PaymentEscrow.sol::withdraw so the studio outflow control encodes
+  // byte-for-byte. amount is USDC base units; no decimals literal.
+  {
+    type: "function",
+    name: "withdraw",
     stateMutability: "nonpayable",
     inputs: [{ name: "amount", type: "uint256" }],
     outputs: [],

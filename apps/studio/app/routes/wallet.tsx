@@ -17,6 +17,8 @@ import { requireCreator } from "../auth/requireCreator.server.js";
 import { useEscrowBalance } from "../wallet/useEscrowBalance.js";
 import { AddArcTestnet } from "../wallet/AddArcTestnet.js";
 import { EscrowBalanceWidget } from "../components/wallet/EscrowBalanceWidget.js";
+import { DepositForm } from "../components/wallet/DepositForm.js";
+import { WithdrawForm } from "../components/wallet/WithdrawForm.js";
 import { WalletPill } from "../components/shell/WalletPill.js";
 
 /** The serialized loader payload: the runtime decimals for the SSR placeholder. */
@@ -50,9 +52,14 @@ export default function WalletRoute(): React.ReactElement {
   const mounted = useMounted();
   const { address } = useAccount();
 
+  // A monotonic token bumped after a deposit/withdraw confirms so the escrow balance
+  // re-reads (the move-money controls below call refresh()). Carries no money value.
+  const [refreshToken, setRefreshToken] = React.useState(0);
+  const refresh = React.useCallback(() => setRefreshToken((n) => n + 1), []);
+
   // Read the escrow balance through readUsdcBalance (runtime decimals) once mounted +
   // an account is connected. Before mount the hook is a no-op (loading:false).
-  const balance = useEscrowBalance({ address: mounted ? address : undefined });
+  const balance = useEscrowBalance({ address: mounted ? address : undefined, refreshToken });
 
   // Prefer the runtime-read decimals; fall back to the loader's SSR decimals.
   const renderDecimals = balance.decimals ?? decimals;
@@ -80,6 +87,21 @@ export default function WalletRoute(): React.ReactElement {
         decimals={balance.raw !== undefined ? renderDecimals : undefined}
         loading={balance.loading}
       />
+
+      {/* move-money controls: client-only (mounted guard) - they read the connected
+          account + chain via wagmi, so rendering them on the server would hydrate
+          with a different value and flash (Pitfall 6 / T-06-HYDRATION). Each tx is
+          signed in the user's own wallet; on confirm we refresh the escrow balance. */}
+      {mounted ? (
+        <div className="flex flex-col gap-lg">
+          <DepositForm decimals={balance.decimals ?? renderDecimals} onDeposited={refresh} />
+          <WithdrawForm
+            baseUnits={balance.raw}
+            decimals={balance.decimals ?? renderDecimals}
+            onWithdrawn={refresh}
+          />
+        </div>
+      ) : null}
 
       <div className="flex flex-col gap-xs">
         <span className="text-label font-display lowercase text-ink-muted">network</span>

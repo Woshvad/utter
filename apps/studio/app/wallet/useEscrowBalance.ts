@@ -46,16 +46,23 @@ export interface UseEscrowBalanceOptions {
   address?: string;
   /** Injectable reader (defaults to readUsdcBalance over a chain public client). */
   reader?: EscrowBalanceReader;
+  /**
+   * A monotonic token the caller bumps to force a re-read (e.g. after a deposit or
+   * withdraw confirms). Changing it re-runs the read for the same address; it carries
+   * no money value and never scales an amount.
+   */
+  refreshToken?: number;
 }
 
 /**
  * Read the escrow USDC balance for `address`. Returns base units + runtime decimals
  * (no literal); the widget renders the balance mono via UsdcAmount. Re-reads when the
- * address changes.
+ * address or `refreshToken` changes.
  */
 export function useEscrowBalance({
   address,
   reader = defaultReader,
+  refreshToken,
 }: UseEscrowBalanceOptions): EscrowBalanceState {
   const [state, setState] = React.useState<EscrowBalanceState>({ loading: false });
 
@@ -78,7 +85,7 @@ export function useEscrowBalance({
     return () => {
       cancelled = true;
     };
-  }, [address, reader]);
+  }, [address, reader, refreshToken]);
 
   return state;
 }
