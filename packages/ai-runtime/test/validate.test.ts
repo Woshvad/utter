@@ -26,8 +26,14 @@ async function scaffoldBundle(): Promise<Bundle> {
 }
 
 describe("validateBundle (GEN-01/04): four-gate acceptance over the scaffold bundle", () => {
-  it("accepts the scaffold bundle with all four gates green (no key, no live chain)", async () => {
-    expect(process.env.ANTHROPIC_API_KEY).toBeFalsy();
+  it("accepts the scaffold bundle with all four gates green (model-free, no live chain)", async () => {
+    // The scaffold path is model-free BY CONSTRUCTION: scaffoldBundle() uses
+    // ScaffoldGenerator directly (never selectGenerator), so it makes no model call
+    // regardless of the ambient ANTHROPIC_API_KEY. We deliberately do NOT assert on the
+    // env here - that was brittle (a developer with a real key in .env.local, which the
+    // packages/chain live-RPC test loads into process.env, would fail it) and asserted
+    // environment state rather than code behavior. The no-model-path invariant is owned
+    // by selectGenerator (generator.test.ts), not this gate-acceptance test.
     const bundle = await scaffoldBundle();
     const result = await validateBundle(bundle, spec);
     if (!result.pass) {
