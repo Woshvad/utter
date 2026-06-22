@@ -178,6 +178,7 @@ describe("WR-01: every registered route resolves to a module", () => {
     // files are loaded statically (Vite needs a static import specifier) and matched
     // against the registry so a registered-but-missing module would fail here.
     const modules: Record<string, () => Promise<unknown>> = {
+      "routes/_index.tsx": () => import("../app/routes/_index"),
       "routes/create.tsx": () => import("../app/routes/create"),
       "routes/discover.tsx": () => import("../app/routes/discover"),
       "routes/dashboard.tsx": () => import("../app/routes/dashboard"),
