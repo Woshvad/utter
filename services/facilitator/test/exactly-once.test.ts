@@ -21,6 +21,7 @@ import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import {
   InMemoryPaymentStore,
   InMemoryResultStore,
+  InMemoryRevenueLedger,
   signDebitAuthorization,
   type PaymentPayload,
 } from "@utter/x402-arc";
@@ -205,5 +206,40 @@ describe("exactly-once", () => {
 
     expect(receipt.amount).toBe("12345"); // < cap, charged the computed amount
     expect(state.calls).toBe(1);
+  });
+
+  it("records the settle into the optional revenue ledger; a retry never double-counts", async () => {
+    const nonce: Hex = `0x${"b4".repeat(32)}`;
+    const cap = 50_000n;
+    const computed = 12_345n;
+    const payment = await escrowPayment({ pk, buyer, cap, nonce });
+    const state = { calls: 0 };
+    const revenueLedger = new InMemoryRevenueLedger();
+    const deps: SettleDeps = {
+      relayerPool: mockRelayerPool(state),
+      store,
+      resultStore,
+      publicClient: mockPublicClient(),
+      escrowAddress: PAYMENT_ESCROW,
+      splitterAddress: PAYMENT_SPLITTER,
+      usdcAddress: USDC,
+      revenueLedger,
+    };
+
+    // First settle records one row. The mock tx receipt carries no Debited logs, so the
+    // legs fall back to recording the whole amount as the creator leg (the documented
+    // single-payee fallback): amount === creatorShare + platformShare still holds.
+    await settle(payment, computed, nonce, deps);
+    const afterFirst = await revenueLedger.byResource(RESOURCE);
+    expect(afterFirst).toHaveLength(1);
+    expect(afterFirst[0]?.amount).toBe(12_345n);
+    expect(afterFirst[0]?.kind).toBe("settle");
+    expect(afterFirst[0]!.creatorShare + afterFirst[0]!.platformShare).toBe(12_345n);
+
+    // A retry by idemKey short-circuits on the cached result AND the ledger is idempotent
+    // on idemKey, so the revenue is still exactly one row (no double-count).
+    await settle(payment, computed, nonce, deps);
+    expect(state.calls).toBe(1);
+    expect(await revenueLedger.byResource(RESOURCE)).toHaveLength(1);
   });
 });

@@ -25,6 +25,7 @@ import {
 import { runPlaygroundHarness, type PlaygroundHarnessResult } from "./playground-harness.js";
 import { BuildEventChannel } from "./build-channel.js";
 import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
+import type { Hex, RevenueSummary } from "./types.js";
 
 /**
  * The injectable LiveAdapter read dependencies. Tests construct these directly with a
@@ -52,6 +53,14 @@ export interface LiveDeps {
   validate: (bundle: Bundle, spec: ResourceSpec) => Promise<ValidationResult>;
   /** The reserve-before-run playground harness, bound verbatim. */
   runPlayground: (resourceId: string, req: unknown) => Promise<PlaygroundHarnessResult>;
+  /**
+   * Aggregate the real per-resource revenue from the facilitator (STU-04). In production
+   * this GETs FACILITATOR_URL/revenue/:resourceId and rebuilds a RevenueSummary from the
+   * decimal-string amounts; a test injects a deterministic seam. FAIL-LOUD: a network
+   * error or non-200 THROWS (a reachable-but-empty facilitator returns a valid zero
+   * summary, but an unreachable one must never be masked as zero/fake data).
+   */
+  getRevenue: (resourceId: string) => Promise<RevenueSummary>;
 }
 
 /**
@@ -132,8 +141,66 @@ function seedRecords(): IndexRecord[] {
  *   5. Bind runPlayground to runPlaygroundHarness verbatim (reused like the fixture),
  *      keeping the reserve-before-run escrow gate intact (T-mdx-02).
  */
+/** The default facilitator base URL (mirrors the buyer/middleware in-process default). */
+const DEFAULT_FACILITATOR_URL = "http://localhost:8787";
+
+/** The facilitator's GET /revenue/:resourceId JSON shape (all amounts decimal strings). */
+interface RevenueJson {
+  resourceId: string;
+  calls: number;
+  gross: string;
+  creatorShare: string;
+  platformShare: string;
+  refunds: string;
+  receipts: Array<{ tx: string; kind: "settle" | "refund"; amount: string; idemKey: string }>;
+}
+
+/**
+ * Fetch the real revenue summary for a resource from the facilitator, converting the
+ * decimal-string amounts back to base-unit bigint. FAIL-LOUD: a network failure or a
+ * non-200 throws a clear error - a live revenue read must never silently return fake or
+ * zero data. (A reachable-but-empty facilitator legitimately returns a zero summary.)
+ */
+async function fetchRevenue(
+  resourceId: string,
+  facilitatorUrl: string,
+): Promise<RevenueSummary> {
+  const base = facilitatorUrl.replace(/\/+$/, "");
+  const url = `${base}/revenue/${resourceId}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "GET", headers: { accept: "application/json" } });
+  } catch (err) {
+    throw new Error(
+      `live getRevenue: the facilitator at ${url} was unreachable (${(err as Error).message}); ` +
+        "revenue is read fail-loud and never faked",
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`live getRevenue: the facilitator at ${url} returned HTTP ${res.status}`);
+  }
+  const json = (await res.json()) as RevenueJson;
+  return {
+    resourceId: json.resourceId as Hex,
+    calls: json.calls,
+    gross: BigInt(json.gross),
+    creatorShare: BigInt(json.creatorShare),
+    platformShare: BigInt(json.platformShare),
+    refunds: BigInt(json.refunds),
+    receipts: json.receipts.map((r) => ({
+      tx: r.tx as Hex,
+      kind: r.kind,
+      amount: BigInt(r.amount),
+      idemKey: r.idemKey,
+    })),
+  };
+}
+
 export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
   const publicClient = createArcPublicClient(env.ARC_RPC_URL) as unknown as PublicClient;
+  const facilitatorUrl = env.FACILITATOR_URL && env.FACILITATOR_URL.trim().length > 0
+    ? env.FACILITATOR_URL.trim()
+    : DEFAULT_FACILITATOR_URL;
 
   return {
     publicClient,
@@ -144,5 +211,7 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     generate: (spec) => selectGenerator(env).generate(spec),
     validate: (bundle, spec) => validateBundle(bundle, spec),
     runPlayground: runPlaygroundHarness,
+    // Real revenue aggregation: GET FACILITATOR_URL/revenue/:resourceId (fail-loud).
+    getRevenue: (resourceId) => fetchRevenue(resourceId, facilitatorUrl),
   };
 }

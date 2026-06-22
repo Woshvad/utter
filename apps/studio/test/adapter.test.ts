@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { selectAdapter } from "../app/adapter/select";
 import { FixtureAdapter } from "../app/adapter/fixture";
-import { LiveAdapter, RequiresLiveServicesError } from "../app/adapter/live";
+import { LiveAdapter } from "../app/adapter/live";
 import { BUILD_STAGES, type BuildStage } from "../app/adapter/types";
 import { FIXTURE_RESOURCE_ID } from "../app/fixtures/index";
 
@@ -31,17 +31,15 @@ describe("selectAdapter", () => {
   });
 });
 
-describe("LiveAdapter (deferred pipeline, fail-loud)", () => {
-  // The four read methods plus createResource + subscribeBuildEvents are now
-  // implemented against injected deps (the local-real create flow) - covered offline
-  // in live-adapter.test.ts. Here we assert ONLY getRevenue still fails loud: the live
-  // revenue aggregation lands in a later increment. getRevenue throws
-  // RequiresLiveServicesError BEFORE touching deps, so a no-deps construction suffices.
-  it("getRevenue still throws RequiresLiveServicesError", async () => {
+describe("LiveAdapter (real reads against injected deps, fail-loud without them)", () => {
+  // Every method (the four reads, createResource, subscribeBuildEvents, and now
+  // getRevenue) reads through injected deps - covered offline in live-adapter.test.ts.
+  // getRevenue reads REAL aggregated revenue via the injected seam (an HTTP GET to the
+  // facilitator's /revenue/:resourceId in production). A NO-DEPS construction therefore
+  // fails loud with the "deps not injected" error rather than returning fake/zero data.
+  it("getRevenue without injected deps throws a clear not-injected error (never fake data)", async () => {
     const adapter = new LiveAdapter();
-    await expect(adapter.getRevenue("0xabc")).rejects.toBeInstanceOf(
-      RequiresLiveServicesError,
-    );
+    await expect(adapter.getRevenue("0xabc")).rejects.toThrow(/not injected/i);
   });
 });
 

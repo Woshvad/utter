@@ -194,3 +194,83 @@ export class InMemoryResultStore implements ResultStore {
     });
   }
 }
+
+/**
+ * One settled (or refunded) call, recorded for per-resource revenue aggregation.
+ *
+ * This is a SEPARATE concern from PaymentStore/ResultStore: the ResultStore is keyed
+ * by idemKey only and its reservation (which carries the resourceId) is DELETED on
+ * settle, so there is no revenue-by-resource source there. The RevenueLedger keeps a
+ * resourceId-keyed append log so the studio dashboard can show real gross / split /
+ * refund totals from actual facilitator settlements.
+ *
+ * All money is USDC base units (bigint); the legs are the on-chain authoritative
+ * values (the `toCreator`/`toTreasury` the PaymentEscrow.debit `Debited` event emits),
+ * never a re-derived bps split. `amount === creatorShare + platformShare` for a settle.
+ */
+export interface SettlementEntry {
+  /** The payment nonce (bytes32 Hex) - also the idempotency key for the record. */
+  idemKey: Hex;
+  /** The resource the settlement was charged against (bytes32 Hex). */
+  resourceId: Hex;
+  /** The debited amount in USDC base units (the receipt amount). */
+  amount: bigint;
+  /** The creator leg in base units (the on-chain `toCreator`, not recomputed here). */
+  creatorShare: bigint;
+  /** The platform/treasury leg in base units (the on-chain `toTreasury`). */
+  platformShare: bigint;
+  /** The on-chain settlement tx hash (bytes32 Hex). */
+  tx: Hex;
+  /** Whether this entry is a debit (settle) or a refund. */
+  kind: "settle" | "refund";
+  /** Epoch ms the entry was recorded. */
+  at: number;
+}
+
+/**
+ * A per-resource revenue ledger. Records each settlement/refund and serves the rows
+ * back for one resource. Async so a later durable (pg/redis) adapter implements the
+ * SAME contract; the in-memory adapter is the default.
+ */
+export interface RevenueLedger {
+  /** Record one settlement/refund. Idempotent on idemKey (a re-record is a no-op). */
+  record(entry: SettlementEntry): Promise<void>;
+  /** Every recorded entry for a resource, in record order (a defensive copy). */
+  byResource(resourceId: Hex): Promise<SettlementEntry[]>;
+}
+
+/**
+ * In-memory RevenueLedger (the default; not part of PaymentStore/ResultStore and NOT
+ * pg/redis-backed). A `Map<resourceId, SettlementEntry[]>` plus an idemKey set so a
+ * settle RETRY (which re-enters this record path) never double-counts a resource's
+ * revenue: re-recording the same idemKey is a no-op.
+ *
+ * NOTE: a durable pg/redis-backed RevenueLedger (so revenue survives a facilitator
+ * restart) is a deliberate LATER increment - this in-memory ledger is intentionally
+ * process-local, mirroring the in-memory PaymentStore/ResultStore test default.
+ */
+export class InMemoryRevenueLedger implements RevenueLedger {
+  private readonly byResourceId = new Map<Hex, SettlementEntry[]>();
+  private readonly recorded = new Set<Hex>();
+
+  async record(entry: SettlementEntry): Promise<void> {
+    // Idempotent on idemKey: a settle retry re-enters here, but the revenue for that
+    // nonce must be counted exactly once (mirrors the exactly-once money guard).
+    if (this.recorded.has(entry.idemKey)) return;
+    this.recorded.add(entry.idemKey);
+    const rows = this.byResourceId.get(entry.resourceId);
+    // Store a copy so a later caller mutation cannot poison the ledger.
+    const row: SettlementEntry = { ...entry };
+    if (rows) {
+      rows.push(row);
+    } else {
+      this.byResourceId.set(entry.resourceId, [row]);
+    }
+  }
+
+  async byResource(resourceId: Hex): Promise<SettlementEntry[]> {
+    const rows = this.byResourceId.get(resourceId);
+    // Defensive copy (rows + each entry) so the caller cannot mutate the ledger.
+    return rows ? rows.map((r) => ({ ...r })) : [];
+  }
+}

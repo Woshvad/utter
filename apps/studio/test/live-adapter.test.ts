@@ -23,7 +23,7 @@ import { LiveAdapter } from "../app/adapter/live";
 import { RequiresLiveServicesError } from "../app/adapter/live";
 import { BuildEventChannel } from "../app/adapter/build-channel";
 import { runPlaygroundHarness } from "../app/adapter/playground-harness";
-import type { ComposeSpec } from "../app/adapter/types";
+import type { ComposeSpec, Hex, RevenueSummary } from "../app/adapter/types";
 import { FIXTURE_MARKETPLACE, FIXTURE_RESOURCE_ID } from "../app/fixtures/index";
 
 /** A clearly-fake unknown id for the not-found case (never seeded). */
@@ -74,6 +74,26 @@ const scaffold = new ScaffoldGenerator();
 const scaffoldGenerate = (spec: ResourceSpec): Promise<Bundle> => scaffold.generate(spec);
 
 /**
+ * A deterministic RevenueSummary the injected getRevenue seam returns. Stands in for the
+ * real HTTP GET to the facilitator's /revenue/:resourceId (exercised offline in the
+ * facilitator's own revenue-route test), so this suite proves the LiveAdapter pass-
+ * through WITHOUT any network. All money is base-unit bigint (no decimals literal).
+ */
+const STUB_REVENUE: RevenueSummary = {
+  resourceId: FIXTURE_RESOURCE_ID as Hex,
+  calls: 2,
+  gross: 30_000n,
+  creatorShare: 21_000n,
+  platformShare: 9_000n,
+  refunds: 5_000n,
+  receipts: [
+    { tx: `0x${"11".repeat(32)}` as Hex, kind: "settle", amount: 20_000n, idemKey: `0x${"a1".repeat(32)}` },
+    { tx: `0x${"22".repeat(32)}` as Hex, kind: "settle", amount: 10_000n, idemKey: `0x${"a2".repeat(32)}` },
+    { tx: `0x${"33".repeat(32)}` as Hex, kind: "refund", amount: 5_000n, idemKey: `0x${"a3".repeat(32)}` },
+  ],
+};
+
+/**
  * Build a LiveAdapter with injected offline deps + a freshly seeded index store + a
  * shared BuildEventChannel + the real scaffold generate seam + the real validateBundle
  * seam. The SAME indexStore instance backs both the seeded reads and the create publish,
@@ -95,6 +115,12 @@ async function makeLiveAdapter(
     validate,
     // Inject the REAL harness so the escrow reserve-before-run gate is proven, not faked.
     runPlayground: runPlaygroundHarness,
+    // Inject a deterministic revenue seam (the production seam GETs the facilitator's
+    // /revenue/:resourceId; the aggregation itself is covered in the facilitator test).
+    getRevenue: async () => ({
+      ...STUB_REVENUE,
+      receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })),
+    }),
   });
 }
 
@@ -172,15 +198,30 @@ describe("LiveAdapter read path (injected offline deps)", () => {
   });
 });
 
-describe("LiveAdapter deferred path (fail loud, never fake data)", () => {
-  // createResource and subscribeBuildEvents are now REAL in local-real mode (covered by
-  // the create-flow block below). getRevenue stays deferred: the live revenue
-  // aggregation lands later, so it must still fail loud rather than return fake data.
-  it("getRevenue still throws RequiresLiveServicesError", async () => {
+describe("LiveAdapter getRevenue (real pass-through to the injected seam)", () => {
+  // createResource and subscribeBuildEvents are REAL in local-real mode (covered by the
+  // create-flow block below). getRevenue now reads REAL aggregated revenue through the
+  // injected seam (the production seam GETs the facilitator's /revenue/:resourceId), so
+  // it must pass the seam's RevenueSummary straight through, NOT throw.
+  it("returns the injected seam's RevenueSummary (base-unit bigint, no fake data)", async () => {
     const adapter = await makeLiveAdapter();
-    await expect(adapter.getRevenue(FIXTURE_RESOURCE_ID)).rejects.toBeInstanceOf(
-      RequiresLiveServicesError,
-    );
+    const revenue = await adapter.getRevenue(FIXTURE_RESOURCE_ID);
+    expect(revenue.resourceId).toBe(FIXTURE_RESOURCE_ID);
+    expect(revenue.calls).toBe(STUB_REVENUE.calls);
+    expect(revenue.gross).toBe(STUB_REVENUE.gross);
+    expect(revenue.creatorShare).toBe(STUB_REVENUE.creatorShare);
+    expect(revenue.platformShare).toBe(STUB_REVENUE.platformShare);
+    expect(revenue.refunds).toBe(STUB_REVENUE.refunds);
+    // The gross equals the sum of the settle receipt amounts (split sums to gross).
+    expect(revenue.creatorShare + revenue.platformShare).toBe(revenue.gross);
+    expect(typeof revenue.gross).toBe("bigint");
+    expect(revenue.receipts.length).toBe(STUB_REVENUE.receipts.length);
+    expect(revenue.receipts[0]?.amount).toBeTypeOf("bigint");
+  });
+
+  it("RequiresLiveServicesError is still exported (referenced by other code/tests)", () => {
+    // getRevenue no longer throws it, but the class remains part of the public surface.
+    expect(typeof RequiresLiveServicesError).toBe("function");
   });
 });
 
@@ -266,10 +307,11 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(after).toEqual(before);
   });
 
-  it("getRevenue still throws RequiresLiveServicesError (deferred)", async () => {
+  it("getRevenue reads through the injected revenue seam (real pass-through)", async () => {
     const adapter = await makeLiveAdapter();
-    await expect(adapter.getRevenue(FIXTURE_RESOURCE_ID)).rejects.toBeInstanceOf(
-      RequiresLiveServicesError,
-    );
+    const revenue = await adapter.getRevenue(FIXTURE_RESOURCE_ID);
+    expect(revenue.calls).toBe(STUB_REVENUE.calls);
+    expect(revenue.gross).toBe(STUB_REVENUE.gross);
+    expect(revenue.creatorShare + revenue.platformShare).toBe(revenue.gross);
   });
 });

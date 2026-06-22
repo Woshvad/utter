@@ -7,15 +7,16 @@
 // the SAME pure filterResources the FixtureAdapter uses, and the playground reuses the
 // runPlaygroundHarness VERBATIM so the reserve-before-run escrow gate stays intact.
 //
-// createResource + subscribeBuildEvents are now REAL in local-real mode (increment
-// 1g): createResource scaffold-generates a bundle (no ANTHROPIC key), runs the four-
-// gate validateBundle, publishes an IndexRecord into the SHARED singleton store, and
-// kicks off the build-stage stream into the per-resource channel; subscribeBuildEvents
-// is a real async generator that delegates to the channel (yields Generate..Live, then
-// terminates, never throws before its first yield). getRevenue stays fail-loud: the
-// live revenue aggregation lands later. None of these touch an operator-gated live
-// service: the generator is the offline scaffold, the Deploy/Mint stages are labeled
-// local-sim (no container, no on-chain mint), and the publish is the local index upsert.
+// createResource + subscribeBuildEvents are REAL in local-real mode: createResource
+// scaffold-generates a bundle (no ANTHROPIC key), runs the four-gate validateBundle,
+// publishes an IndexRecord into the SHARED singleton store, and kicks off the build-
+// stage stream into the per-resource channel; subscribeBuildEvents is a real async
+// generator that delegates to the channel (yields Generate..Live, then terminates, never
+// throws before its first yield). getRevenue now reads REAL aggregated revenue through
+// the injected seam (an HTTP GET to the facilitator's /revenue/:resourceId), fail-loud on
+// an unreachable facilitator. None of these touch an operator-gated live service: the
+// generator is the offline scaffold, the Deploy/Mint stages are labeled local-sim (no
+// container, no on-chain mint), and the publish is the local index upsert.
 //
 // LiveDeps is imported TYPE-ONLY from live-deps.server.js so the class never bundles
 // the server module (T-mdx-01); the deps are injected by select.ts (production) or a
@@ -283,9 +284,12 @@ export class LiveAdapter implements StudioDataAdapter {
     return matched.map(recordToCard);
   }
 
-  async getRevenue(_resourceId: string): Promise<RevenueSummary> {
-    // Deferred: the live revenue aggregation lands in increment 1g.
-    throw new RequiresLiveServicesError("getRevenue");
+  async getRevenue(resourceId: string): Promise<RevenueSummary> {
+    // Real revenue aggregation: the injected seam GETs the facilitator's
+    // /revenue/:resourceId and rebuilds a RevenueSummary from the decimal-string amounts
+    // (base-unit bigint). It is FAIL-LOUD - an unreachable facilitator throws rather than
+    // returning fake/zero data; a reachable-but-empty one returns a valid zero summary.
+    return this.requireDeps().getRevenue(resourceId);
   }
 
   async getEscrowBalance(address: Hex): Promise<UsdcBalance> {

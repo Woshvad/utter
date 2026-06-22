@@ -17,6 +17,7 @@ import { serve } from "@hono/node-server";
 import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
 import { InMemorySpendCapStore, type SpendCapStore } from "@utter/data-proxy";
+import { InMemoryRevenueLedger } from "@utter/x402-arc";
 import { createApp, type AppDeps } from "./app";
 import { createRelayerPool } from "./relayer";
 import { createInMemoryBuyerLock } from "./verify";
@@ -91,6 +92,12 @@ export function buildDepsFromEnv(): AppDeps {
       ? BigInt(minEconomicalRaw.trim())
       : undefined;
 
+  // Per-resource revenue ledger for the studio dashboard (STU-04). DELIBERATELY the
+  // in-memory adapter: revenue aggregation is process-local for this increment, so it
+  // resets on restart. A durable pg/redis-backed RevenueLedger (surviving restarts) is
+  // an explicit LATER increment, wired behind the same RevenueLedger contract.
+  const revenueLedger = new InMemoryRevenueLedger();
+
   return {
     store: stores.payments,
     resultStore: stores.results,
@@ -106,6 +113,7 @@ export function buildDepsFromEnv(): AppDeps {
     spendCapStore,
     perPayerDayCap,
     minEconomicalAmount,
+    revenueLedger,
   };
 }
 

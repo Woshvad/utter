@@ -60,6 +60,11 @@ function makeRealLiveAdapter(): LiveAdapter {
     generate: realGenerate,
     validate: validateBundle,
     runPlayground: runPlaygroundHarness,
+    // This test exercises createResource only; getRevenue is never called here. Provide a
+    // throwing seam so the LiveDeps shape type-checks without standing up a facilitator.
+    getRevenue: async () => {
+      throw new Error("live-create-real test does not exercise getRevenue");
+    },
   });
 }
 

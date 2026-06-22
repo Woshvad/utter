@@ -10,8 +10,11 @@ export {
   type StoredResult,
   type PaymentStore,
   type ResultStore,
+  type SettlementEntry,
+  type RevenueLedger,
   InMemoryPaymentStore,
   InMemoryResultStore,
+  InMemoryRevenueLedger,
   DEFAULT_RESULT_TTL_SECONDS,
 } from "./store";
 

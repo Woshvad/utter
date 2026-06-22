@@ -8,8 +8,10 @@ import type { Hex } from "viem";
 import {
   InMemoryPaymentStore,
   InMemoryResultStore,
+  InMemoryRevenueLedger,
   type ReservationLock,
   type StoredResult,
+  type SettlementEntry,
 } from "../src/store";
 
 const NONCE: Hex = `0x${"11".repeat(32)}`;
@@ -141,5 +143,64 @@ describe("InMemoryResultStore", () => {
       await store.get(NONCE),
       "an expired idemKey must 404 (return null) past its TTL",
     ).toBeNull();
+  });
+});
+
+describe("InMemoryRevenueLedger", () => {
+  const RESOURCE_A: Hex = `0x${"aa".repeat(32)}`;
+  const RESOURCE_B: Hex = `0x${"bb".repeat(32)}`;
+
+  function entry(overrides: Partial<SettlementEntry> = {}): SettlementEntry {
+    return {
+      idemKey: NONCE,
+      resourceId: RESOURCE_A,
+      amount: 10_000n,
+      creatorShare: 7_000n,
+      platformShare: 3_000n,
+      tx: `0x${"ab".repeat(32)}`,
+      kind: "settle",
+      at: Date.now(),
+      ...overrides,
+    };
+  }
+
+  it("records and returns entries per resource (split sums to amount)", async () => {
+    const ledger = new InMemoryRevenueLedger();
+    expect(await ledger.byResource(RESOURCE_A)).toEqual([]);
+    await ledger.record(entry());
+    const rows = await ledger.byResource(RESOURCE_A);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.amount).toBe(10_000n);
+    expect(rows[0]!.creatorShare + rows[0]!.platformShare).toBe(rows[0]!.amount);
+  });
+
+  it("is idempotent on idemKey: a re-record of the same nonce is a no-op (no double-count)", async () => {
+    const ledger = new InMemoryRevenueLedger();
+    await ledger.record(entry({ idemKey: NONCE, amount: 10_000n }));
+    // A settle RETRY re-enters record with the SAME idemKey; revenue must not double.
+    await ledger.record(entry({ idemKey: NONCE, amount: 10_000n }));
+    const rows = await ledger.byResource(RESOURCE_A);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("keeps distinct idemKeys and isolates resources", async () => {
+    const ledger = new InMemoryRevenueLedger();
+    await ledger.record(entry({ idemKey: `0x${"01".repeat(32)}`, resourceId: RESOURCE_A }));
+    await ledger.record(entry({ idemKey: `0x${"02".repeat(32)}`, resourceId: RESOURCE_A }));
+    await ledger.record(entry({ idemKey: `0x${"03".repeat(32)}`, resourceId: RESOURCE_B }));
+    expect(await ledger.byResource(RESOURCE_A)).toHaveLength(2);
+    expect(await ledger.byResource(RESOURCE_B)).toHaveLength(1);
+  });
+
+  it("byResource returns a defensive copy (caller mutation cannot poison the ledger)", async () => {
+    const ledger = new InMemoryRevenueLedger();
+    await ledger.record(entry());
+    const rows = await ledger.byResource(RESOURCE_A);
+    rows.push(entry({ idemKey: `0x${"ff".repeat(32)}` }));
+    rows[0]!.amount = 1n;
+    // A re-read is unaffected by the mutations above.
+    const fresh = await ledger.byResource(RESOURCE_A);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]?.amount).toBe(10_000n);
   });
 });

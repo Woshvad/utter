@@ -24,6 +24,8 @@ import {
   type PaymentStore,
   type ResultStore,
   type PaymentPayload,
+  type RevenueLedger,
+  type SettlementEntry,
 } from "@utter/x402-arc";
 import {
   verifyAndReserve,
@@ -65,6 +67,16 @@ export interface AppDeps {
   settleBufferSeconds: number;
   /** Result retention TTL (seconds, default 24h). */
   resultTtlSeconds?: number;
+
+  /**
+   * OPTIONAL per-resource revenue ledger. When set, a successful escrow /settle records
+   * its on-chain split here and GET /revenue/:resourceId aggregates it for the studio
+   * dashboard. UNSET (the default - and the ai-runtime G4 gate's createApp, which passes
+   * none) leaves /revenue returning a valid ZERO summary and changes no money-path
+   * behavior. Deliberately in-memory only (server.ts wires InMemoryRevenueLedger); a
+   * durable pg/redis-backed ledger is a later increment.
+   */
+  revenueLedger?: RevenueLedger;
 
   // ---- CR-01: per-payer rolling-24h spend cap (the free-compute guard) ----
   /**
@@ -219,6 +231,8 @@ export function createApp(deps: AppDeps): Hono {
       splitterAddress: deps.splitterAddress,
       usdcAddress: deps.usdcAddress,
       resultTtlSeconds: deps.resultTtlSeconds,
+      // Optional revenue ledger: a successful escrow settle records its on-chain split.
+      revenueLedger: deps.revenueLedger,
     };
 
     const responseBody: SettleResponseBody = {
@@ -317,6 +331,57 @@ export function createApp(deps: AppDeps): Hono {
     const stored = await deps.resultStore.get(idemKey as Hex);
     if (!stored) return c.json({ reason: "not_found" }, 404);
     return c.json({ response: stored.response, receipt: stored.receipt }, 200);
+  });
+
+  // GET /revenue/:resourceId - the studio revenue projection (STU-04). Aggregates the
+  // optional revenue ledger's per-resource settlement rows into the RevenueSummary JSON
+  // shape, serializing every base-unit amount as a DECIMAL STRING (bigint never crosses
+  // JSON as a number). When no ledger is wired or a resource has no rows, returns a
+  // valid ZERO summary (200, never an error) so the dashboard always gets a real shape.
+  app.get("/revenue/:resourceId", async (c) => {
+    const resourceId = c.req.param("resourceId");
+    // bytes32: 0x + exactly 64 hex chars (the on-chain resourceId shape).
+    if (!isHex(resourceId) || !/^0x[0-9a-fA-F]{64}$/.test(resourceId)) {
+      return c.json({ reason: "bad_resourceId" }, 400);
+    }
+    const entries: SettlementEntry[] = deps.revenueLedger
+      ? await deps.revenueLedger.byResource(resourceId as Hex)
+      : [];
+
+    let calls = 0;
+    let gross = 0n;
+    let creatorShare = 0n;
+    let platformShare = 0n;
+    let refunds = 0n;
+    const receipts = entries.map((e) => {
+      if (e.kind === "settle") {
+        calls += 1;
+        gross += e.amount;
+        creatorShare += e.creatorShare;
+        platformShare += e.platformShare;
+      } else {
+        refunds += e.amount;
+      }
+      return {
+        tx: e.tx,
+        kind: e.kind,
+        amount: e.amount.toString(),
+        idemKey: e.idemKey,
+      };
+    });
+
+    return c.json(
+      {
+        resourceId,
+        calls,
+        gross: gross.toString(),
+        creatorShare: creatorShare.toString(),
+        platformShare: platformShare.toString(),
+        refunds: refunds.toString(),
+        receipts,
+      },
+      200,
+    );
   });
 
   return app;

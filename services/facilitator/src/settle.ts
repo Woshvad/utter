@@ -39,6 +39,7 @@ import {
   type PaymentStore,
   type PaymentPayload,
   type SignedExactTransfer,
+  type RevenueLedger,
   DEFAULT_RESULT_TTL_SECONDS,
 } from "@utter/x402-arc";
 import { escrowAbi, erc3009Abi } from "@utter/chain";
@@ -62,6 +63,16 @@ export interface Receipt {
   idemKey: Hex;
   /** Which scheme settled this call. */
   scheme: SettleScheme;
+  /**
+   * The on-chain creator leg in base units (decimal string), from the Debited event's
+   * `toCreator`. OPTIONAL: present for an escrow settle whose Debited log was read
+   * (the success + NonceUsed-rebuild paths); absent for the exact path (no split) and
+   * for the escrow primary path on a chain stub that returns no Debited log. Carried
+   * so the revenue ledger records the AUTHORITATIVE on-chain split, never a re-derive.
+   */
+  toCreator?: string;
+  /** The on-chain treasury leg in base units (decimal string), from `toTreasury`. */
+  toTreasury?: string;
 }
 
 /** Everything `settle` needs injected (relayer + stores + chain + addresses). */
@@ -82,6 +93,14 @@ export interface SettleDeps {
   usdcAddress: Address;
   /** Result retention TTL in seconds (default 24h). */
   resultTtlSeconds?: number;
+  /**
+   * OPTIONAL per-resource revenue ledger. When present, a SUCCESSFUL escrow settle
+   * records its on-chain split into the ledger for the studio revenue dashboard. Purely
+   * additive: unset (the default, and the ai-runtime G4 gate path) records nothing and
+   * changes no settle/debit/split/exactly-once behavior. The legs recorded are the
+   * on-chain `toCreator`/`toTreasury` from the Debited event, never a re-derived split.
+   */
+  revenueLedger?: RevenueLedger;
 }
 
 /** The exact-scheme payload settle submits to the splitter via ERC-3009. */
@@ -140,13 +159,53 @@ function debitedLogToReceipt(
   }) as { eventName: string; args: Record<string, unknown> };
   if (decoded.eventName !== "Debited") return null;
   if ((decoded.args.nonce as Hex)?.toLowerCase() !== idemKey.toLowerCase()) return null;
+  // toCreator/toTreasury are the ON-CHAIN split legs the PaymentEscrow.debit emits
+  // (uint256 each). Surfaced so the revenue ledger records the authoritative split.
+  const toCreator = decoded.args.toCreator as bigint | undefined;
+  const toTreasury = decoded.args.toTreasury as bigint | undefined;
   return {
     tx: log.transactionHash as Hex,
     payer: decoded.args.buyer as Address,
     amount: (decoded.args.amount as bigint).toString(),
     idemKey,
     scheme: "utter-escrow",
+    toCreator: toCreator !== undefined ? toCreator.toString() : undefined,
+    toTreasury: toTreasury !== undefined ? toTreasury.toString() : undefined,
   };
+}
+
+/**
+ * Pull the on-chain split legs (`toCreator`/`toTreasury`) out of a confirmed tx
+ * receipt's matching Debited log, or null if none is present. Used only to FEED the
+ * revenue ledger with the authoritative on-chain split - it never changes the settle
+ * receipt's amount/tx/payer. Defensive: a stub receipt with no `logs` array (the test
+ * chain mock) returns null, in which case the ledger records the amount as the creator
+ * leg (a single-payee fallback), never a fabricated bps split.
+ */
+function legsFromDebitedLogs(
+  txReceipt: unknown,
+  escrowAddress: Address,
+  idemKey: Hex,
+): { toCreator: string; toTreasury: string } | null {
+  const logs = (txReceipt as { logs?: unknown }).logs;
+  if (!Array.isArray(logs)) return null;
+  for (const log of logs) {
+    const l = log as { address?: string; data?: Hex; topics?: [Hex, ...Hex[]]; transactionHash?: Hex };
+    if (!l.address || l.address.toLowerCase() !== escrowAddress.toLowerCase()) continue;
+    if (!l.data || !l.topics) continue;
+    try {
+      const r = debitedLogToReceipt(
+        { data: l.data, topics: l.topics, transactionHash: (l.transactionHash ?? ("0x" as Hex)) },
+        idemKey,
+      );
+      if (r && r.toCreator !== undefined && r.toTreasury !== undefined) {
+        return { toCreator: r.toCreator, toTreasury: r.toTreasury };
+      }
+    } catch {
+      // A non-Debited log on the escrow address (or an undecodable one) is skipped.
+    }
+  }
+  return null;
 }
 
 /**
@@ -305,7 +364,7 @@ export async function settle(
       // retry-after-crash rebuilds the receipt from THIS single tx, never a full
       // history scan. Recorded before waitForTransactionReceipt (the crash window).
       await deps.store.recordSettleTx(idemKey, tx);
-      await deps.publicClient.waitForTransactionReceipt({ hash: tx });
+      const txReceipt = await deps.publicClient.waitForTransactionReceipt({ hash: tx });
       receipt = {
         tx,
         payer: a.buyer as Address,
@@ -313,6 +372,16 @@ export async function settle(
         idemKey,
         scheme: "utter-escrow",
       };
+      // ADDITIVE: read the on-chain split legs (toCreator/toTreasury) from the confirmed
+      // tx's Debited log so the revenue ledger records the authoritative split. Best-
+      // effort only: a chain stub that returns no logs simply leaves the legs unset (the
+      // ledger then falls back to amount-as-creator). This never alters the receipt
+      // amount/tx/payer or any settle control flow.
+      const legs = legsFromDebitedLogs(txReceipt, deps.escrowAddress, idemKey);
+      if (legs) {
+        receipt.toCreator = legs.toCreator;
+        receipt.toTreasury = legs.toTreasury;
+      }
     } catch (err) {
       if (!isAlreadySettledError(err)) throw err;
       // On-chain usedNonce already true (retry after crash): rebuild the receipt
@@ -335,6 +404,36 @@ export async function settle(
     { idemKey, response: body.response, receipt, storedAt: Date.now() },
     ttl,
   );
+
+  // ADDITIVE (revenue dashboard): record this SUCCESSFUL escrow settle into the optional
+  // per-resource revenue ledger. Escrow-only (the exact path is flat with no metered
+  // split, so it is not aggregated as metered revenue). The legs are the AUTHORITATIVE
+  // on-chain toCreator/toTreasury from the Debited event; when the chain layer surfaced
+  // no logs (e.g. a stub), fall back to recording the whole amount as the creator leg so
+  // amount === creatorShare + platformShare still holds (never a fabricated bps split).
+  // The ledger.record is idempotent on idemKey, so a settle RETRY never double-counts.
+  // Wrapped defensively: a ledger failure must NEVER break the money path.
+  if (deps.revenueLedger && receipt.scheme === "utter-escrow" && !isExact(payment)) {
+    try {
+      const debited = BigInt(receipt.amount);
+      const creatorShare =
+        receipt.toCreator !== undefined ? BigInt(receipt.toCreator) : debited;
+      const platformShare =
+        receipt.toTreasury !== undefined ? BigInt(receipt.toTreasury) : debited - creatorShare;
+      await deps.revenueLedger.record({
+        idemKey,
+        resourceId: payment.authorization.resourceId as Hex,
+        amount: debited,
+        creatorShare,
+        platformShare,
+        tx: receipt.tx,
+        kind: "settle",
+        at: Date.now(),
+      });
+    } catch {
+      // Revenue recording is best-effort; the settle already succeeded and persisted.
+    }
+  }
 
   return receipt;
 }
