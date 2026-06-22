@@ -187,6 +187,7 @@ describe("WR-01: every registered route resolves to a module", () => {
       "routes/metrics.ts": () => import("../app/routes/metrics"),
       "routes/resources.$id.tsx": () => import("../app/routes/resources.$id"),
       "routes/resources.$id.events.ts": () => import("../app/routes/resources.$id.events"),
+      "routes/creators.$address.tsx": () => import("../app/routes/creators.$address"),
       "routes/auth.tsx": () => import("../app/routes/auth"),
     };
     for (const rel of files) {
