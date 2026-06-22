@@ -6,6 +6,12 @@
 // units, not a recomputation (T-06-REDERIVE); (3) params.id is validated and a
 // malformed id surfaces a not-found path (T-06-PARAM).
 import { describe, it, expect, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const ID = "0x00000000000000000000000000000000000000000000000000000000000000a1";
 
@@ -93,5 +99,120 @@ describe("resources.$id screen (no price recomputation)", () => {
     expect(screen.getByTestId("detail-title").textContent).toBe(data.detail.slug);
 
     vi.doUnmock("react-router");
+  });
+});
+
+describe("resource-detail tabs (real adapter content)", () => {
+  /**
+   * Render the screen against the real loader projection, then click a tab trigger
+   * by its accessible name so its (lazily mounted) Radix panel becomes visible. The
+   * default fixture pricing is flat; pass an override loader payload for metered tests.
+   */
+  async function renderScreen(override?: (data: { detail: { pricing: { model: string; perKB: string; max: string; base: string } } }) => void) {
+    const { loader } = await import("../app/routes/resources.$id");
+    const data = await loader({ params: { id: ID }, request: new Request("http://x/"), context: {} } as never);
+    if (override) override(data as never);
+
+    vi.resetModules();
+    vi.doMock("react-router", async (orig) => {
+      const actual = (await orig()) as Record<string, unknown>;
+      return { ...actual, useLoaderData: () => data };
+    });
+
+    const rtl = await import("@testing-library/react");
+    const React = await import("react");
+    const mod = await import("../app/routes/resources.$id");
+    const user = userEvent.setup();
+    rtl.render(React.createElement(mod.default));
+    return { ...rtl, data, user };
+  }
+
+  it("API tab renders an honest OpenAPI descriptor with real pricing/category/agentId", async () => {
+    const { screen, user, within, data } = await renderScreen();
+    await user.click(screen.getByRole("tab", { name: "api" }));
+
+    const preview = within(screen.getByTestId("openapi-preview"));
+    const code = preview.getByTestId("code-block").textContent ?? "";
+    // The raw base-unit pricing string, the category, and the agentId are all present.
+    expect(code).toContain(data.detail.pricing.base);
+    expect(code).toContain(data.detail.category);
+    expect(code).toContain(data.detail.agentId);
+    // It is OpenAPI-shaped, not a one-field stub.
+    expect(code).toContain("openapi");
+    expect(code).toContain("x-utter");
+
+    vi.doUnmock("react-router");
+  });
+
+  it("Agent card tab renders canonical A2A JSON from real fields, not the old 4-field stub", async () => {
+    const { screen, user, within, data } = await renderScreen();
+    await user.click(screen.getByRole("tab", { name: "agent card" }));
+
+    const code = within(screen.getByTestId("card-preview")).getByTestId("code-block").textContent ?? "";
+    expect(code).toContain(data.detail.slug); // name
+    expect(code).toContain(data.detail.agentId);
+    expect(code).toContain(data.detail.category);
+    expect(code).toContain(data.detail.pricing.model);
+    // honest A2A card includes the pricing/x402 block + the resource url, not just 4 fields
+    expect(code).toContain("pricing");
+    expect(code).toContain("x402");
+    expect(code).toContain("url");
+
+    vi.doUnmock("react-router");
+  });
+
+  it("Reputation tab renders verified + bond and no fabricated feedbackCount=0 badge", async () => {
+    const { screen, user, within } = await renderScreen();
+    await user.click(screen.getByRole("tab", { name: "reputation" }));
+
+    const region = within(screen.getByTestId("detail-reputation"));
+    expect(region.getByTestId("verified-badge")).toBeInTheDocument();
+    expect(region.getByTestId("bond-badge")).toBeInTheDocument();
+    // the old fabricated zero-count reputation badge is gone
+    expect(screen.queryByTestId("reputation-badge")).toBeNull();
+
+    vi.doUnmock("react-router");
+  });
+
+  it("Pricing tab renders every money figure via UsdcAmount including the projected base", async () => {
+    const { screen, user, within } = await renderScreen();
+    await user.click(screen.getByRole("tab", { name: "pricing" }));
+
+    const region = within(screen.getByTestId("detail-pricing"));
+    const monies = region.getAllByTestId("usdc-amount");
+    expect(monies.length).toBeGreaterThan(0);
+    // base = "10000" base units @ 6dp -> $0.010000 (the projected fixture base)
+    expect(region.getAllByText("$0.010000").length).toBeGreaterThan(0);
+
+    vi.doUnmock("react-router");
+  });
+
+  it("Pricing tab shows the per-kb price via UsdcAmount when metered", async () => {
+    const { screen, user, within } = await renderScreen((data) => {
+      // Flip the projection to metered with a non-zero perKB to exercise the branch.
+      data.detail.pricing.model = "metered";
+      data.detail.pricing.perKB = "500";
+      data.detail.pricing.max = "50000";
+    });
+    await user.click(screen.getByRole("tab", { name: "pricing" }));
+
+    const perKb = within(screen.getByTestId("detail-perkb"));
+    // 500 base units @ 6dp -> $0.000500, rendered through UsdcAmount
+    expect(perKb.getByTestId("usdc-amount")).toBeInTheDocument();
+    expect(perKb.getByText("$0.000500")).toBeInTheDocument();
+
+    vi.doUnmock("react-router");
+  });
+});
+
+describe("resource-detail render path (no money literal)", () => {
+  it("contains no 1e6/10**6//1000000/6n/18n money-scale literal in the route", () => {
+    const forbidden = [/1e6/i, /10\s*\*\*\s*6/, /\/\s*1000000/, /\b6n\b/, /\b18n\b/, /BigInt\(\s*6\s*\)/, /BigInt\(\s*18\s*\)/];
+    const src = readFileSync(resolve(HERE, "../app/routes/resources.$id.tsx"), "utf8");
+    // Strip block + line comments so header prose cannot self-invalidate (mirrors dashboard.test.ts).
+    const stripped = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    for (const re of forbidden) {
+      expect(stripped, `resources.$id.tsx should carry no money-scale literal (${re})`).not.toMatch(re);
+    }
   });
 });
