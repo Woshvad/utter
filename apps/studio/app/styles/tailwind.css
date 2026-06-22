@@ -1,0 +1,12 @@
+/*
+ * tailwind.css - the Tailwind v3 entry stylesheet for Utter Studio.
+ *
+ * These three directives expand at build time into Tailwind's preflight (base),
+ * any component classes, and every utility used across app/**.{ts,tsx}. The
+ * utilities resolve their values against the CSS variables in tokens.css (loaded
+ * alongside this sheet in root.tsx) via the var(--token) mappings in
+ * tailwind.config.ts. Without this entry sheet every utility class is inert.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

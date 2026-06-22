@@ -4,13 +4,21 @@ import * as React from "react";
 import { WagmiProvider } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import tokens from "./styles/tokens.css?url";
+import tailwind from "./styles/tailwind.css?url";
 import { wagmiConfig } from "./wallet/config";
 
 // The dark-Bauhaus token layer (Plan 02) + the wagmi + QueryClient providers (Plan
 // 05, this plan). `tokens.css` carries the CSS variables every Tailwind utility
 // resolves against. wagmiConfig has ssr:true so the providers are SSR-safe (Pitfall
 // 6 / T-06-HYDRATION); wallet-dependent UI still guards on a mounted flag.
-export const links: LinksFunction = () => [{ rel: "stylesheet", href: tokens }];
+//
+// tokens.css is linked first so its :root custom properties are declared, then the
+// compiled Tailwind sheet (preflight + utilities). Custom properties resolve at use
+// site, so the vars apply regardless of order; tokens-first keeps intent clear.
+export const links: LinksFunction = () => [
+  { rel: "stylesheet", href: tokens },
+  { rel: "stylesheet", href: tailwind },
+];
 
 // A single QueryClient for the app (wagmi's required async-state peer). Created once
 // per module load (module scope) so it is stable across renders.
