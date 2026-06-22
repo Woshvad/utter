@@ -11,6 +11,7 @@
     "utter-buyer-mcp": "./src/bin/mcp.ts"
   },
   "scripts": {
+    "mcp": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/bin/mcp.ts",
     "test": "vitest run"
   },
   "dependencies": {

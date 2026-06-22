@@ -51,7 +51,12 @@ import {
 } from "@utter/x402-arc";
 import { buildTraefikDynamicConfig } from "./traefik-config";
 
-loadEnv({ path: ".env.local" });
+// `quiet: true` keeps dotenv's stdout "injected env" banner off stdout. This module's
+// top-level load fires at IMPORT time, and @utter/deployer is reachable transitively from
+// stdio bins (e.g. the buyer MCP server) whose stdout carries JSON-RPC frames - an
+// unsilenced banner there would corrupt the channel (Pitfall 1 / T-07-STDOUT). The env is
+// still loaded identically; only the banner is suppressed.
+loadEnv({ path: ".env.local", quiet: true });
 
 /** The deterministic resource id + slug for the live echo deploy. */
 const RESOURCE_LABEL = "utter:echo:live-deploy";

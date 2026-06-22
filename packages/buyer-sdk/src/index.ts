@@ -93,3 +93,18 @@ export type {
   BudgetReservation,
   ReserveResult,
 } from "./mcp/budget.js";
+
+// --- Demo: the self-contained in-process DEMO wiring the bin boots by default ---
+// An ephemeral throwaway wallet + the fixture transport (mock chain + debit-counting
+// relayer) + a built-in echo card, so an agent can run the full discover->pay loop over
+// stdio with NO real money, network, or deployed resource. Live mode stays operator-gated
+// and fail-loud (RequiresLiveBuyerError).
+export {
+  createDemoWiring,
+  createDemoTransport,
+  createDemoBuyerWallet,
+  demoCardSource,
+  demoClientCardSource,
+  DEMO_RESOURCE_ID,
+} from "./demo.js";
+export type { DemoWiring } from "./demo.js";
