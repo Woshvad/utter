@@ -1,5 +1,6 @@
 // routes.ts - the React Router v7 framework-mode route config (explicit, not the
 // file convention). Registers the STU-* creator-flow routes:
+//   /                        -> the landing / marketing front door (index)
 //   /create                  -> the composer action + screen (STU-01) [requireCreator]
 //   /dashboard               -> the revenue dashboard (STU-04)        [requireCreator]
 //   /wallet                  -> the wallet/escrow surface (STU-06)    [requireCreator]
@@ -14,9 +15,10 @@
 // and /metrics carries its own WR-03 token/session gate). The events route is a
 // resource route (loader only, no default component); it sits at a distinct path
 // segment so it does not collide with the detail route.
-import { type RouteConfig, route } from "@react-router/dev/routes";
+import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
 export default [
+  index("routes/_index.tsx"),
   route("create", "routes/create.tsx"),
   route("discover", "routes/discover.tsx"),
   route("dashboard", "routes/dashboard.tsx"),
