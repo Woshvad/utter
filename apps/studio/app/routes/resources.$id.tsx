@@ -22,7 +22,7 @@ import { PricePill } from "../components/primitives/PricePill.js";
 import { AddressPill } from "../components/primitives/AddressPill.js";
 import { BondBadge } from "../components/primitives/BondBadge.js";
 import { StatusDot, type StatusState } from "../components/primitives/StatusDot.js";
-import { ReputationBadge } from "../components/primitives/ReputationBadge.js";
+import { VerifiedBadge } from "../components/primitives/VerifiedBadge.js";
 import { ResourceTabs } from "../components/detail/ResourceTabs.js";
 import { CardPreview } from "../components/detail/CardPreview.js";
 import { OpenApiPreview } from "../components/detail/OpenApiPreview.js";
@@ -104,6 +104,15 @@ export async function action({ params, request }: ActionFunctionArgs) {
   };
 }
 
+/**
+ * Derive the resource origin from the projected cardUrl by stripping the
+ * /.well-known/agent-card.json suffix. The cardUrl is the only URL the detail
+ * projection exposes; the resource URL is read from it, never invented.
+ */
+function resourceUrlFromCard(cardUrl: string): string {
+  return cardUrl.replace(/\/\.well-known\/agent-card\.json$/, "");
+}
+
 /** Map the projected sandbox status to the StatusDot state (shape + color motif). */
 function sandboxToState(sandbox: ResourceDetail["sandbox"]): StatusState {
   switch (sandbox) {
@@ -126,11 +135,32 @@ export default function ResourceDetailRoute(): React.ReactElement {
   const cap = BigInt(detail.pricing.max);
   const isMetered = detail.pricing.model === "metered";
 
-  // The same minimal OpenAPI value the `api` tab renders is the request-schema source
-  // (there is no real openapi field on ResourceDetail yet; the planning note threads
-  // this same value). A body-less doc yields empty fields -> the raw-JSON fallback,
-  // preserving the current hand-edit behavior.
-  const openapiDoc = { openapi: "3.1.0", info: { title: detail.slug } };
+  // The `api` tab renders an honest OpenAPI-shaped descriptor assembled ONLY from
+  // projected detail fields. It carries no invented paths/methods/body schema (the
+  // adapter does not expose them), so it documents the resource truthfully from what
+  // exists. The same value feeds extractRequestSchema; a path-less doc yields empty
+  // fields -> the playground raw-JSON fallback, preserving the current behavior.
+  // The pricing figures are the raw base-unit strings off the projection (NOT
+  // formatted money) so this descriptor introduces no money-scale literal.
+  const openapiDoc = {
+    openapi: "3.1.0",
+    info: {
+      title: detail.slug,
+      "x-category": detail.category,
+    },
+    "x-utter": {
+      agentId: detail.agentId,
+      category: detail.category,
+      resourceUrl: resourceUrlFromCard(detail.cardUrl),
+      cardUrl: detail.cardUrl,
+      pricing: {
+        model: detail.pricing.model,
+        base: detail.pricing.base,
+        perKB: detail.pricing.perKB,
+        max: detail.pricing.max,
+      },
+    },
+  };
   const requestSchema = extractRequestSchema(openapiDoc);
 
   // The Run seam: POST the body to this route's action, which drives
@@ -172,13 +202,22 @@ export default function ResourceDetailRoute(): React.ReactElement {
         <BondBadge bond={detail.bond} decimals={decimals} />
       </div>
       <div className="flex flex-wrap items-center gap-md">
+        <span className="text-label font-display text-ink-muted lowercase">category</span>
+        <span
+          data-testid="detail-category"
+          className="font-mono text-caption-mono text-ink lowercase"
+        >
+          {detail.category}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-md">
         <span className="text-label font-display text-ink-muted lowercase">payout</span>
         <AddressPill address={detail.payout} />
       </div>
     </div>
   );
 
-  const api = <OpenApiPreview openapi={openapiDoc} />;
+  const api = <OpenApiPreview openapi={openapiDoc} caption="openapi.json" />;
   const playground = (
     <PlaygroundPlayer
       resourceId={detail.resourceId}
@@ -195,6 +234,10 @@ export default function ResourceDetailRoute(): React.ReactElement {
       requestSchema={requestSchema}
     />
   );
+  // A canonical A2A agent-card assembled by read-through from real detail fields.
+  // The pricing/x402 block carries the raw base-unit pricing strings + the payout
+  // address; no on-chain value is minted or invented here. The pricing strings are
+  // the projection's own base-unit values, not formatted money (no scale literal).
   const card = (
     <CardPreview
       cardUrl={detail.cardUrl}
@@ -203,14 +246,33 @@ export default function ResourceDetailRoute(): React.ReactElement {
         name: detail.slug,
         agentId: detail.agentId,
         category: detail.category,
+        url: resourceUrlFromCard(detail.cardUrl),
+        pricing: {
+          scheme: "x402",
+          model: detail.pricing.model,
+          base: detail.pricing.base,
+          perKB: detail.pricing.perKB,
+          max: detail.pricing.max,
+          payTo: detail.payout,
+        },
       }}
     />
   );
+  // The Reputation tab renders ONLY the trust signals the detail projection actually
+  // exposes: health.verified, the rolling health.score, and the posted bond. There is
+  // no reputation/feedbackCount field on ResourceDetail, so a count of 0 would be
+  // fabricated; ERC-8004 feedback is surfaced on the marketplace card, not here.
   const reputation = (
-    <div data-testid="detail-reputation" className="flex items-center gap-md">
-      <ReputationBadge feedbackCount={0n} />
-      <span className="font-mono text-caption-mono text-ink-muted">
-        {detail.health.verified ? "verified endpoint" : "not yet verified"}
+    <div data-testid="detail-reputation" className="flex flex-col gap-md">
+      <div className="flex flex-wrap items-center gap-md">
+        <VerifiedBadge verified={detail.health.verified} />
+        <span data-testid="detail-rep-score" className="font-mono text-caption-mono text-ink-muted">
+          {detail.health.score !== null ? `score ${detail.health.score}` : "unscored"}
+        </span>
+        <BondBadge bond={detail.bond} decimals={decimals} />
+      </div>
+      <span className="font-mono text-caption-mono text-ink-faint">
+        ERC-8004 feedback is surfaced on the marketplace card, not on this projection.
       </span>
     </div>
   );
@@ -222,6 +284,12 @@ export default function ResourceDetailRoute(): React.ReactElement {
         model={isMetered ? "metered" : "flat"}
         capBaseUnits={isMetered ? cap : undefined}
       />
+      {isMetered ? (
+        <div data-testid="detail-perkb" className="font-mono text-caption-mono text-ink-muted">
+          {"per kb "}
+          <UsdcAmount baseUnits={BigInt(detail.pricing.perKB)} decimals={decimals} />
+        </div>
+      ) : null}
       <div className="font-mono text-caption-mono text-ink-muted">
         {"cap "}
         <UsdcAmount baseUnits={cap} decimals={decimals} />
