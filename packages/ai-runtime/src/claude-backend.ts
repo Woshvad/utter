@@ -26,6 +26,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { generateDockerfile, PINNED_BASE_IMAGES } from "@utter/deployer";
 import { DEFAULT_MAX_RESPONSE_BYTES } from "@utter/sandbox";
 import type { Generator } from "./generator.js";
+import { buildAgentCard } from "./agent-card.js";
 import { BUNDLE_KEYS, type Bundle, type ResourceSpec } from "./types.js";
 
 /**
@@ -180,6 +181,15 @@ export class ClaudeGenerator implements Generator {
         baseImage: PINNED_BASE_IMAGES[spec.runtime],
         registryUrl: process.env.REGISTRY_MIRROR_URL ?? "",
       });
+
+      // OVERWRITE agent-card.json with the canonical A2A v0.3.0 card. The contract
+      // (system-prompt.md / bundle-contract.md) tells the model to emit a minimal
+      // PLACEHOLDER card because the platform owns the real one - exactly as it owns
+      // the Dockerfile. buildAgentCard is the SAME builder the scaffold uses
+      // (scaffold.ts:181), so the live and scaffold paths produce an identical,
+      // G1-valid card. Without this the model's placeholder fails the 04-03 G1 A2A
+      // validation and every live bundle is rejected.
+      bundle["agent-card.json"] = JSON.stringify(buildAgentCard(spec), null, 2);
 
       return bundle;
     } finally {
