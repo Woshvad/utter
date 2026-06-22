@@ -11,6 +11,8 @@ export interface ResourceTabsContent {
   card: React.ReactNode;
   reputation: React.ReactNode;
   pricing: React.ReactNode;
+  /** The optional STU-03 playground (request builder + Run). Rendered when present. */
+  playground?: React.ReactNode;
 }
 
 export interface ResourceTabsProps {
@@ -21,6 +23,9 @@ export interface ResourceTabsProps {
 export function ResourceTabs({ content, defaultValue }: ResourceTabsProps): React.ReactElement {
   const items: TabItem[] = [
     { value: "overview", label: "overview", content: content.overview },
+    ...(content.playground !== undefined
+      ? [{ value: "playground", label: "playground", content: content.playground }]
+      : []),
     { value: "api", label: "api", content: content.api },
     { value: "card", label: "agent card", content: content.card },
     { value: "reputation", label: "reputation", content: content.reputation },

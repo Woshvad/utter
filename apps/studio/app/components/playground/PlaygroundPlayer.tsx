@@ -18,6 +18,8 @@ import type { AcceptsEntry } from "@utter/x402-arc";
 import type { PlaygroundResult } from "../../adapter/types.js";
 import { MeteredTicker } from "./MeteredTicker.js";
 import { PaywallSheet } from "./PaywallSheet.js";
+import { RequestBuilder } from "./RequestBuilder.js";
+import { buildBody, type RequestSchema } from "./openapi-fields.js";
 
 export interface PlaygroundPlayerProps {
   /** The resource being exercised. */
@@ -36,6 +38,12 @@ export interface PlaygroundPlayerProps {
   onRun: (req: unknown, opts?: { pay?: boolean }) => Promise<PlaygroundResult>;
   /** Whether the buyer has an escrow balance (controls the paywall pay copy). */
   funded?: boolean;
+  /**
+   * The OpenAPI-derived request shape (methods + typed fields). When it carries
+   * fields the builder defaults to the typed form; otherwise (or when absent) the
+   * raw-JSON editor is the default - the current behavior preserved.
+   */
+  requestSchema?: RequestSchema;
 }
 
 type RunState =
@@ -51,8 +59,15 @@ export function PlaygroundPlayer({
   cap,
   onRun,
   funded = false,
+  requestSchema,
 }: PlaygroundPlayerProps): React.ReactElement {
-  const [method] = React.useState("POST");
+  const schema: RequestSchema = requestSchema ?? { methods: [], fields: [] };
+  const hasFields = schema.fields.length > 0;
+  const [method, setMethod] = React.useState(schema.methods[0] ?? "POST");
+  // Default to the typed form only when the schema offers fields; otherwise the
+  // raw-JSON editor is the default (the current behavior preserved).
+  const [mode, setMode] = React.useState<"form" | "raw">(hasFields ? "form" : "raw");
+  const [values, setValues] = React.useState<Record<string, string>>({});
   const [requestBody, setRequestBody] = React.useState('{\n  "text": "hello"\n}');
   const [state, setState] = React.useState<RunState>({ phase: "idle" });
 
@@ -62,10 +77,15 @@ export function PlaygroundPlayer({
       const started =
         typeof performance !== "undefined" ? performance.now() : Date.now();
       let parsed: unknown;
-      try {
-        parsed = JSON.parse(requestBody);
-      } catch {
-        parsed = requestBody;
+      if (mode === "form" && hasFields) {
+        // Typed-field path: build the same plain object the raw editor would yield.
+        parsed = buildBody(schema.fields, values);
+      } else {
+        try {
+          parsed = JSON.parse(requestBody);
+        } catch {
+          parsed = requestBody;
+        }
       }
       const result = await onRun(parsed, opts);
       const ended = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -77,7 +97,7 @@ export function PlaygroundPlayer({
       }
       setState({ phase: "done", result, latencyMs });
     },
-    [onRun, requestBody],
+    [onRun, requestBody, mode, hasFields, schema.fields, values],
   );
 
   const onPay = React.useCallback(() => {
@@ -88,24 +108,18 @@ export function PlaygroundPlayer({
     <div className="flex flex-col gap-md" data-testid="playground-player" data-resource={resourceId}>
       {/* request builder + the split request/response */}
       <div className="grid grid-cols-1 gap-md lg:grid-cols-2">
-        {/* request side */}
-        <div className="flex flex-col gap-xs border border-hairline bg-raised">
-          <div className="flex items-center justify-between border-b border-hairline px-sm py-2xs">
-            <span className="font-mono text-caption-mono text-ink-faint lowercase">request</span>
-            <span className="border border-blue px-xs py-2xs font-mono text-caption-mono text-blue lowercase">
-              {method.toLowerCase()}
-            </span>
-          </div>
-          <textarea
-            data-testid="playground-request"
-            aria-label="request body"
-            value={requestBody}
-            onChange={(e) => setRequestBody(e.target.value)}
-            spellCheck={false}
-            rows={6}
-            className="resize-y bg-canvas p-sm font-mono text-caption-mono leading-relaxed text-ink outline-none focus-visible:ring-2 focus-visible:ring-blue"
-          />
-        </div>
+        {/* request side: the OpenAPI-driven builder (method + typed fields + raw toggle) */}
+        <RequestBuilder
+          schema={schema}
+          method={method}
+          onMethodChange={setMethod}
+          mode={mode}
+          onModeChange={setMode}
+          values={values}
+          onValuesChange={setValues}
+          rawBody={requestBody}
+          onRawBodyChange={setRequestBody}
+        />
 
         {/* response side */}
         <div className="flex flex-col gap-xs border border-hairline bg-raised">

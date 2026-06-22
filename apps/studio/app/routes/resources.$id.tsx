@@ -11,10 +11,12 @@
 // The runtime money decimals come from a read through the adapter (no 6/1e6
 // literal); money renders only through the single UsdcAmount surface.
 import * as React from "react";
-import type { LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
-import type { ResourceDetail } from "../adapter/types.js";
+import type { PlaygroundResult, ResourceDetail } from "../adapter/types.js";
+import { PlaygroundPlayer } from "../components/playground/PlaygroundPlayer.js";
+import { extractRequestSchema } from "../components/playground/openapi-fields.js";
 import { UsdcAmount } from "../components/primitives/UsdcAmount.js";
 import { PricePill } from "../components/primitives/PricePill.js";
 import { AddressPill } from "../components/primitives/AddressPill.js";
@@ -68,6 +70,40 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
   return { detail, decimals };
 }
 
+/**
+ * The playground Run seam (STU-03): the client onRun POSTs the request body here and
+ * the action drives adapter.runPlayground, which reuses the FROZEN escrow gate
+ * (reserve-before-run, T-06-FREECOMPUTE). The component NEVER calls a handler against
+ * an unreserved authorization - the only run path is through this adapter seam. The
+ * bigint debitAmount is serialized as a string for the JSON wire.
+ */
+export async function action({ params, request }: ActionFunctionArgs) {
+  if (!isSafeParam(params.id)) {
+    throw new Response(JSON.stringify({ error: "bad_resource" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const adapter = selectAdapter(process.env);
+  let req: unknown = null;
+  try {
+    const text = await request.text();
+    req = text ? (JSON.parse(text) as unknown) : null;
+  } catch {
+    req = null;
+  }
+  const result = await adapter.runPlayground(params.id, req);
+  // Serialize the bigint debit for the wire; the client re-reads it as a string.
+  return {
+    paid: result.paid,
+    debitAmount: result.debitAmount.toString(),
+    body: result.body,
+    bodyBytes: result.bodyBytes,
+    handlerMs: result.handlerMs,
+    paywall: result.paywall,
+  };
+}
+
 /** Map the projected sandbox status to the StatusDot state (shape + color motif). */
 function sandboxToState(sandbox: ResourceDetail["sandbox"]): StatusState {
   switch (sandbox) {
@@ -89,6 +125,32 @@ export default function ResourceDetailRoute(): React.ReactElement {
   const base = BigInt(detail.pricing.base);
   const cap = BigInt(detail.pricing.max);
   const isMetered = detail.pricing.model === "metered";
+
+  // The same minimal OpenAPI value the `api` tab renders is the request-schema source
+  // (there is no real openapi field on ResourceDetail yet; the planning note threads
+  // this same value). A body-less doc yields empty fields -> the raw-JSON fallback,
+  // preserving the current hand-edit behavior.
+  const openapiDoc = { openapi: "3.1.0", info: { title: detail.slug } };
+  const requestSchema = extractRequestSchema(openapiDoc);
+
+  // The Run seam: POST the body to this route's action, which drives
+  // adapter.runPlayground (reserve-before-run inside the adapter). The component never
+  // calls a handler directly. The action serializes debitAmount as a string; re-read
+  // it as a bigint here so the metered render path stays base-unit bigint.
+  const onRun = React.useCallback(
+    async (req: unknown): Promise<PlaygroundResult> => {
+      const res = await fetch(`/resources/${detail.resourceId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req ?? null),
+      });
+      const data = (await res.json()) as Omit<PlaygroundResult, "debitAmount"> & {
+        debitAmount: string;
+      };
+      return { ...data, debitAmount: BigInt(data.debitAmount) };
+    },
+    [detail.resourceId],
+  );
 
   const overview = (
     <div data-testid="detail-overview" className="flex flex-col gap-md">
@@ -116,7 +178,23 @@ export default function ResourceDetailRoute(): React.ReactElement {
     </div>
   );
 
-  const api = <OpenApiPreview openapi={{ openapi: "3.1.0", info: { title: detail.slug } }} />;
+  const api = <OpenApiPreview openapi={openapiDoc} />;
+  const playground = (
+    <PlaygroundPlayer
+      resourceId={detail.resourceId}
+      decimals={decimals}
+      pricing={{
+        model: "metered",
+        base: detail.pricing.base,
+        perKB: detail.pricing.perKB,
+        computeMultiplier: "0",
+        maxResponseBytes: 1_048_576,
+      }}
+      cap={cap}
+      onRun={onRun}
+      requestSchema={requestSchema}
+    />
+  );
   const card = (
     <CardPreview
       cardUrl={detail.cardUrl}
@@ -166,7 +244,7 @@ export default function ResourceDetailRoute(): React.ReactElement {
         />
       </div>
 
-      <ResourceTabs content={{ overview, api, card, reputation, pricing }} />
+      <ResourceTabs content={{ overview, playground, api, card, reputation, pricing }} />
     </div>
   );
 }
