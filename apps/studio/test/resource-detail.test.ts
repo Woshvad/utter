@@ -11,6 +11,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
+// The screen now wires usePayPerCall (the 260622-wlu client pay seam), which reads the
+// wagmi useAccount + useWalletClient hooks. Mock wagmi (hoisted, survives resetModules)
+// so the screen renders with no browser wallet - mirrors wallet.test.tsx. No pay() is
+// invoked by these render tests, so a connected-but-inert wallet client is enough.
+vi.mock("wagmi", () => ({
+  useAccount: () => ({ address: undefined }),
+  useWalletClient: () => ({ data: undefined }),
+}));
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const ID = "0x00000000000000000000000000000000000000000000000000000000000000a1";

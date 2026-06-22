@@ -13,8 +13,11 @@
 import * as React from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
+import type { AcceptsEntry } from "@utter/x402-arc";
 import { selectAdapter } from "../adapter/select.js";
 import type { PlaygroundResult, ResourceDetail } from "../adapter/types.js";
+import { usePayPerCall } from "../wallet/usePayPerCall.js";
+import { selectSubmitPayment } from "../wallet/submit-payment.js";
 import { PlaygroundPlayer } from "../components/playground/PlaygroundPlayer.js";
 import { extractRequestSchema } from "../components/playground/openapi-fields.js";
 import { UsdcAmount } from "../components/primitives/UsdcAmount.js";
@@ -41,6 +44,13 @@ function isSafeParam(value: string | undefined): value is string {
 export interface ResourceDetailData {
   detail: ResourceDetail;
   decimals: number;
+  /**
+   * The client pay-submission mode (260622-wlu). "live" selects the operator-gated
+   * fail-loud submitter; anything else (the autonomous default) routes the signed cap
+   * back through this route's action (the in-process facilitator). Derived server-side
+   * from STUDIO_DATA_ADAPTER so the browser inherits the same fixture/live boundary.
+   */
+  payMode: string;
 }
 
 export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDetailData> {
@@ -67,7 +77,11 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
 
   // Runtime money scale read through the adapter (no 6/1e6 literal in the render).
   const { decimals } = await adapter.getEscrowBalance(detail.payout);
-  return { detail, decimals };
+  // The client pay-submission mode inherits the same fixture/live boundary the adapter
+  // uses (selectAdapter): live -> the fail-loud live submitter; anything else -> the
+  // deterministic fixture path through this action.
+  const payMode = process.env.STUDIO_DATA_ADAPTER === "live" ? "live" : "fixture";
+  return { detail, decimals, payMode };
 }
 
 /**
@@ -130,7 +144,7 @@ function sandboxToState(sandbox: ResourceDetail["sandbox"]): StatusState {
 }
 
 export default function ResourceDetailRoute(): React.ReactElement {
-  const { detail, decimals } = useLoaderData<typeof loader>();
+  const { detail, decimals, payMode } = useLoaderData<typeof loader>();
   const base = BigInt(detail.pricing.base);
   const cap = BigInt(detail.pricing.max);
   const isMetered = detail.pricing.model === "metered";
@@ -182,6 +196,27 @@ export default function ResourceDetailRoute(): React.ReactElement {
     [detail.resourceId],
   );
 
+  // The client-side wallet pay seam (260622-wlu). The signed X-PAYMENT submission routes
+  // through the selected submitter (fixture -> this route's action; live -> fail-loud).
+  // The submitter result IS a PlaygroundResult; usePayPerCall returns it under `result`.
+  const submitPayment = React.useMemo(
+    () => selectSubmitPayment({ resourceId: detail.resourceId, mode: payMode }),
+    [detail.resourceId, payMode],
+  );
+  const { pay } = usePayPerCall({ decimals, submitPayment });
+
+  // onPayWithWallet: the connected wallet signs the escrow CAP for the 402 quote (popup,
+  // no key in the app) and submits it; the browser only signs + submits the cap, the
+  // facilitator keeps reserve-before-run + the gate + settle server-side. The pay result
+  // is the submitter's PlaygroundResult (streamed by the player into the done phase).
+  const onPayWithWallet = React.useCallback(
+    async (quote: AcceptsEntry): Promise<PlaygroundResult> => {
+      const { result } = await pay(quote);
+      return result as PlaygroundResult;
+    },
+    [pay],
+  );
+
   const overview = (
     <div data-testid="detail-overview" className="flex flex-col gap-md">
       <div className="flex flex-wrap items-center gap-md">
@@ -231,6 +266,7 @@ export default function ResourceDetailRoute(): React.ReactElement {
       }}
       cap={cap}
       onRun={onRun}
+      onPayWithWallet={onPayWithWallet}
       requestSchema={requestSchema}
     />
   );

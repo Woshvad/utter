@@ -44,6 +44,16 @@ export interface PlaygroundPlayerProps {
    * raw-JSON editor is the default - the current behavior preserved.
    */
   requestSchema?: RequestSchema;
+  /**
+   * OPTIONAL client-side pay seam (260622-wlu). When provided, the PaywallSheet pay
+   * triggers a connected-wallet signing of the escrow CAP authorization for the 402
+   * quote (no key in the app) and submits it through the screen's submit seam, then
+   * streams the result. When ABSENT (the existing tests + any caller that only wires
+   * onRun), pay falls back to the current onRun({pay:true}) behavior so nothing
+   * regresses. The browser only signs + submits the cap; the facilitator keeps
+   * enforcing reserve-before-run + settle min(computed, cap) + exactly-once.
+   */
+  onPayWithWallet?: (quote: AcceptsEntry) => Promise<PlaygroundResult>;
 }
 
 type RunState =
@@ -60,6 +70,7 @@ export function PlaygroundPlayer({
   onRun,
   funded = false,
   requestSchema,
+  onPayWithWallet,
 }: PlaygroundPlayerProps): React.ReactElement {
   const schema: RequestSchema = requestSchema ?? { methods: [], fields: [] };
   const hasFields = schema.fields.length > 0;
@@ -100,9 +111,42 @@ export function PlaygroundPlayer({
     [onRun, requestBody, mode, hasFields, schema.fields, values],
   );
 
-  const onPay = React.useCallback(() => {
-    void doRun({ pay: true });
-  }, [doRun]);
+  // Pay the 402 with the CONNECTED WALLET when the client pay seam is wired (260622-wlu):
+  // sign the escrow CAP authorization for this paywall's quote in the wallet (popup, no
+  // key in the app), submit it through the screen's seam, and stream the result into the
+  // `done` phase. When the seam is ABSENT, fall back to the current onRun({pay:true})
+  // server path so the existing tests + callers do not regress. The browser only signs +
+  // submits a cap; the facilitator keeps the gate + reserve-before-run server-side.
+  const onPay = React.useCallback(
+    (quote: AcceptsEntry) => {
+      if (!onPayWithWallet) {
+        void doRun({ pay: true });
+        return;
+      }
+      void (async () => {
+        setState({ phase: "running" });
+        const started =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        try {
+          const result = await onPayWithWallet(quote);
+          const ended =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
+          const latencyMs =
+            result.handlerMs ?? Math.max(0, Math.round(ended - started));
+          if (!result.paid && result.paywall) {
+            setState({ phase: "paywall", quote: result.paywall.quote as AcceptsEntry });
+            return;
+          }
+          setState({ phase: "done", result, latencyMs });
+        } catch {
+          // Keep the paywall up so the buyer can retry (the wallet may have been
+          // rejected or the submission failed). No error detail is surfaced here.
+          setState({ phase: "paywall", quote });
+        }
+      })();
+    },
+    [onPayWithWallet, doRun],
+  );
 
   return (
     <div className="flex flex-col gap-md" data-testid="playground-player" data-resource={resourceId}>
@@ -179,7 +223,12 @@ export function PlaygroundPlayer({
 
       {/* the 402 paywall beat slides in when the buyer is unfunded */}
       {state.phase === "paywall" ? (
-        <PaywallSheet quote={state.quote} decimals={decimals} funded={funded} onPay={onPay} />
+        <PaywallSheet
+          quote={state.quote}
+          decimals={decimals}
+          funded={funded}
+          onPay={() => onPay(state.quote)}
+        />
       ) : null}
     </div>
   );
