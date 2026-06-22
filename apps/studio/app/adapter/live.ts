@@ -64,7 +64,7 @@ export class RequiresLiveServicesError extends Error {
  *  on-chain mint); Publish reflects the real index upsert that already ran. The logs
  *  carry only non-secret human prose (BuildEvent.log contract). */
 const LOCAL_REAL_BUILD_EVENTS: readonly BuildEvent[] = [
-  { stage: "Generate", status: "running", log: "scaffold-generating handler bundle" },
+  { stage: "Generate", status: "running", log: "generating handler bundle" },
   { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" },
   { stage: "Deploy", status: "running", log: "deploy (local-sim): in-process, no container" },
   { stage: "Deploy", status: "ok", log: "deploy (local-sim): sandbox simulated up" },

@@ -13,8 +13,10 @@
 //
 // node builtins + the existing dotenv devDep only. No new npm package.
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { config as loadEnv } from "dotenv";
 
 // Resolve the repo root from this file (scripts/dev.mjs -> repo root) so .env.local
@@ -25,9 +27,25 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // mirrors the facilitator bootstrap; a missing file is a no-op (dotenv is quiet).
 loadEnv({ path: resolve(repoRoot, ".env.local") });
 
+// Live-studio wiring (dev-machine). When an ANTHROPIC_API_KEY is staged (the operator
+// wants real AI generation), default the studio to the LIVE adapter so `utter a sentence`
+// generates for real, AND isolate the Agent SDK's config dir to a fresh empty dir so it
+// authenticates with ANTHROPIC_API_KEY instead of this machine's interactive Claude Code
+// subscription OAuth (a dev-only collision that 401s the SDK; a server with only the key
+// set never hits it - see memory live-generation-dev-run). An explicitly-set
+// STUDIO_DATA_ADAPTER / CLAUDE_CONFIG_DIR is always honored. The key value is never logged.
+const childEnv = { ...process.env };
+const haveAnthropicKey = (process.env.ANTHROPIC_API_KEY ?? "").trim().length > 0;
+if (haveAnthropicKey) {
+  if (!childEnv.STUDIO_DATA_ADAPTER) childEnv.STUDIO_DATA_ADAPTER = "live";
+  if (!childEnv.CLAUDE_CONFIG_DIR) {
+    childEnv.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "utter-agent-cfg-"));
+  }
+}
+
 // shell:true so the `pnpm` shim resolves on Windows (the builder runs Windows 11;
 // this also runs under WSL2). stdio:inherit forwards each child's output directly.
-const spawnOpts = { stdio: "inherit", shell: true, env: process.env, cwd: repoRoot };
+const spawnOpts = { stdio: "inherit", shell: true, env: childEnv, cwd: repoRoot };
 
 /** The live child handles, so SIGINT/SIGTERM can forward the signal to each. */
 const children = [];
@@ -61,6 +79,11 @@ function shutdown(signal) {
 // (2) ALWAYS start the studio.
 startChild("studio", ["--filter", "@utter/studio", "dev"]);
 console.log("studio dev starting on http://localhost:3000 (react-router dev default)");
+console.log(
+  childEnv.STUDIO_DATA_ADAPTER === "live"
+    ? "studio adapter: LIVE - real AI generation on (ANTHROPIC_API_KEY staged; Agent SDK config dir isolated)"
+    : "studio adapter: fixture - set ANTHROPIC_API_KEY in .env.local for real AI generation",
+);
 
 // (3) Start the facilitator only when a relayer key is present and non-empty.
 // Trim and check length (mirroring the server.ts fail-fast); never print the value.
