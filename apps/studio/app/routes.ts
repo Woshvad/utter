@@ -8,6 +8,7 @@
 //   /metrics                 -> the OBS-01 Prometheus exposition      [token/session]
 //   /resources/:id           -> the resource-detail loader + screen (STU-03)
 //   /resources/:id/events    -> the SSE build-stream resource route (STU-02)
+//   /creators/:address       -> the public creator channel profile (loader + screen)
 //   /auth                    -> the SIWE handshake (GET nonce / POST verify, STU-05)
 //
 // WR-01: dashboard/wallet/metrics existed on disk but were unregistered (dead); they
@@ -27,5 +28,6 @@ export default [
   route("metrics", "routes/metrics.ts"),
   route("resources/:id", "routes/resources.$id.tsx"),
   route("resources/:id/events", "routes/resources.$id.events.ts"),
+  route("creators/:address", "routes/creators.$address.tsx"),
   route("auth", "routes/auth.tsx"),
 ] satisfies RouteConfig;
