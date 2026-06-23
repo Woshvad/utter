@@ -1,7 +1,7 @@
 // BuildStepBlock renders one square step of the deploy pipeline (consumed by Plan
 // 04's BuildStream). These tests pin all five visual states with shape + color so
 // meaning is never color-only, and the plain failure reason on failure. BauhausChart
-// is also covered: flat triad SVG bars with mono labels, no gradient/3D.
+// is also covered: flat triad bars with both axes, no per-bar labels, no gradient/3D.
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { BuildStepBlock } from "../../app/components/build/BuildStepBlock";
@@ -57,7 +57,7 @@ describe("BuildStepBlock", () => {
 });
 
 describe("BauhausChart", () => {
-  it("renders one flat SVG bar per data point with mono labels", () => {
+  it("renders one flat bar per data point (no per-bar labels, per the comp)", () => {
     render(
       <BauhausChart
         series={[
@@ -71,7 +71,8 @@ describe("BauhausChart", () => {
     );
     const chart = screen.getByTestId("bauhaus-chart");
     expect(within(chart).getAllByTestId("chart-bar")).toHaveLength(3);
-    expect(within(chart).getByText("mon")).toBeInTheDocument();
+    // The comp draws no per-bar x-axis text labels; the chart renders bars only.
+    expect(within(chart).queryByText("mon")).toBeNull();
     expect(chart).toHaveAttribute("data-color", "yellow");
   });
 
