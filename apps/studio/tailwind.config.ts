@@ -71,6 +71,15 @@ const config: Config = {
         sidebar: "240px",
         topbar: "64px",
         topbarwide: "72px",
+        // 8px spacing base with 4px fine control (UI design prompt). Components use
+        // these suffixes everywhere via gap/p/px/py/m/mx/my/etc.
+        "2xs": "4px",
+        xs: "8px",
+        sm: "12px",
+        md: "16px",
+        lg: "24px",
+        xl: "32px",
+        "2xl": "48px",
       },
       maxWidth: {
         content: "1320px",
