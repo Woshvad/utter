@@ -29,6 +29,10 @@ export interface ResourceCardProps {
   /** Force a motif variant (0|1|2); defaults to a deterministic pick from the id. */
   motif?: 0 | 1 | 2;
   href?: string;
+  /** Landing-strip compact form (comp 148-158): title (14px) + yellow price ONLY -
+   *  hides the creator row, the calls figure, and the verified badge. Default false
+   *  keeps the full discover card unchanged. */
+  compact?: boolean;
 }
 
 /** Cheap deterministic hash of a seed string (FNV-ish). */
@@ -129,6 +133,7 @@ export function ResourceCard({
   thumbHeight = 150,
   motif,
   href,
+  compact = false,
 }: ResourceCardProps): React.ReactElement {
   const model = card.pricing.model === "metered" ? "metered" : "flat";
   const baseUnits = BigInt(card.pricing.base);
@@ -155,7 +160,7 @@ export function ResourceCard({
         style={{ height: thumbHeight }}
       >
         <MotifTile motif={resolvedMotif} accent={accent} />
-        {verified ? (
+        {verified && !compact ? (
           <div className="absolute bottom-[12px] left-[12px] flex items-center gap-[6px] border border-hairline bg-canvas px-[8px] py-[4px]">
             <span
               aria-hidden="true"
@@ -167,41 +172,56 @@ export function ResourceCard({
         ) : null}
       </div>
 
-      <div className="p-[14px]">
-        {/* lowercase title */}
-        <h3 className="mb-[10px] font-display text-[15px] font-semibold tracking-tight text-ink lowercase">
-          {card.slug}
-        </h3>
-
-        {/* creator row: colored avatar + name + "/100" reputation */}
-        <div className="mb-[12px] flex items-center gap-[8px]">
-          <span
-            aria-hidden="true"
-            className="inline-block shrink-0 rounded-full"
-            style={{ width: 18, height: 18, background: creatorColor }}
-          />
-          <span className="font-mono text-[12px] text-ink-muted lowercase">
-            {creatorName ?? `agent ${card.agentId}`}
-          </span>
-          <span aria-hidden="true" className="font-mono text-[11px] text-ink-faint">
-            ·
-          </span>
-          <ReputationBadge feedbackCount={card.reputation} variant="score" />
-        </div>
-
-        {/* price + calls figure */}
-        <div className="flex items-center justify-between">
+      {compact ? (
+        // Landing-strip compact body (comp 154-157): 14px title + yellow price only.
+        <div className="p-[14px]">
+          <h3 className="mb-[8px] font-display text-[14px] font-semibold tracking-tight text-ink lowercase">
+            {card.slug}
+          </h3>
           <PricePill
             baseUnits={baseUnits}
             decimals={decimals}
             model={model}
             capBaseUnits={model === "metered" ? capUnits : undefined}
           />
-          <span className="font-mono text-[11px] text-ink-faint tabular-nums lowercase">
-            {callsFmt}
-          </span>
         </div>
-      </div>
+      ) : (
+        <div className="p-[14px]">
+          {/* lowercase title */}
+          <h3 className="mb-[10px] font-display text-[15px] font-semibold tracking-tight text-ink lowercase">
+            {card.slug}
+          </h3>
+
+          {/* creator row: colored avatar + name + "/100" reputation */}
+          <div className="mb-[12px] flex items-center gap-[8px]">
+            <span
+              aria-hidden="true"
+              className="inline-block shrink-0 rounded-full"
+              style={{ width: 18, height: 18, background: creatorColor }}
+            />
+            <span className="font-mono text-[12px] text-ink-muted lowercase">
+              {creatorName ?? `agent ${card.agentId}`}
+            </span>
+            <span aria-hidden="true" className="font-mono text-[11px] text-ink-faint">
+              ·
+            </span>
+            <ReputationBadge feedbackCount={card.reputation} variant="score" />
+          </div>
+
+          {/* price + calls figure */}
+          <div className="flex items-center justify-between">
+            <PricePill
+              baseUnits={baseUnits}
+              decimals={decimals}
+              model={model}
+              capBaseUnits={model === "metered" ? capUnits : undefined}
+            />
+            <span className="font-mono text-[11px] text-ink-faint tabular-nums lowercase">
+              {callsFmt}
+            </span>
+          </div>
+        </div>
+      )}
     </article>
   );
 

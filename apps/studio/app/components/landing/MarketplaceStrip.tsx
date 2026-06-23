@@ -1,8 +1,9 @@
-// MarketplaceStrip - the "top on the marketplace" strip on the landing page. Reuses
-// the existing discover ResourceCard so every price renders ONLY through the
-// PricePill -> UsdcAmount money surface (no money literal here, T-v7q-01). The cards
-// are fed by the loader (adapter.listMarketplace read-through, T-v7q-02); this
-// component never recomputes a price, identity, or bond.
+// MarketplaceStrip - the "top on the marketplace" strip on the landing page (comp
+// 141-161). Reuses the discover ResourceCard in its `compact` form (120px thumbnail +
+// 14px title + yellow price only) so every price still renders ONLY through the
+// PricePill -> UsdcAmount money surface (no money literal here, T-v7q-01). The cards are
+// fed by the loader (adapter.listMarketplace read-through, T-v7q-02); this component
+// never recomputes a price, identity, or bond.
 import * as React from "react";
 import { Link } from "react-router";
 import type { ResourceCardData } from "../../adapter/types";
@@ -17,25 +18,30 @@ export interface MarketplaceStripProps {
 
 export function MarketplaceStrip({ cards, decimals }: MarketplaceStripProps): React.ReactElement {
   return (
-    <section data-testid="landing-marketplace" className="mx-auto max-w-6xl px-xl py-xl">
-      <div className="mb-lg flex items-baseline justify-between">
-        <h2 className="text-display font-display font-semibold tracking-tight text-ink lowercase">
+    <section
+      data-testid="landing-marketplace"
+      className="mx-auto max-w-[1320px] px-[32px] pt-[56px] pb-[80px]"
+    >
+      <div className="mb-[24px] flex items-baseline justify-between">
+        <h2 className="text-[28px] font-display font-semibold tracking-[-0.02em] text-ink lowercase">
           top on the marketplace
         </h2>
-        <Link to="/discover" className="font-mono text-caption-mono text-blue lowercase">
-          see all -&gt;
+        <Link to="/discover" className="font-mono text-[13px] text-blue lowercase">
+          see all →
         </Link>
       </div>
 
       {cards.length === 0 ? (
         <p className="text-body text-ink-muted lowercase">nothing listed yet.</p>
       ) : (
-        <div className="grid grid-cols-1 gap-md sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-4 gap-[16px]">
           {cards.map((card) => (
             <ResourceCard
               key={card.resourceId}
               card={card}
               decimals={decimals}
+              thumbHeight={120}
+              compact
               href={`/resources/${card.resourceId}`}
             />
           ))}
