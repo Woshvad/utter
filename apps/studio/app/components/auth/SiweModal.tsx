@@ -10,8 +10,27 @@
 // SiweMessage binds it (the replay guard, enforced server-side on verify).
 import * as React from "react";
 import { useAccount, useConnect, useSignMessage } from "wagmi";
+import type { Connector } from "wagmi";
 import { SiweMessage } from "siwe";
 import { arcTestnet } from "@utter/chain";
+
+/**
+ * Find a configured connector by a case-insensitive id/name match against any of the
+ * given aliases (e.g. "injected"/"metamask"). Returns undefined when none is configured
+ * so the caller can disable the button rather than silently falling back to another
+ * wallet.
+ */
+function findConnector(
+  connectors: readonly Connector[],
+  aliases: readonly string[],
+): Connector | undefined {
+  const wanted = aliases.map((a) => a.toLowerCase());
+  return connectors.find((c) => {
+    const id = c.id.toLowerCase();
+    const name = c.name.toLowerCase();
+    return wanted.some((w) => id.includes(w) || name.includes(w));
+  });
+}
 
 export interface SiweModalProps {
   /** The server-issued one-time nonce to embed in the signed message. */
@@ -31,13 +50,21 @@ export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): Reac
   const [phase, setPhase] = React.useState<Phase>("connect");
   const [error, setError] = React.useState<string | null>(null);
 
-  const onConnectAndSign = React.useCallback(async () => {
+  // Resolve the connector each button targets. The injected/metaMask connector backs
+  // the "metamask" button and the primary action (prefer injected); walletConnect backs
+  // its own button. A button whose connector is not configured is disabled below.
+  const injectedConnector = findConnector(connectors, ["injected", "metamask", "metaMask"]);
+  const walletConnectConnector = findConnector(connectors, ["walletconnect", "walletConnect"]);
+  const primaryConnector = injectedConnector ?? connectors[0];
+
+  const onConnectAndSign = React.useCallback(
+    async (target?: Connector) => {
     setError(null);
     try {
-      // 1. connect the injected wallet if not already connected
+      // 1. connect the chosen wallet if not already connected
       let signer = address;
       if (!isConnected) {
-        const connector = connectors[0];
+        const connector = target ?? injectedConnector ?? connectors[0];
         if (!connector) throw new Error("no wallet connector available");
         connect({ connector });
         // the account hook updates async; the user re-clicks once connected, or the
@@ -74,7 +101,9 @@ export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): Reac
       // Surface a short, non-secret message only (never the signature or a stack).
       setError(e instanceof Error ? e.message : "sign-in failed");
     }
-  }, [address, isConnected, connect, connectors, nonce, signMessageAsync, onSign]);
+    },
+    [address, isConnected, connect, connectors, injectedConnector, nonce, signMessageAsync, onSign],
+  );
 
   const signing = busy || phase === "signing";
   const label = signing ? "signing…" : "connect & sign";
@@ -141,8 +170,8 @@ export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): Reac
         <button
           type="button"
           data-testid="siwe-connect-sign"
-          onClick={() => void onConnectAndSign()}
-          disabled={signing}
+          onClick={() => void onConnectAndSign(primaryConnector)}
+          disabled={signing || !primaryConnector}
           className="flex w-full items-center justify-center gap-[10px] border-none bg-red p-[16px] text-[15px] font-display font-semibold text-white cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-yellow disabled:opacity-50 lowercase"
           style={{ color: "#fff" }}
         >
@@ -162,16 +191,18 @@ export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): Reac
         <div className="mt-[14px] flex gap-[10px]">
           <button
             type="button"
-            onClick={() => void onConnectAndSign()}
-            disabled={signing}
+            data-testid="siwe-metamask"
+            onClick={() => void onConnectAndSign(injectedConnector)}
+            disabled={signing || !injectedConnector}
             className="flex-1 border border-hairline bg-transparent p-[13px] font-mono text-[13px] text-ink cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50 lowercase"
           >
             metamask
           </button>
           <button
             type="button"
-            onClick={() => void onConnectAndSign()}
-            disabled={signing}
+            data-testid="siwe-walletconnect"
+            onClick={() => void onConnectAndSign(walletConnectConnector)}
+            disabled={signing || !walletConnectConnector}
             className="flex-1 border border-hairline bg-transparent p-[13px] font-mono text-[13px] text-ink cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50 lowercase"
           >
             walletconnect
