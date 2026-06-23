@@ -73,6 +73,28 @@ export function ChannelHeader({
   const score = Math.max(0, Math.min(100, Math.round(repScore)));
   const filled = Math.round(score / 10);
 
+  // Client-side follow toggle persisted in localStorage, keyed by the creator address.
+  // Initialize false for SSR and sync from storage after mount so the server and first
+  // client render agree (no hydration mismatch).
+  const followKey = `utter:follow:${address}`;
+  const [following, setFollowing] = React.useState(false);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    setFollowing(window.localStorage.getItem(followKey) === "1");
+  }, [followKey]);
+
+  const toggleFollow = React.useCallback(() => {
+    setFollowing((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        if (next) window.localStorage.setItem(followKey, "1");
+        else window.localStorage.removeItem(followKey);
+      }
+      return next;
+    });
+  }, [followKey]);
+
   return (
     <header data-testid="channel-header">
       {/* full-bleed 140px banner with the three comp shapes (comp 689-693). */}
@@ -118,9 +140,15 @@ export function ChannelHeader({
           </div>
           <button
             type="button"
-            className="ml-auto bg-red px-[22px] py-[11px] font-mono text-[14px] font-semibold text-white"
+            onClick={toggleFollow}
+            aria-pressed={following}
+            className={[
+              "ml-auto px-[22px] py-[11px] font-mono text-[14px] font-semibold text-white",
+              // Following uses the blue identity role; not-following keeps the red CTA.
+              following ? "bg-blue" : "bg-red",
+            ].join(" ")}
           >
-            + follow
+            {following ? "following" : "+ follow"}
           </button>
         </div>
 

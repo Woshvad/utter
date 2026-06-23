@@ -14,6 +14,9 @@
 // (0x1111...1111) and getResourceDetail returns the SAME detail for every id, so the
 // loader associates BOTH listed fixture cards to FIXTURE_CREATOR.
 import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { ChannelHeader } from "../app/components/profile/ChannelHeader";
 import { FIXTURE_CREATOR } from "../app/fixtures/index";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -199,5 +202,46 @@ describe("creator-profile screen (channel header + apis grid)", () => {
 
     expect(screen.getByText(/nothing here yet\./i)).toBeInTheDocument();
     expect(screen.getByText(/utter the first one\./i)).toBeInTheDocument();
+  });
+});
+
+describe("ChannelHeader follow toggle", () => {
+  const PROPS = {
+    address: FIXTURE_CREATOR,
+    repScore: 50,
+    reputation: 5n,
+    apiCount: 1,
+    totalCalls: 10,
+    totalEarnings: 1000n,
+    decimals: 6,
+  };
+
+  it("toggles follow state, flips aria-pressed + label, and persists to localStorage", async () => {
+    const user = userEvent.setup();
+    render(<ChannelHeader {...PROPS} />);
+
+    const button = screen.getByRole("button", { name: /\+ follow/i });
+    expect(button).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(button);
+    const followingBtn = screen.getByRole("button", { name: /^following$/i });
+    expect(followingBtn).toHaveAttribute("aria-pressed", "true");
+    expect(localStorage.getItem(`utter:follow:${FIXTURE_CREATOR}`)).toBe("1");
+
+    await user.click(followingBtn);
+    expect(screen.getByRole("button", { name: /\+ follow/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(localStorage.getItem(`utter:follow:${FIXTURE_CREATOR}`)).toBeNull();
+  });
+
+  it("hydrates the following state from localStorage after mount", async () => {
+    localStorage.setItem(`utter:follow:${FIXTURE_CREATOR}`, "1");
+    render(<ChannelHeader {...PROPS} />);
+    expect(await screen.findByRole("button", { name: /^following$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });
