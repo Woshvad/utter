@@ -66,6 +66,9 @@ export interface DiscoverData {
   sort: SortOrder;
   /** The distinct categories present (drives the CategoryChips). */
   categories: string[];
+  /** Real per-card settled-calls counts, sourced from the adapter getRevenue (keyed by
+   *  resourceId). The card calls figure renders from this, never from a hash. */
+  callsById: Record<string, number>;
 }
 
 /**
@@ -135,7 +138,18 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<DiscoverD
   const sort = parseSort(sp.get("sort"));
   cards = sortCards(cards, sort);
 
-  return { cards, decimals, criteria, query, sort, categories };
+  // Real calls per card, sourced THROUGH the adapter getRevenue (fixture-backed by
+  // default). This replaces the old hash-fabricated card figure with a legitimate
+  // adapter-sourced count; a card with no revenue read simply omits the figure.
+  const callsEntries = await Promise.all(
+    cards.map(async (card) => {
+      const revenue = await adapter.getRevenue(card.resourceId);
+      return [card.resourceId, revenue.calls] as const;
+    }),
+  );
+  const callsById: Record<string, number> = Object.fromEntries(callsEntries);
+
+  return { cards, decimals, criteria, query, sort, categories, callsById };
 }
 
 /** Build a discover URL preserving the current params with one key overridden/removed. */
@@ -152,7 +166,8 @@ function withParam(
 }
 
 export default function DiscoverRoute(): React.ReactElement {
-  const { cards, decimals, criteria, query, sort, categories } = useLoaderData<typeof loader>();
+  const { cards, decimals, criteria, query, sort, categories, callsById } =
+    useLoaderData<typeof loader>();
 
   // Reconstruct the current params so chips/sort links preserve the rest of the state.
   const params = React.useMemo(() => {
@@ -216,6 +231,7 @@ export default function DiscoverRoute(): React.ReactElement {
         cards={cards}
         decimals={decimals}
         query={query}
+        callsById={callsById}
         hrefFor={(card) => `/resources/${card.resourceId}`}
       />
     </div>

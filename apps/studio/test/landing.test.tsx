@@ -25,6 +25,24 @@ describe("landing loader (read-through top marketplace)", () => {
     expect(typeof data.decimals).toBe("number");
   });
 
+  it("includes a real adapter-sourced calls per card (equal to getRevenue(id).calls)", async () => {
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+
+    const { loader } = await import("../app/routes/_index");
+    const data = await loader({
+      request: new Request("http://x/"),
+      params: {},
+      context: {},
+    } as never);
+
+    // The strip's calls figures are sourced THROUGH the adapter getRevenue, not hashed.
+    for (const card of data.cards) {
+      const revenue = await adapter.getRevenue(card.resourceId);
+      expect(data.callsById[card.resourceId]).toBe(revenue.calls);
+    }
+  });
+
   it("lists through the adapter with the unfiltered top-list criteria", async () => {
     const selectMod = await import("../app/adapter/select");
     const adapter = selectMod.selectAdapter(process.env);

@@ -9,8 +9,9 @@
 // Read-through mandate (T-06-REDERIVE): this component RENDERS the Phase-5 card
 // projection. It never recomputes a price or identity - `pricing.base` / `.max` are
 // passed straight to UsdcAmount/PricePill as base units. The accent/motif/creator
-// color and the calls figure are deterministic presentation derived from the id - they
-// are not money and never touch the price/reputation projection.
+// color are deterministic presentation derived from the id - they are not money. The
+// calls figure is an OPTIONAL prop sourced from the adapter getRevenue; when it is
+// absent the figure is omitted (never fabricated from a hash).
 import * as React from "react";
 import type { ResourceCardData } from "../../adapter/types";
 import { PricePill } from "../primitives/PricePill";
@@ -28,6 +29,9 @@ export interface ResourceCardProps {
   thumbHeight?: number;
   /** Force a motif variant (0|1|2); defaults to a deterministic pick from the id. */
   motif?: 0 | 1 | 2;
+  /** Real settled-calls figure sourced from the adapter getRevenue. When omitted the
+   *  card renders no calls figure (never a fabricated stand-in). */
+  calls?: number;
   href?: string;
   /** Landing-strip compact form (comp 148-158): title (14px) + yellow price ONLY -
    *  hides the creator row, the calls figure, and the verified badge. Default false
@@ -132,6 +136,7 @@ export function ResourceCard({
   creatorName,
   thumbHeight = 150,
   motif,
+  calls,
   href,
   compact = false,
 }: ResourceCardProps): React.ReactElement {
@@ -144,10 +149,9 @@ export function ResourceCard({
   const resolvedMotif: 0 | 1 | 2 = motif ?? ((h % 3) as 0 | 1 | 2);
   const accent = TRIAD[h % 3]!;
   const creatorColor = TRIAD[(h >> 3) % 3]!;
-  // A stable projected calls figure (the projection has no raw calls count): scale a
-  // hash into a plausible 6-7 digit figure so the label is deterministic + mono-exact.
-  const calls = 100_000 + (h % 9_900_000);
-  const callsFmt = `${calls.toLocaleString("en-US")} calls`;
+  // The calls figure is rendered ONLY when a real adapter-sourced count is passed; an
+  // absent count omits the figure rather than inventing one.
+  const callsFmt = calls != null ? `${calls.toLocaleString("en-US")} calls` : null;
 
   const body = (
     <article
@@ -208,7 +212,7 @@ export function ResourceCard({
             <ReputationBadge feedbackCount={card.reputation} variant="score" />
           </div>
 
-          {/* price + calls figure */}
+          {/* price + (optional) calls figure */}
           <div className="flex items-center justify-between">
             <PricePill
               baseUnits={baseUnits}
@@ -216,9 +220,11 @@ export function ResourceCard({
               model={model}
               capBaseUnits={model === "metered" ? capUnits : undefined}
             />
-            <span className="font-mono text-[11px] text-ink-faint tabular-nums lowercase">
-              {callsFmt}
-            </span>
+            {callsFmt !== null ? (
+              <span className="font-mono text-[11px] text-ink-faint tabular-nums lowercase">
+                {callsFmt}
+              </span>
+            ) : null}
           </div>
         </div>
       )}

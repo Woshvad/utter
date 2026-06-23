@@ -14,6 +14,9 @@ export interface CardGridProps {
   query?: string;
   /** Map resourceId -> verified flag (projected separately from the card). */
   verifiedById?: Record<string, boolean>;
+  /** Map resourceId -> real adapter-sourced calls count. Cards without an entry render
+   *  no calls figure (never a fabricated one). */
+  callsById?: Record<string, number>;
   /** Build an href for a card (optional). */
   hrefFor?: (card: ResourceCardData) => string;
   /** How many skeletons to show while loading. */
@@ -53,6 +56,7 @@ export function CardGrid({
   loading,
   query,
   verifiedById,
+  callsById,
   hrefFor,
   skeletonCount = 6,
   thumbHeight = 150,
@@ -106,6 +110,7 @@ export function CardGrid({
           card={card}
           decimals={decimals}
           verified={verifiedById?.[card.resourceId]}
+          calls={callsById?.[card.resourceId]}
           href={hrefFor?.(card)}
           thumbHeight={thumbHeight}
         />

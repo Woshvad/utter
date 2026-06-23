@@ -21,6 +21,9 @@ export interface LandingData {
   cards: ResourceCardData[];
   /** Decimals from a runtime read (passed straight to the money renders). */
   decimals: number;
+  /** Real per-card settled-calls counts, sourced from the adapter getRevenue (keyed by
+   *  resourceId). Honest adapter-sourced figures, never hash-derived. */
+  callsById: Record<string, number>;
 }
 
 /**
@@ -39,7 +42,17 @@ export async function loader({ request: _request }: LoaderFunctionArgs): Promise
   const all = await adapter.listMarketplace({});
   const cards = all.slice(0, 4);
 
-  return { cards, decimals };
+  // Real calls per card, sourced THROUGH the adapter getRevenue (fixture-backed by
+  // default) - the legitimate data path, never a hash-fabricated figure.
+  const callsEntries = await Promise.all(
+    cards.map(async (card) => {
+      const revenue = await adapter.getRevenue(card.resourceId);
+      return [card.resourceId, revenue.calls] as const;
+    }),
+  );
+  const callsById: Record<string, number> = Object.fromEntries(callsEntries);
+
+  return { cards, decimals, callsById };
 }
 
 /** The slim marketing top bar (wordmark left; discover / connect / +utter links right).
@@ -94,7 +107,7 @@ function TopBar(): React.ReactElement {
 }
 
 export default function LandingRoute(): React.ReactElement {
-  const { cards, decimals } = useLoaderData<typeof loader>();
+  const { cards, decimals, callsById } = useLoaderData<typeof loader>();
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
@@ -103,7 +116,7 @@ export default function LandingRoute(): React.ReactElement {
         <Hero />
       </div>
       <HowItWorks />
-      <MarketplaceStrip cards={cards} decimals={decimals} />
+      <MarketplaceStrip cards={cards} decimals={decimals} callsById={callsById} />
     </div>
   );
 }

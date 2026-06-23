@@ -14,9 +14,17 @@ export interface MarketplaceStripProps {
   cards: ResourceCardData[];
   /** Decimals from a runtime read, passed through to the money renders. */
   decimals: number;
+  /** Real per-card settled-calls counts from the adapter getRevenue (keyed by
+   *  resourceId). The compact strip card hides the calls figure, but the honest count
+   *  is threaded through so it is never fabricated if the variant ever shows it. */
+  callsById?: Record<string, number>;
 }
 
-export function MarketplaceStrip({ cards, decimals }: MarketplaceStripProps): React.ReactElement {
+export function MarketplaceStrip({
+  cards,
+  decimals,
+  callsById,
+}: MarketplaceStripProps): React.ReactElement {
   return (
     <section
       data-testid="landing-marketplace"
@@ -42,6 +50,7 @@ export function MarketplaceStrip({ cards, decimals }: MarketplaceStripProps): Re
               decimals={decimals}
               thumbHeight={120}
               compact
+              calls={callsById?.[card.resourceId]}
               href={`/resources/${card.resourceId}`}
             />
           ))}

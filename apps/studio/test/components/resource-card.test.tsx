@@ -70,6 +70,18 @@ describe("ResourceCard", () => {
     render(<ResourceCard card={FLAT_CARD} decimals={6} verified />);
     expect(screen.getByText("$0.01")).toBeInTheDocument();
   });
+
+  it("renders the calls figure ONLY when a real adapter-sourced count is passed", () => {
+    render(<ResourceCard card={FLAT_CARD} decimals={6} verified calls={1284910} />);
+    // the count is rendered with grouping + the "calls" word, sourced (not hashed)
+    expect(screen.getByText("1,284,910 calls")).toBeInTheDocument();
+  });
+
+  it("omits the calls figure entirely when no count is passed (no fabricated stand-in)", () => {
+    render(<ResourceCard card={FLAT_CARD} decimals={6} verified />);
+    // nothing matching the old hash-derived "N calls" label should render
+    expect(screen.queryByText(/\bcalls\b/i)).toBeNull();
+  });
 });
 
 describe("CardGrid", () => {

@@ -24,6 +24,25 @@ describe("discover loader (read-through marketplace browse)", () => {
     expect(typeof data.decimals).toBe("number");
   });
 
+  it("includes a real adapter-sourced calls per card (equal to getRevenue(id).calls)", async () => {
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+
+    const { loader } = await import("../app/routes/discover");
+    const data = await loader({
+      request: new Request("http://x/discover"),
+      params: {},
+      context: {},
+    } as never);
+
+    // Every listed card carries a calls figure sourced THROUGH the adapter getRevenue,
+    // never a hash-fabricated number.
+    for (const card of data.cards) {
+      const revenue = await adapter.getRevenue(card.resourceId);
+      expect(data.callsById[card.resourceId]).toBe(revenue.calls);
+    }
+  });
+
   it("maps ?category= to FilterCriteria.category (1:1 field map)", async () => {
     const { loader } = await import("../app/routes/discover");
     const data = await loader({
