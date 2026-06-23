@@ -11,6 +11,7 @@ import { Toggle } from "../../app/components/primitives/Toggle";
 import { Tabs } from "../../app/components/primitives/Tabs";
 import { AppShell } from "../../app/components/shell/AppShell";
 import { SidebarNavItem } from "../../app/components/shell/SidebarNavItem";
+import { TopBar } from "../../app/components/shell/TopBar";
 
 describe("Modal", () => {
   it("renders the bordered dialog + scrim with content inside when open", () => {
@@ -99,6 +100,29 @@ describe("AppShell", () => {
     expect(screen.getByText("page content")).toBeInTheDocument();
     // the global + utter primary action lives in the top bar
     expect(screen.getByRole("button", { name: /utter/i })).toBeInTheDocument();
+  });
+});
+
+describe("TopBar search", () => {
+  it("calls onSearch with the typed value on submit (Enter), not per keystroke", async () => {
+    const user = userEvent.setup();
+    const calls: string[] = [];
+    render(<TopBar onSearch={(q) => calls.push(q)} />);
+    const input = screen.getByLabelText("search apis, creators, schemas");
+    await user.type(input, "weather");
+    // No onSearch firing while typing.
+    expect(calls).toEqual([]);
+    await user.keyboard("{Enter}");
+    expect(calls).toEqual(["weather"]);
+  });
+
+  it("is no-op-safe when onSearch is undefined (submitting does not throw)", async () => {
+    const user = userEvent.setup();
+    render(<TopBar />);
+    const input = screen.getByLabelText("search apis, creators, schemas");
+    await user.type(input, "x{Enter}");
+    // reaching here without throwing is the assertion
+    expect(input).toBeInTheDocument();
   });
 });
 

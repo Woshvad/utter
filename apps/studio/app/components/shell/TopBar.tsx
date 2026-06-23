@@ -32,23 +32,36 @@ export function TopBar({
   const hasEscrow = escrowBaseUnits !== undefined && escrowDecimals !== undefined;
   const profileAddress = account ?? FIXTURE_CREATOR;
 
+  // Local controlled query so the search fires on submit (Enter / the search glyph),
+  // not on every keystroke. onSearch stays optional, so the input is no-op-safe.
+  const [query, setQuery] = React.useState("");
+
   return (
     <header className="sticky top-0 z-20 flex h-[64px] flex-none items-center gap-[16px] border-b border-hairline bg-canvas px-[24px]">
       {/* hard-edged 480px search box with a leading hollow-square glyph */}
-      <div className="flex max-w-[480px] flex-1 items-center gap-[10px] border border-hairline bg-raised px-[14px] py-[10px] cursor-text focus-within:ring-2 focus-within:ring-blue">
-        <span
-          aria-hidden="true"
-          className="flex-none"
-          style={{ width: 11, height: 11, border: "2px solid var(--ink-faint)" }}
+      <form
+        role="search"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSearch?.(query);
+        }}
+        className="flex max-w-[480px] flex-1 items-center gap-[10px] border border-hairline bg-raised px-[14px] py-[10px] cursor-text focus-within:ring-2 focus-within:ring-blue"
+      >
+        <button
+          type="submit"
+          aria-label="search"
+          className="flex-none cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue"
+          style={{ width: 11, height: 11, border: "2px solid var(--ink-faint)", background: "transparent" }}
         />
         <input
           type="search"
           aria-label="search apis, creators, schemas"
           placeholder="search apis, creators, schemas…"
-          onChange={(e) => onSearch?.(e.target.value)}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
           className="w-full border-0 bg-transparent font-display text-[14px] text-ink placeholder:text-ink-faint outline-none focus-visible:ring-0"
         />
-      </div>
+      </form>
 
       {/* spacer pins the right cluster to the edge (comp line 225) */}
       <div className="flex-1" />

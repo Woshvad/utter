@@ -81,6 +81,14 @@ export default function ShellLayout(): React.ReactElement {
         escrowDecimals: escrow?.decimals,
         account,
         onUtter: () => navigate("/create"),
+        onSearch: (q) => {
+          // Free-text discover search: the loader reads the `q` param (see discover.tsx).
+          // Only navigate on a non-empty query so an empty submit is a no-op.
+          const trimmed = q.trim();
+          if (trimmed) {
+            navigate(`/discover?${new URLSearchParams({ q: trimmed }).toString()}`);
+          }
+        },
       }}
     >
       <Outlet />
