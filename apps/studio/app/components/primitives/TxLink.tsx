@@ -17,10 +17,10 @@ export interface TxLinkProps {
   className?: string;
 }
 
-/** Truncate a hash to a mono-friendly lead…tail form. */
+/** Truncate a hash to the comp's 6-lead/4-tail mono form (e.g. 0x7a3f…b21c). */
 function truncateHash(hash: string): string {
-  if (hash.length <= 13) return hash;
-  return `${hash.slice(0, 8)}…${hash.slice(-4)}`;
+  if (hash.length <= 11) return hash;
+  return `${hash.slice(0, 6)}…${hash.slice(-4)}`;
 }
 
 /** Join the explorer base and the tx path without a double slash. */

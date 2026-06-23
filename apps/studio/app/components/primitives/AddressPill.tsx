@@ -10,7 +10,9 @@ export interface AddressPillProps {
   lead?: number;
   /** Trailing chars to keep (default 4). */
   tail?: number;
-  /** Show a copy button (default true). */
+  /** Show a copy button (default true). Canonical comp name. */
+  copy?: boolean;
+  /** Back-compat alias for `copy` (default true). `copy` wins when both are set. */
   copyable?: boolean;
   className?: string;
 }
@@ -24,9 +26,12 @@ export function AddressPill({
   address,
   lead = 6,
   tail = 4,
+  copy,
   copyable = true,
   className,
 }: AddressPillProps): React.ReactElement {
+  // `copy` is the canonical comp prop; fall back to the legacy `copyable` alias.
+  const showCopy = copy ?? copyable;
   const [copied, setCopied] = React.useState(false);
   const onCopy = React.useCallback(() => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
@@ -51,7 +56,7 @@ export function AddressPill({
         .join(" ")}
     >
       <span title={address}>{truncate(address, lead, tail)}</span>
-      {copyable ? (
+      {showCopy ? (
         <button
           type="button"
           onClick={onCopy}
