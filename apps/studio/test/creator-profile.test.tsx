@@ -39,6 +39,10 @@ describe("creator-profile loader (read-through by creator)", () => {
     expect(typeof data.totalCalls).toBe("number");
     // the aggregated earnings are the summed creatorShare (a positive projected value).
     expect(data.totalEarnings).toBeGreaterThan(0n);
+    // repScore is an honest 0-100 score derived from the owned cards' real uptime.
+    expect(typeof data.repScore).toBe("number");
+    expect(data.repScore).toBeGreaterThanOrEqual(0);
+    expect(data.repScore).toBeLessThanOrEqual(100);
   });
 
   it("resolves the creator association THROUGH the getResourceDetail seam (spy-asserted)", async () => {
@@ -73,6 +77,8 @@ describe("creator-profile loader (read-through by creator)", () => {
     expect(data.cards.length).toBe(0);
     expect(data.totalEarnings).toBe(0n);
     expect(data.totalCalls).toBe(0);
+    // an unknown creator has no cards, so repScore is honestly 0.
+    expect(data.repScore).toBe(0);
     // decimals is still an honest runtime read even for an unknown creator.
     expect(typeof data.decimals).toBe("number");
   });
@@ -132,7 +138,7 @@ describe("creator-profile screen (channel header + apis grid)", () => {
     return { screen, within };
   }
 
-  it("renders the channel header: avatar + address + reputation + earnings via UsdcAmount", async () => {
+  it("renders the channel header: banner avatar + identity + meter + earnings via UsdcAmount", async () => {
     const { screen, within } = await renderScreen({
       address: FIXTURE_CREATOR,
       cards: TWO_CARDS,
@@ -141,15 +147,23 @@ describe("creator-profile screen (channel header + apis grid)", () => {
       reputation: 19n,
       totalCalls: 256,
       totalEarnings: 1792000n,
+      repScore: 96,
     });
 
     // Scope the header assertions inside the channel-header (the cards in the grid also
-    // carry a reputation-badge in their creator chip, so query within the header only).
+    // carry reputation/avatar marks in their creator chip, so query within the header only).
     const header = screen.getByTestId("channel-header");
     expect(header).toBeInTheDocument();
+    // the 88px avatar circle overlapping the banner.
     expect(within(header).getByTestId("creator-avatar")).toBeInTheDocument();
-    expect(within(header).getByTestId("reputation-badge")).toBeInTheDocument();
-    expect(within(header).getByTestId("address-pill")).toBeInTheDocument();
+    // the comp identity marks: a verified-creator pill + the address handle + follow button.
+    expect(within(header).getByTestId("verified-creator-pill")).toBeInTheDocument();
+    expect(within(header).getByText("verified creator")).toBeInTheDocument();
+    expect(within(header).getByText("+ follow")).toBeInTheDocument();
+    // the 10-segment reputation meter carries the derived score (not feedbackCount).
+    const meter = within(header).getByTestId("reputation-meter");
+    expect(meter).toHaveAttribute("data-score", "96");
+    expect(within(header).getByText(/REPUTATION · 96\/100/)).toBeInTheDocument();
     // earnings render through the single money surface (not hand-formatted).
     expect(within(header).getByTestId("usdc-amount")).toBeInTheDocument();
   });
@@ -163,6 +177,7 @@ describe("creator-profile screen (channel header + apis grid)", () => {
       reputation: 19n,
       totalCalls: 256,
       totalEarnings: 1792000n,
+      repScore: 96,
     });
 
     expect(screen.getByText("weather-now")).toBeInTheDocument();
@@ -179,6 +194,7 @@ describe("creator-profile screen (channel header + apis grid)", () => {
       reputation: 0n,
       totalCalls: 0,
       totalEarnings: 0n,
+      repScore: 0,
     });
 
     expect(screen.getByText(/nothing here yet\./i)).toBeInTheDocument();

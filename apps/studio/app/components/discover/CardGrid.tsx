@@ -18,6 +18,8 @@ export interface CardGridProps {
   hrefFor?: (card: ResourceCardData) => string;
   /** How many skeletons to show while loading. */
   skeletonCount?: number;
+  /** Thumbnail height in px forwarded to each card (default 150; profile uses 130). */
+  thumbHeight?: number;
 }
 
 /** The auto-fill grid (comp 395). */
@@ -53,6 +55,7 @@ export function CardGrid({
   verifiedById,
   hrefFor,
   skeletonCount = 6,
+  thumbHeight = 150,
 }: CardGridProps): React.ReactElement {
   if (loading) {
     return <Skeletons count={skeletonCount} />;
@@ -104,6 +107,7 @@ export function CardGrid({
           decimals={decimals}
           verified={verifiedById?.[card.resourceId]}
           href={hrefFor?.(card)}
+          thumbHeight={thumbHeight}
         />
       ))}
     </div>
