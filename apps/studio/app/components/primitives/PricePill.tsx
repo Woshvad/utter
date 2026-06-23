@@ -1,7 +1,8 @@
 // PricePill - the per-call price chip. Money is mono + exact via UsdcAmount (the
-// single render surface). A flat price shows the base; a metered price shows the
-// base with a `<= cap` suffix (the "<= max metered" treatment from the UI-SPEC).
-// The pill NEVER recomputes a price - it renders the base-unit values it is given.
+// single render surface). A flat price shows the base as "$X / call"; a metered
+// price shows the cap as "<= $X" (the comp's "<= max" treatment). The pill NEVER
+// recomputes a price - it renders the base-unit values it is given. The price text
+// is the triad money accent (yellow) per the comp.
 import * as React from "react";
 import { UsdcAmount } from "./UsdcAmount";
 
@@ -10,7 +11,7 @@ export interface PricePillProps {
   baseUnits: bigint;
   /** Decimals from a runtime read (passed straight to UsdcAmount). */
   decimals: number;
-  /** "flat" or "metered" - metered shows the cap suffix. */
+  /** "flat" or "metered" - metered shows the cap instead of the base. */
   model: "flat" | "metered";
   /** The escrow cap in base units (only rendered when metered). */
   capBaseUnits?: bigint;
@@ -31,23 +32,25 @@ export function PricePill({
       data-model={model}
       className={[
         "inline-flex items-center gap-2xs",
-        "border border-hairline bg-raised",
-        "px-xs py-2xs",
-        "font-mono text-caption-mono text-ink",
+        "border border-hairline",
+        "px-[8px] py-[4px]",
+        "font-mono text-[12px] text-yellow",
         className,
       ]
         .filter(Boolean)
         .join(" ")}
     >
-      <UsdcAmount baseUnits={baseUnits} decimals={decimals} />
-      <span className="text-ink-faint">/call</span>
       {metered && capBaseUnits !== undefined ? (
-        <span className="text-ink-muted">
-          {"≤ "}
+        <>
+          <span aria-hidden="true">{"≤ "}</span>
           <UsdcAmount baseUnits={capBaseUnits} decimals={decimals} />
-          {" cap"}
-        </span>
-      ) : null}
+        </>
+      ) : (
+        <>
+          <UsdcAmount baseUnits={baseUnits} decimals={decimals} />
+          <span>{"/ call"}</span>
+        </>
+      )}
     </span>
   );
 }

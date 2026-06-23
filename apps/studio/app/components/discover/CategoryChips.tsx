@@ -1,9 +1,9 @@
-// CategoryChips - the square category filter chips for the Discover browse screen.
+// CategoryChips - the category filter chips for the Discover browse screen.
 //
 // Each chip maps 1:1 to FilterCriteria.category (an absent/`all` chip clears it). The
-// active chip carries the triad accent (square fill, never a pill/rounded glow) per
-// the UI-SPEC color discipline; status is shape + color, never color alone (the active
-// chip also carries aria-pressed + a filled marker).
+// active chip is a neutral ink-filled block (the comp's #ECEAE3 fill with black text -
+// NOT a triad hue); the inactive chip is a hairline outline. Status carries
+// aria-pressed + data-active so meaning is not color-only.
 //
 // These are plain links so the loader (a GET) re-reads the criteria from the URL query
 // string - the read-through browse model. No money/identity is derived here.
@@ -33,7 +33,7 @@ export function CategoryChips({
       data-testid="category-chips"
       role="group"
       aria-label="filter by category"
-      className="flex flex-wrap items-center gap-xs"
+      className="flex flex-wrap gap-[8px]"
     >
       {chips.map((chip) => {
         const isActive = (chip.value ?? undefined) === (active ?? undefined);
@@ -44,17 +44,12 @@ export function CategoryChips({
             aria-pressed={isActive}
             data-active={isActive}
             className={[
-              "inline-flex min-h-[44px] items-center gap-2xs border px-sm py-2xs font-mono text-caption-mono lowercase outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue",
+              "inline-flex items-center whitespace-nowrap border px-[15px] py-[8px] font-mono text-[13px] lowercase outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue",
               isActive
-                ? "border-blue bg-blue text-paper"
-                : "border-hairline bg-raised text-ink-muted hover:text-ink",
+                ? "border-ink bg-ink text-canvas"
+                : "border-hairline bg-transparent text-ink-muted hover:text-ink",
             ].join(" ")}
           >
-            {/* shape marker so the active state is not color-only (a11y) */}
-            <span
-              aria-hidden="true"
-              className={isActive ? "inline-block h-2 w-2 bg-paper" : "inline-block h-2 w-2 border border-hairline"}
-            />
             {chip.label}
           </a>
         );

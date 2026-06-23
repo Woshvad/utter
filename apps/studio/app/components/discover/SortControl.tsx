@@ -10,12 +10,12 @@ import type { ResourceCardData } from "../../adapter/types";
 /** The four sort orders the discover screen offers. */
 export type SortOrder = "top" | "new" | "cheapest" | "most-reputable";
 
-/** The ordered sort options + their labels. */
+/** The ordered sort options + their labels (comp 1015-1019; hyphenated label). */
 export const SORT_OPTIONS: ReadonlyArray<{ value: SortOrder; label: string }> = [
   { value: "top", label: "top" },
   { value: "new", label: "new" },
   { value: "cheapest", label: "cheapest" },
-  { value: "most-reputable", label: "most reputable" },
+  { value: "most-reputable", label: "most-reputable" },
 ] as const;
 
 /** Narrow an arbitrary string to a SortOrder, defaulting to "top". */
@@ -64,14 +64,15 @@ export interface SortControlProps {
 }
 
 export function SortControl({ active, hrefFor }: SortControlProps): React.ReactElement {
+  // The leading "sort" label is rendered by discover.tsx (comp 377); this control
+  // renders only the sort items. Active = yellow text + yellow underline (NOT blue).
   return (
     <div
       data-testid="sort-control"
       role="group"
       aria-label="sort results"
-      className="flex items-center gap-2xs"
+      className="flex items-center gap-[6px]"
     >
-      <span className="font-display text-label text-ink-faint lowercase">sort</span>
       {SORT_OPTIONS.map((opt) => {
         const isActive = opt.value === active;
         return (
@@ -81,8 +82,8 @@ export function SortControl({ active, hrefFor }: SortControlProps): React.ReactE
             aria-pressed={isActive}
             data-active={isActive}
             className={[
-              "inline-flex min-h-[44px] items-center border-b-2 px-2xs font-mono text-caption-mono lowercase outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue",
-              isActive ? "border-blue text-ink" : "border-transparent text-ink-muted hover:text-ink",
+              "inline-flex items-center border-b-2 px-[13px] py-[8px] font-mono text-[12px] lowercase outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue",
+              isActive ? "border-yellow text-yellow" : "border-transparent text-ink-faint hover:text-ink",
             ].join(" ")}
           >
             {opt.label}
