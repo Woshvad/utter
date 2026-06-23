@@ -103,11 +103,11 @@ describe("resources.$id screen (no price recomputation)", () => {
     render(React.createElement(MemoryRouter, null, React.createElement(Screen)));
 
     // The player is the always-visible hero; its header renders the projected cap via
-    // UsdcAmount. cap = max = "10000" base units @ 6dp -> $0.010000. A recompute (e.g.
+    // UsdcAmount. cap = max = "10000" base units @ 6dp -> $0.01. A recompute (e.g.
     // *1e6) would differ; we assert the exact projected string straight off the render.
     const monies = screen.getAllByTestId("usdc-amount");
     expect(monies.length).toBeGreaterThan(0);
-    expect(within(screen.getByTestId("playground-player")).getByText("$0.010000")).toBeInTheDocument();
+    expect(within(screen.getByTestId("playground-player")).getByText("$0.01")).toBeInTheDocument();
 
     // the title is the projected slug
     expect(screen.getByTestId("detail-title").textContent).toBe(data.detail.slug);
@@ -198,8 +198,8 @@ describe("resource-detail tabs (real adapter content)", () => {
     const region = within(screen.getByTestId("detail-pricing"));
     const monies = region.getAllByTestId("usdc-amount");
     expect(monies.length).toBeGreaterThan(0);
-    // base = "10000" base units @ 6dp -> $0.010000 (the projected fixture base)
-    expect(region.getAllByText("$0.010000").length).toBeGreaterThan(0);
+    // base = "10000" base units @ 6dp -> $0.01 (the projected fixture base)
+    expect(region.getAllByText("$0.01").length).toBeGreaterThan(0);
 
     vi.doUnmock("react-router");
   });
@@ -214,9 +214,9 @@ describe("resource-detail tabs (real adapter content)", () => {
     await user.click(screen.getByRole("tab", { name: "pricing" }));
 
     const perKb = within(screen.getByTestId("detail-perkb"));
-    // 500 base units @ 6dp -> $0.000500, rendered through UsdcAmount
+    // 500 base units @ 6dp -> $0.0005, rendered through UsdcAmount
     expect(perKb.getByTestId("usdc-amount")).toBeInTheDocument();
-    expect(perKb.getByText("$0.000500")).toBeInTheDocument();
+    expect(perKb.getByText("$0.0005")).toBeInTheDocument();
 
     vi.doUnmock("react-router");
   });

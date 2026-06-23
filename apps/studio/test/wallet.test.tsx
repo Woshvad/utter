@@ -118,10 +118,10 @@ describe("EscrowBalanceWidget (read-only comp card: 52px mono balance + pill + c
         decimals: 6,
       }),
     );
-    // mono balance: 25000000 base units @ 6dp -> $25.000000
+    // mono balance: 25000000 base units @ 6dp -> $25 (trailing zeros trimmed)
     const amounts = screen.getAllByTestId("usdc-amount");
     expect(amounts.length).toBeGreaterThan(0);
-    expect(screen.getByTestId("escrow-balance-amount").textContent).toContain("$25.000000");
+    expect(screen.getByTestId("escrow-balance-amount").textContent).toContain("$25");
 
     // comp escrow card: a plain (no-copy) address pill + the "arc testnet" chain label.
     expect(screen.getByTestId("address-pill")).toBeTruthy();
@@ -145,7 +145,7 @@ describe("WalletPill (yellow escrow figure, comp pill)", () => {
       }),
     );
     expect(screen.getByTestId("wallet-pill").getAttribute("data-connected")).toBe("true");
-    expect(screen.getByTestId("usdc-amount").textContent).toContain("$25.000000");
+    expect(screen.getByTestId("usdc-amount").textContent).toContain("$25");
     // The comp escrow pill shows ONLY the yellow figure - no address/word labels.
     expect(screen.queryByTestId("address-pill")).toBeNull();
   });

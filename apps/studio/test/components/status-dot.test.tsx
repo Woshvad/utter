@@ -58,6 +58,6 @@ describe("StatusDot", () => {
   it("BondBadge renders its mono bonded amount from base units", async () => {
     const { BondBadge } = await import("../../app/components/primitives/BondBadge");
     render(<BondBadge bond={5000000n} decimals={6} />);
-    expect(screen.getByText(/\$5\.000000/)).toBeInTheDocument();
+    expect(screen.getByText(/\$5\b/)).toBeInTheDocument();
   });
 });

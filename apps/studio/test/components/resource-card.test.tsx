@@ -43,7 +43,7 @@ describe("ResourceCard", () => {
   it("renders a mono flat price pill from the passed base units ($0.010000)", () => {
     render(<ResourceCard card={FLAT_CARD} decimals={6} verified />);
     const pill = screen.getByTestId("price-pill");
-    expect(within(pill).getByText("$0.010000")).toBeInTheDocument();
+    expect(within(pill).getByText("$0.01")).toBeInTheDocument();
     expect(pill).toHaveAttribute("data-model", "flat");
   });
 
@@ -51,8 +51,8 @@ describe("ResourceCard", () => {
     render(<ResourceCard card={METERED_CARD} decimals={6} verified />);
     const pill = screen.getByTestId("price-pill");
     expect(pill).toHaveAttribute("data-model", "metered");
-    // metered shows the cap $0.050000, rendered from the passed cap base units
-    expect(within(pill).getByText("$0.050000")).toBeInTheDocument();
+    // metered shows the cap $0.05, rendered from the passed cap base units
+    expect(within(pill).getByText("$0.05")).toBeInTheDocument();
   });
 
   it("renders the '/100' reputation in the creator row and the in-thumbnail verified badge", () => {
@@ -65,10 +65,10 @@ describe("ResourceCard", () => {
   });
 
   it("never recomputes the price - it renders exactly the base units it was given", () => {
-    // base = 10000 base units, decimals = 6 -> $0.010000. If the card recomputed
+    // base = 10000 base units, decimals = 6 -> $0.01. If the card recomputed
     // (e.g. multiplied by 1e6) the value would differ. We assert the exact string.
     render(<ResourceCard card={FLAT_CARD} decimals={6} verified />);
-    expect(screen.getByText("$0.010000")).toBeInTheDocument();
+    expect(screen.getByText("$0.01")).toBeInTheDocument();
   });
 });
 

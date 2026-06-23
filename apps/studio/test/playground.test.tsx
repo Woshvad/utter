@@ -108,9 +108,9 @@ describe("PaywallSheet (the 402 overlay beat from the accepts quote)", () => {
     expect(within(sheet).getByTestId("paywall-bar").textContent).toMatch(/402 · PAYMENT REQUIRED/);
     // the call-to-action line
     expect(within(sheet).getByText(/pay to run this call/i)).toBeInTheDocument();
-    // cap 50000 base units, decimals 6 -> $0.050000 read straight from the quote (it
+    // cap 50000 base units, decimals 6 -> $0.05 read straight from the quote (it
     // appears both in the capped-at line and the pay button label)
-    expect(within(sheet).getAllByText("$0.050000").length).toBeGreaterThan(0);
+    expect(within(sheet).getAllByText("$0.05").length).toBeGreaterThan(0);
   });
 
   it("offers a pay-from-balance control, a deposit & pay link (-> /wallet), and a cancel", () => {
@@ -159,8 +159,9 @@ describe("MeteredTicker (mirrors computeMeteredAmount, clamped to the cap)", () 
     // the expected base units the same way UsdcAmount does (test-only divmod, decimals 6).
     const value = within(ticker).getByTestId("metered-value");
     const whole = expected / 1000000n; // test-only display check, not a render-path literal
-    const frac = (expected % 1000000n).toString().padStart(6, "0");
-    expect(value.textContent).toContain(`$${whole}.${frac}`);
+    const frac = (expected % 1000000n).toString().padStart(6, "0").replace(/0+$/, "");
+    const display = frac.length > 0 ? `$${whole}.${frac}` : `$${whole}`;
+    expect(value.textContent).toContain(display);
     // the cap-suffix beat for metered
     expect(within(ticker).getByTestId("metered-cap").textContent).toMatch(/cap/i);
   });
@@ -182,8 +183,8 @@ describe("MeteredTicker (mirrors computeMeteredAmount, clamped to the cap)", () 
     );
     const ticker = screen.getByTestId("metered-ticker");
     // the ticker reports the clamped (== cap) amount, never more. Target the primary
-    // value distinctly (the cap suffix also shows $0.001000 when clamped).
-    expect(within(ticker).getByTestId("metered-value").textContent).toContain("$0.001000");
+    // value distinctly (the cap suffix also shows $0.001 when clamped).
+    expect(within(ticker).getByTestId("metered-value").textContent).toContain("$0.001");
   });
 });
 

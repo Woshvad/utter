@@ -34,8 +34,10 @@ function formatBaseUnits(baseUnits: bigint, decimals: number): string {
   if (decimals === 0) {
     return `${negative ? "-" : ""}${whole}`;
   }
-  const frac = remainder.toString().padStart(decimals, "0");
-  return `${negative ? "-" : ""}${whole}.${frac}`;
+  const frac = remainder.toString().padStart(decimals, "0").replace(/0+$/, "");
+  return frac.length > 0
+    ? `${negative ? "-" : ""}${whole}.${frac}`
+    : `${negative ? "-" : ""}${whole}`;
 }
 
 export function UsdcAmount({

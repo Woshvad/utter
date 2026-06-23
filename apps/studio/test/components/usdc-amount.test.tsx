@@ -14,14 +14,14 @@ describe("UsdcAmount", () => {
     expect(screen.getByText("$0.012345")).toBeInTheDocument();
   });
 
-  it("renders 1_000_000 base units at decimals=6 as $1.000000", () => {
+  it("renders 1_000_000 base units at decimals=6 as $1 (trailing zeros trimmed)", () => {
     render(<UsdcAmount baseUnits={1000000n} decimals={6} />);
-    expect(screen.getByText("$1.000000")).toBeInTheDocument();
+    expect(screen.getByText("$1")).toBeInTheDocument();
   });
 
-  it("renders 0 base units at decimals=6 as $0.000000", () => {
+  it("renders 0 base units at decimals=6 as $0 (trailing zeros trimmed)", () => {
     render(<UsdcAmount baseUnits={0n} decimals={6} />);
-    expect(screen.getByText("$0.000000")).toBeInTheDocument();
+    expect(screen.getByText("$0")).toBeInTheDocument();
   });
 
   it("formats from the decimals prop, not a hardcoded scale (decimals=2)", () => {
@@ -31,7 +31,7 @@ describe("UsdcAmount", () => {
 
   it("renders mono tabular-nums so columns of money align", () => {
     render(<UsdcAmount baseUnits={1000000n} decimals={6} />);
-    const el = screen.getByText("$1.000000");
+    const el = screen.getByText("$1");
     expect(el.className).toContain("font-mono");
     expect(el.className).toContain("tabular-nums");
   });
