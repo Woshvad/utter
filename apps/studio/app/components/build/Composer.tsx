@@ -1,15 +1,18 @@
-// Composer - the STU-01 compose shell (the "utter a sentence" moment). A large calm
-// input, a pricing toggle (flat / metered), price + bond steppers in mono USDC, a
-// payout address field, and the triangle `utter it` submit. It POSTs to the /create
-// action (Composer is presentational; validation + adapter.createResource happen
-// server-side in the action - the security control is server-side, not here).
+// Composer - the STU-01 compose shell (the "utter a sentence" moment). A single
+// raised box: a large calm 18px textarea, then a controls row with the segmented
+// flat / metered pricing toggle, a [- value +] price stepper, a bond chip, and the
+// white-triangle `utter` submit. Example chips below fill the textarea on click.
+// It POSTs to the /create action (Composer is presentational; validation + adapter.
+// createResource happen server-side in the action - the security control is
+// server-side, not here).
 //
 // Money inputs are entered as a decimal USDC string; the action parses them to
 // base-unit bigints (no 1e6/6 literal in this component - it carries no money math).
+// The pricing model, price, and bond are posted via hidden inputs the controls
+// drive; payout has no visible field in the comp, so it is posted as a hidden input
+// defaulted to the creator/fixture address so validateComposeSpec still gets a Hex.
 import * as React from "react";
 import { Form } from "react-router";
-import { Input } from "../primitives/Input";
-import { Toggle } from "../primitives/Toggle";
 
 export interface ComposerProps {
   /** Field-level errors keyed by field name (from the action on a rejected submit). */
@@ -18,123 +21,167 @@ export interface ComposerProps {
   submitting?: boolean;
 }
 
+/** Default payout when no connected address is available (fixture creator). */
+const DEFAULT_PAYOUT = "0x1111111111111111111111111111111111111111";
+
+/** The three comp example prompts that fill the textarea on click (data 940-944). */
+const EXAMPLES = [
+  "score the sentiment of a tweet from -1 to 1",
+  "convert any currency to usd at live fx rates",
+  "extract structured fields from an invoice pdf",
+];
+
+/** Price stepper bounds + step, in decimal USDC (posted as a decimal string). */
+const PRICE_MIN = 0.0001;
+const PRICE_STEP = 0.0001;
+const DEFAULT_BOND = 5;
+
 export function Composer({ errors, submitting }: ComposerProps): React.ReactElement {
+  const [prompt, setPrompt] = React.useState("");
   const [metered, setMetered] = React.useState(false);
+  // Price held in state as a decimal number; posted as a 6-dp decimal string. No
+  // money math / scale literal here - the action parses with runtime decimals.
+  const [price, setPrice] = React.useState(0.01);
+
+  const pricingModel = metered ? "metered" : "flat";
+  const priceStr = price.toFixed(6);
+  const priceFmt =
+    pricingModel === "flat"
+      ? `$${price.toFixed(4)} / call`
+      : `≤ $${price.toFixed(4)} metered`;
+  const bondFmt = `$${DEFAULT_BOND.toFixed(0)}`;
 
   return (
     <Form
       method="post"
       data-testid="composer"
-      className="flex flex-col gap-md"
       aria-label="compose a resource"
+      className="flex flex-col"
     >
-      {/* the large calm prompt input (multi-line; Input is single-line so use a
-          matching hard-edged textarea) */}
-      <div className="flex flex-col gap-2xs">
+      {/* the raised composer box: textarea + controls row */}
+      <div className="border border-hairline bg-raised">
         <textarea
           name="prompt"
           rows={3}
-          placeholder="utter a sentence…"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="utter a sentence…  e.g. score the sentiment of a tweet from -1 to 1 and return json"
           aria-label="prompt"
-          className={[
-            "block w-full bg-raised text-ink placeholder:text-ink-faint",
-            "px-sm py-sm text-ui font-display",
-            "border border-hairline outline-none",
-            "focus-visible:ring-2 focus-visible:ring-blue",
-          ].join(" ")}
+          className="block w-full border-0 bg-transparent p-[20px] text-[18px] leading-[1.45] tracking-[-0.01em] text-ink outline-none placeholder:text-ink-faint"
         />
-        {errors?.prompt ? (
-          <ErrorLine field="prompt" message={errors.prompt} />
-        ) : null}
+
+        <div className="flex flex-wrap items-center gap-[8px] border-t border-hairline p-[12px_14px]">
+          {/* segmented flat / metered toggle (active = blue-filled) */}
+          <div className="flex border border-hairline" role="group" aria-label="pricing model">
+            <button
+              type="button"
+              aria-pressed={!metered}
+              onClick={() => setMetered(false)}
+              className={[
+                "cursor-pointer px-[14px] py-[9px] font-mono text-[13px]",
+                !metered ? "bg-blue text-white" : "bg-transparent text-ink-muted",
+              ].join(" ")}
+            >
+              flat
+            </button>
+            <button
+              type="button"
+              aria-pressed={metered}
+              onClick={() => setMetered(true)}
+              className={[
+                "cursor-pointer px-[14px] py-[9px] font-mono text-[13px]",
+                metered ? "bg-blue text-white" : "bg-transparent text-ink-muted",
+              ].join(" ")}
+            >
+              metered
+            </button>
+          </div>
+
+          {/* price stepper [- value +] */}
+          <div className="flex items-center border border-hairline">
+            <button
+              type="button"
+              aria-label="decrease price"
+              onClick={() => setPrice((p) => Math.max(PRICE_MIN, +(p - PRICE_STEP).toFixed(6)))}
+              className="cursor-pointer border-r border-hairline px-[12px] py-[8px] font-mono text-ink-muted"
+            >
+              −
+            </button>
+            <span
+              data-testid="composer-price"
+              className="min-w-[108px] px-[12px] py-[8px] text-center font-mono text-[13px] text-yellow"
+            >
+              {priceFmt}
+            </span>
+            <button
+              type="button"
+              aria-label="increase price"
+              onClick={() => setPrice((p) => +(p + PRICE_STEP).toFixed(6))}
+              className="cursor-pointer border-l border-hairline px-[12px] py-[8px] font-mono text-ink-muted"
+            >
+              +
+            </button>
+          </div>
+
+          {/* bond chip (static default; posted via hidden input) */}
+          <div className="flex items-center gap-[8px] border border-hairline px-[12px] py-[8px]">
+            <span className="font-mono text-[12px] text-ink-faint">bond</span>
+            <span data-testid="composer-bond" className="font-mono text-[13px] text-ink">
+              {bondFmt}
+            </span>
+          </div>
+
+          <div className="flex-1" />
+
+          {/* white-triangle `utter` submit */}
+          <button
+            type="submit"
+            data-testid="composer-submit"
+            disabled={submitting}
+            className="flex items-center gap-[9px] border-0 bg-red px-[20px] py-[11px] text-[14px] font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-red disabled:opacity-50"
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: 0,
+                height: 0,
+                borderTop: "6px solid transparent",
+                borderBottom: "6px solid transparent",
+                borderLeft: "10px solid #fff",
+              }}
+            />
+            utter
+          </button>
+        </div>
       </div>
 
-      <div className="flex flex-wrap items-end gap-lg">
-        {/* pricing model toggle: flat / metered (square knob) */}
-        <div className="flex flex-col gap-2xs">
-          <span className="text-label font-display text-ink-muted lowercase">pricing</span>
-          <Toggle
-            pressed={metered}
-            onPressedChange={setMetered}
-            label={metered ? "metered" : "flat"}
-          />
-          {/* the server reads the model from this hidden field (toggle drives it) */}
-          <input type="hidden" name="pricingModel" value={metered ? "metered" : "flat"} />
-        </div>
+      {/* hidden fields the controls drive (the action validates these server-side) */}
+      <input type="hidden" name="pricingModel" value={pricingModel} />
+      <input type="hidden" name="basePrice" value={priceStr} />
+      <input type="hidden" name="bond" value={DEFAULT_BOND.toFixed(6)} />
+      {/* payout has no visible field in the comp - default to the fixture creator so
+          validateComposeSpec still receives a valid Hex and createResource works. */}
+      <input type="hidden" name="payout" value={DEFAULT_PAYOUT} />
 
-        {/* price stepper (mono USDC) */}
-        <div className="flex flex-col gap-2xs">
-          <label htmlFor="basePrice" className="text-label font-display text-ink-muted lowercase">
-            price / call (usdc)
-          </label>
-          <Input
-            id="basePrice"
-            name="basePrice"
-            inputMode="decimal"
-            placeholder="0.010000"
-            className="font-mono"
-          />
-          {errors?.basePrice ? (
-            <ErrorLine field="basePrice" message={errors.basePrice} />
-          ) : null}
-        </div>
+      {/* field-level errors (restyled red-triangle lines) */}
+      {errors?.prompt ? <ErrorLine field="prompt" message={errors.prompt} /> : null}
+      {errors?.basePrice ? <ErrorLine field="basePrice" message={errors.basePrice} /> : null}
+      {errors?.bond ? <ErrorLine field="bond" message={errors.bond} /> : null}
+      {errors?.payout ? <ErrorLine field="payout" message={errors.payout} /> : null}
 
-        {/* bond amount (mono USDC) */}
-        <div className="flex flex-col gap-2xs">
-          <label htmlFor="bond" className="text-label font-display text-ink-muted lowercase">
-            bond (usdc)
-          </label>
-          <Input
-            id="bond"
-            name="bond"
-            inputMode="decimal"
-            placeholder="5.000000"
-            className="font-mono"
-          />
-          {errors?.bond ? <ErrorLine field="bond" message={errors.bond} /> : null}
-        </div>
-      </div>
-
-      {/* payout address */}
-      <div className="flex flex-col gap-2xs">
-        <label htmlFor="payout" className="text-label font-display text-ink-muted lowercase">
-          payout address
-        </label>
-        <Input
-          id="payout"
-          name="payout"
-          placeholder="0x…"
-          className="font-mono"
-          aria-label="payout address"
-        />
-        {errors?.payout ? <ErrorLine field="payout" message={errors.payout} /> : null}
-      </div>
-
-      {/* triangle `utter it` submit */}
-      <div>
-        <button
-          type="submit"
-          data-testid="composer-submit"
-          disabled={submitting}
-          className={[
-            "inline-flex items-center gap-xs",
-            "border border-red bg-red px-md py-sm",
-            "text-label font-display lowercase text-paper-ink",
-            "outline-none focus-visible:ring-2 focus-visible:ring-red",
-            "disabled:opacity-50",
-          ].join(" ")}
-        >
-          <span
-            aria-hidden="true"
-            style={{
-              width: 0,
-              height: 0,
-              borderTop: "6px solid transparent",
-              borderBottom: "6px solid transparent",
-              borderLeft: "10px solid var(--paper-ink)",
-            }}
-          />
-          utter it
-        </button>
+      {/* example chips - fill the textarea on click */}
+      <div className="mt-[18px] flex flex-wrap gap-[8px]">
+        {EXAMPLES.map((ex) => (
+          <button
+            key={ex}
+            type="button"
+            data-testid="composer-example"
+            onClick={() => setPrompt(ex)}
+            className="cursor-pointer border border-hairline px-[13px] py-[9px] font-mono text-[13px] text-ink-muted"
+          >
+            {ex}
+          </button>
+        ))}
       </div>
     </Form>
   );
@@ -145,7 +192,7 @@ function ErrorLine({ field, message }: { field: string; message: string }): Reac
     <span
       data-testid={`composer-error-${field}`}
       role="alert"
-      className="flex items-center gap-2xs font-mono text-caption-mono lowercase"
+      className="mt-[10px] flex items-center gap-2xs font-mono text-caption-mono lowercase"
       style={{ color: "var(--red)" }}
     >
       {/* red triangle - error is shape + color, never color alone */}
