@@ -64,59 +64,62 @@ export function DepositForm({ decimals, onDeposited }: DepositFormProps): React.
             : null;
 
   return (
-    <section data-testid="deposit-form" className="flex flex-col gap-md">
-      <span className="text-label font-display lowercase text-ink-muted">deposit</span>
+    <section data-testid="deposit-form" className="flex flex-col gap-[12px]">
+      <span className="font-mono text-[12px] tracking-[0.06em] text-ink-faint">DEPOSIT</span>
 
-      <form onSubmit={onSubmit} className="flex flex-col gap-xs">
-        <div className="flex items-center gap-xs">
+      <form onSubmit={onSubmit} className="flex flex-col gap-[12px]">
+        {/* $-prefixed amount input cell (comp 597-600) */}
+        <div className="flex border border-hairline">
+          <div className="px-[14px] py-[13px] font-mono text-ink-faint">$</div>
           <input
             data-testid="deposit-amount-input"
+            type="number"
             inputMode="decimal"
             placeholder="0.00"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             disabled={busy}
             aria-label="deposit amount in usdc"
-            className="w-40 border border-hairline bg-transparent px-md py-xs font-mono tabular-nums text-body text-ink outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
+            className="flex-1 bg-transparent py-[13px] pr-[14px] font-mono text-[16px] tabular-nums text-ink outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
           />
-          <span className="text-label font-display lowercase text-ink-faint">usdc</span>
-          <button
-            type="submit"
-            data-testid="deposit-submit"
-            disabled={!canSubmit}
-            className="inline-flex items-center bg-yellow px-md py-xs text-label font-display font-semibold lowercase outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
-            style={{ color: "var(--paper-ink, #0C0C0D)" }}
-          >
-            deposit
-          </button>
         </div>
+
+        <button
+          type="submit"
+          data-testid="deposit-submit"
+          disabled={!canSubmit}
+          className="bg-yellow p-[13px] font-mono text-[14px] font-bold lowercase outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
+          style={{ color: "var(--paper-ink, #0C0C0D)" }}
+        >
+          deposit usdc
+        </button>
 
         {/* echo the human amount the user is about to sign for (deposit is two signatures) */}
         {amountValid ? (
-          <span data-testid="deposit-preview" className="text-caption-mono font-mono text-ink-muted">
+          <span data-testid="deposit-preview" className="font-mono text-[11px] text-ink-muted">
             you will approve then deposit{" "}
             <span className="tabular-nums text-ink">{amount}</span> usdc (two wallet signatures)
           </span>
         ) : null}
 
         {!isConnected ? (
-          <span data-testid="deposit-disconnected" className="text-caption-mono font-mono text-ink-faint">
+          <span data-testid="deposit-disconnected" className="font-mono text-[11px] text-ink-faint">
             connect a wallet to deposit
           </span>
         ) : !onArc ? (
-          <span data-testid="deposit-wrong-chain" role="alert" className="text-caption-mono font-mono text-red">
+          <span data-testid="deposit-wrong-chain" role="alert" className="font-mono text-[11px] text-red">
             switch to arc testnet to deposit
           </span>
         ) : null}
 
         {statusLabel ? (
-          <span data-testid="deposit-status" className="text-caption-mono font-mono text-ink-muted">
+          <span data-testid="deposit-status" className="font-mono text-[11px] text-ink-muted">
             {statusLabel}
           </span>
         ) : null}
 
         {status === "error" && error ? (
-          <span data-testid="deposit-error" role="alert" className="text-caption-mono font-mono text-red">
+          <span data-testid="deposit-error" role="alert" className="font-mono text-[11px] text-red">
             {error}
           </span>
         ) : null}

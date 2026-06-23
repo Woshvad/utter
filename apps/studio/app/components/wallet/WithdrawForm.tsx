@@ -97,11 +97,11 @@ export function WithdrawForm({ baseUnits, decimals, onWithdrawn }: WithdrawFormP
         : null;
 
   return (
-    <section data-testid="withdraw-form" className="flex flex-col gap-md">
-      <span className="text-label font-display lowercase text-ink-muted">withdraw</span>
-
-      <form onSubmit={openConfirm} className="flex flex-col gap-xs">
-        <div className="flex items-center gap-xs">
+    <section data-testid="withdraw-form" className="flex flex-col gap-[12px]">
+      <form onSubmit={openConfirm} className="flex flex-col gap-[12px]">
+        {/* compact neutral withdraw amount row (the destructive accent is reserved for
+            the confirm-modal action only - the resting card stays neutral per the comp) */}
+        <div className="flex border border-hairline">
           <input
             data-testid="withdraw-amount-input"
             inputMode="decimal"
@@ -110,59 +110,59 @@ export function WithdrawForm({ baseUnits, decimals, onWithdrawn }: WithdrawFormP
             onChange={(e) => setAmount(e.target.value)}
             disabled={busy}
             aria-label="withdraw amount in usdc"
-            className="w-40 border border-hairline bg-transparent px-md py-xs font-mono tabular-nums text-body text-ink outline-none focus-visible:ring-2 focus-visible:ring-red disabled:opacity-50"
+            className="flex-1 bg-transparent px-[14px] py-[13px] font-mono text-[16px] tabular-nums text-ink outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
           />
-          <span className="text-label font-display lowercase text-ink-faint">usdc</span>
           <button
             type="button"
             data-testid="withdraw-max"
             onClick={setMax}
             disabled={baseUnits === undefined || decimals === undefined || busy}
-            className="inline-flex items-center border border-hairline px-md py-xs text-label font-display lowercase text-ink-muted outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
+            className="border-l border-hairline px-[14px] py-[13px] font-mono text-[12px] lowercase text-ink-muted outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
           >
             max
           </button>
-          <button
-            type="submit"
-            data-testid="withdraw-submit"
-            disabled={!canSubmit}
-            className="inline-flex items-center border border-red px-md py-xs text-label font-display font-semibold text-red lowercase outline-none focus-visible:ring-2 focus-visible:ring-red disabled:opacity-50"
-          >
-            withdraw
-          </button>
         </div>
+
+        <button
+          type="submit"
+          data-testid="withdraw-submit"
+          disabled={!canSubmit}
+          className="border border-hairline bg-transparent p-[13px] font-mono text-[14px] lowercase text-ink outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50"
+        >
+          withdraw
+        </button>
 
         {/* show the available cap (mono, runtime decimals) */}
         {baseUnits !== undefined && decimals !== undefined ? (
-          <span data-testid="withdraw-available" className="text-caption-mono font-mono text-ink-muted">
+          <span data-testid="withdraw-available" className="font-mono text-[11px] text-ink-muted">
             available <UsdcAmount baseUnits={baseUnits} decimals={decimals} /> usdc
           </span>
         ) : null}
 
         {overBalance ? (
-          <span data-testid="withdraw-over-balance" role="alert" className="text-caption-mono font-mono text-red">
+          <span data-testid="withdraw-over-balance" role="alert" className="font-mono text-[11px] text-red">
             amount exceeds escrow balance
           </span>
         ) : null}
 
         {!isConnected ? (
-          <span data-testid="withdraw-disconnected" className="text-caption-mono font-mono text-ink-faint">
+          <span data-testid="withdraw-disconnected" className="font-mono text-[11px] text-ink-faint">
             connect a wallet to withdraw
           </span>
         ) : !onArc ? (
-          <span data-testid="withdraw-wrong-chain" role="alert" className="text-caption-mono font-mono text-red">
+          <span data-testid="withdraw-wrong-chain" role="alert" className="font-mono text-[11px] text-red">
             switch to arc testnet to withdraw
           </span>
         ) : null}
 
         {statusLabel ? (
-          <span data-testid="withdraw-status" className="text-caption-mono font-mono text-ink-muted">
+          <span data-testid="withdraw-status" className="font-mono text-[11px] text-ink-muted">
             {statusLabel}
           </span>
         ) : null}
 
         {status === "error" && error ? (
-          <span data-testid="withdraw-error" role="alert" className="text-caption-mono font-mono text-red">
+          <span data-testid="withdraw-error" role="alert" className="font-mono text-[11px] text-red">
             {error}
           </span>
         ) : null}
