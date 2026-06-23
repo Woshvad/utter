@@ -17,6 +17,19 @@
 import { redirect } from "react-router";
 import { getAuthAddress } from "./session.server.js";
 import { selectAdapter } from "../adapter/select.js";
+import { apiKeyStore } from "./apiKeyStore.server.js";
+
+/**
+ * Read a presented bearer API key from the Authorization header, or null. Parses
+ * `Authorization: Bearer <key>` only (no other scheme). The raw key is never logged.
+ */
+function bearerKeyFrom(request: Request): string | null {
+  const header = request.headers.get("Authorization") ?? "";
+  const prefix = "Bearer ";
+  if (!header.startsWith(prefix)) return null;
+  const raw = header.slice(prefix.length).trim();
+  return raw.length > 0 ? raw : null;
+}
 
 /**
  * Require an authenticated creator. Returns the SIWE-authenticated address when the
@@ -27,11 +40,23 @@ import { selectAdapter } from "../adapter/select.js";
  * the top of a loader/action: `const creator = await requireCreator(request);`.
  */
 export async function requireCreator(request: Request): Promise<string> {
+  // 1) Session gate (unchanged): a valid SIWE session authenticates the creator.
   const address = await getAuthAddress(request);
   if (address) return address;
 
-  // Unauthenticated. A document navigation gets a redirect to the SIWE login; a
-  // data request (fetch/XHR) gets a 401 so the client can surface it.
+  // 2) Bearer-key gate: no session, so try a programmatic key. If the request carries
+  //    `Authorization: Bearer <key>` and it resolves to a creator via the store's
+  //    constant-time reverse lookup, treat the caller as that creator. This is the
+  //    real consumer of the minted bearer keys. The raw key is never logged.
+  const bearer = bearerKeyFrom(request);
+  if (bearer) {
+    const creator = await apiKeyStore.resolveCreatorByKey(bearer);
+    if (creator) return creator;
+  }
+
+  // Unauthenticated (no session and no valid bearer key). A document navigation gets a
+  // redirect to the SIWE login; a data request (fetch/XHR) gets a 401 so the client
+  // can surface it. This behavior is unchanged from before.
   const accept = request.headers.get("Accept") ?? "";
   if (accept.includes("text/html")) {
     throw redirect("/auth");

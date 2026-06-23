@@ -267,6 +267,82 @@ describe("WR-02: API-key mint -> reveal-once -> programmatic verify (end to end)
   });
 });
 
+describe("WR-02b: a valid bearer key authenticates through requireCreator (gate consumer)", () => {
+  it("a DATA request bearing a minted key passes the gate and resolves to the minting creator", async () => {
+    // mint a key as FIXTURE_CREATOR via the SIWE-gated /keys action
+    const { action } = await import("../app/routes/keys");
+    const cookie = await cookieFor(FIXTURE_CREATOR);
+    const minted = (await action({
+      request: dataRequest("http://x/keys", "POST", cookie),
+      params: {},
+      context: {},
+    } as never)) as { mintedRaw: string };
+    expect(minted.mintedRaw).toMatch(/^utk_/);
+
+    // a data request with NO session cookie but a Bearer key resolves through the gate
+    const { requireCreator } = await import("../app/auth/requireCreator.server");
+    const bearerReq = new Request("http://x/dashboard", {
+      headers: { Authorization: `Bearer ${minted.mintedRaw}` },
+    });
+    const who = await requireCreator(bearerReq);
+    expect(who.toLowerCase()).toBe(FIXTURE_CREATOR.toLowerCase());
+  });
+
+  it("a gated loader (dashboard) accepts a bearer key in place of a session", async () => {
+    const { action } = await import("../app/routes/keys");
+    const cookie = await cookieFor(FIXTURE_CREATOR);
+    const minted = (await action({
+      request: dataRequest("http://x/keys", "POST", cookie),
+      params: {},
+      context: {},
+    } as never)) as { mintedRaw: string };
+
+    const { loader } = await import("../app/routes/dashboard");
+    const data = (await loader({
+      request: new Request("http://x/dashboard", {
+        headers: { Authorization: `Bearer ${minted.mintedRaw}` },
+      }),
+      params: {},
+      context: {},
+    } as never)) as { revenue: unknown };
+    expect(data.revenue).toBeTruthy();
+  });
+
+  it("a bad bearer key still 401s a data request (no session)", async () => {
+    const { requireCreator } = await import("../app/auth/requireCreator.server");
+    const badReq = new Request("http://x/dashboard", {
+      headers: { Authorization: "Bearer utk_not-a-real-key" },
+    });
+    const out = await run(
+      ((args: never) => requireCreator((args as { request: Request }).request)) as never,
+      badReq,
+    );
+    expect(out).toBeInstanceOf(Response);
+    expect((out as Response).status).toBe(401);
+  });
+
+  it("an absent bearer key (and no session) still 401s a data request", async () => {
+    const { requireCreator } = await import("../app/auth/requireCreator.server");
+    const out = await run(
+      ((args: never) => requireCreator((args as { request: Request }).request)) as never,
+      dataRequest("http://x/dashboard"),
+    );
+    expect(out).toBeInstanceOf(Response);
+    expect((out as Response).status).toBe(401);
+  });
+
+  it("an unauthenticated document request still redirects to /auth (302), bearer or not", async () => {
+    const { requireCreator } = await import("../app/auth/requireCreator.server");
+    const out = await run(
+      ((args: never) => requireCreator((args as { request: Request }).request)) as never,
+      docRequest("http://x/dashboard"),
+    );
+    expect(out).toBeInstanceOf(Response);
+    expect((out as Response).status).toBe(302);
+    expect((out as Response).headers.get("Location")).toBe("/auth");
+  });
+});
+
 describe("IN-01: BuildStream live-URL scheme validation", () => {
   it("accepts http(s) URLs and rejects javascript:/data: schemes", async () => {
     const { safeHttpUrl } = await import("../app/components/build/BuildStream");
