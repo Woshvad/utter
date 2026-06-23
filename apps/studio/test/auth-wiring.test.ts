@@ -167,9 +167,14 @@ describe("CR-01: requireResourceOwner blocks cross-creator (403)", () => {
 describe("WR-01: every registered route resolves to a module", () => {
   it("resolves all routes in routes.ts", async () => {
     const routesMod = await import("../app/routes");
-    const config = routesMod.default as ReadonlyArray<{ file: string }>;
+    type RouteEntry = { file: string; children?: readonly RouteEntry[] };
+    const config = routesMod.default as ReadonlyArray<RouteEntry>;
     expect(config.length).toBeGreaterThan(0);
-    const files = config.map((r) => r.file);
+    // The in-app routes are nested under the _shell layout route, so flatten the tree
+    // (top-level + children) before asserting every registered file resolves.
+    const flatten = (entries: readonly RouteEntry[]): string[] =>
+      entries.flatMap((e) => [e.file, ...(e.children ? flatten(e.children) : [])]);
+    const files = flatten(config);
     // the three formerly-dead routes (WR-01) must now be registered
     expect(files).toContain("routes/dashboard.tsx");
     expect(files).toContain("routes/wallet.tsx");
@@ -179,6 +184,7 @@ describe("WR-01: every registered route resolves to a module", () => {
     // against the registry so a registered-but-missing module would fail here.
     const modules: Record<string, () => Promise<unknown>> = {
       "routes/_index.tsx": () => import("../app/routes/_index"),
+      "routes/_shell.tsx": () => import("../app/routes/_shell"),
       "routes/create.tsx": () => import("../app/routes/create"),
       "routes/discover.tsx": () => import("../app/routes/discover"),
       "routes/dashboard.tsx": () => import("../app/routes/dashboard"),
