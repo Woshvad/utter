@@ -18,8 +18,8 @@
 // 240-361) INSIDE the app shell <main>: a centered composer column on the left, and
 // a right preview aside (agent card + openapi) that appears once a build has started.
 import * as React from "react";
-import type { ActionFunctionArgs } from "react-router";
-import { useActionData, useNavigation } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { useActionData, useLoaderData, useNavigation } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
 import { requireCreator } from "../auth/requireCreator.server.js";
 import {
@@ -30,6 +30,21 @@ import { Composer } from "../components/build/Composer.js";
 import { BuildStream } from "../components/build/BuildStream.js";
 import { CardPreview } from "../components/detail/CardPreview.js";
 import { OpenApiPreview } from "../components/detail/OpenApiPreview.js";
+
+/** The loader payload: an optional prefill prompt read from ?prompt= (the iterate bar). */
+export interface CreateLoaderData {
+  initialPrompt: string | null;
+}
+
+/**
+ * Read an optional prefill prompt from the query string. This is deliberately NOT gated:
+ * the create page is already open to everyone; only the action that mints a resource is
+ * gated by requireCreator. The iterate bar on the live moment links here with ?prompt=.
+ */
+export async function loader({ request }: LoaderFunctionArgs): Promise<CreateLoaderData> {
+  const initialPrompt = new URL(request.url).searchParams.get("prompt");
+  return { initialPrompt };
+}
 
 /** The action result the screen renders: either field errors or the created ids. */
 export type CreateActionData =
@@ -88,6 +103,7 @@ function slugFromPrompt(prompt: string | undefined): string {
 // component tree; the screen is the comp's two-column create layout.
 export default function CreateRoute(): React.ReactElement {
   const data = useActionData<typeof action>();
+  const { initialPrompt } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const submitting = navigation.state === "submitting";
 
@@ -149,7 +165,11 @@ export default function CreateRoute(): React.ReactElement {
               liveName={previewName}
             />
           ) : (
-            <Composer errors={errors} submitting={submitting} />
+            <Composer
+              errors={errors}
+              submitting={submitting}
+              initialPrompt={initialPrompt ?? undefined}
+            />
           )}
         </div>
       </div>

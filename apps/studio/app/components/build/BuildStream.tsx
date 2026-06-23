@@ -263,10 +263,18 @@ export function BuildStream({
             </div>
           </div>
 
-          {/* conversational iterate bar */}
-          <div className="mt-[14px] flex items-center gap-[12px] border border-hairline bg-raised p-[14px]">
-            <span
-              aria-hidden="true"
+          {/* conversational iterate bar - a real refine-and-re-utter input that
+              prefills the create screen via /create?prompt=<text> */}
+          <form
+            method="get"
+            action="/create"
+            data-testid="build-iterate"
+            className="mt-[14px] flex items-center gap-[12px] border border-hairline bg-raised p-[14px]"
+          >
+            <button
+              type="submit"
+              aria-label="refine and re-utter"
+              className="flex-none cursor-pointer border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-blue"
               style={{
                 width: 0,
                 height: 0,
@@ -275,10 +283,14 @@ export function BuildStream({
                 borderLeft: "9px solid var(--ink-faint)",
               }}
             />
-            <span className="flex-1 text-[14px] text-ink-faint">
-              {'iterate: "return json instead", "cap at $5/day", "add auth header"…'}
-            </span>
-          </div>
+            <input
+              type="text"
+              name="prompt"
+              aria-label="refine prompt"
+              placeholder={'iterate: "return json instead", "cap at $5/day", "add auth header"…'}
+              className="w-full flex-1 border-0 bg-transparent text-[14px] text-ink placeholder:text-ink-faint outline-none focus-visible:ring-0"
+            />
+          </form>
         </>
       )}
     </div>

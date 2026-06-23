@@ -120,6 +120,49 @@ describe("validateComposeSpec", () => {
   });
 });
 
+describe("create loader (?prompt= prefill)", () => {
+  it("returns the prompt from the query string as initialPrompt", async () => {
+    const { loader } = await import("../app/routes/create");
+    const data = await loader({
+      request: new Request("http://localhost/create?prompt=return%20json%20instead"),
+      params: {},
+      context: {},
+    } as never);
+    expect(data.initialPrompt).toBe("return json instead");
+  });
+
+  it("returns null initialPrompt when no ?prompt= is present (not gated)", async () => {
+    const { loader } = await import("../app/routes/create");
+    const data = await loader({
+      request: new Request("http://localhost/create"),
+      params: {},
+      context: {},
+    } as never);
+    expect(data.initialPrompt).toBeNull();
+  });
+});
+
+describe("Composer prefill", () => {
+  it("renders the textarea pre-filled when given initialPrompt", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const React = await import("react");
+    const { createRoutesStub } = await import("react-router");
+    const { Composer } = await import("../app/components/build/Composer");
+    // Composer uses react-router's <Form> (a data-router hook), so it must mount inside
+    // a data router; createRoutesStub provides one for the component under test.
+    const Stub = createRoutesStub([
+      {
+        path: "/",
+        Component: () =>
+          React.createElement(Composer, { initialPrompt: "cap at $5/day" }),
+      },
+    ]);
+    render(React.createElement(Stub));
+    const textarea = screen.getByLabelText("prompt") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("cap at $5/day");
+  });
+});
+
 describe("create action", () => {
   /** Build an authenticated POST Request with a urlencoded body the action can read. */
   async function postRequest(fields: Record<string, string>): Promise<Request> {

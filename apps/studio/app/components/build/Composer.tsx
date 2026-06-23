@@ -19,6 +19,8 @@ export interface ComposerProps {
   errors?: Partial<Record<"prompt" | "basePrice" | "bond" | "payout", string>>;
   /** Whether a submit is in flight (disables the control). */
   submitting?: boolean;
+  /** Optional prefill prompt (from the loader's ?prompt=, e.g. the iterate bar). */
+  initialPrompt?: string;
 }
 
 /** Default payout when no connected address is available (fixture creator). */
@@ -36,8 +38,8 @@ const PRICE_MIN = 0.0001;
 const PRICE_STEP = 0.0001;
 const DEFAULT_BOND = 5;
 
-export function Composer({ errors, submitting }: ComposerProps): React.ReactElement {
-  const [prompt, setPrompt] = React.useState("");
+export function Composer({ errors, submitting, initialPrompt }: ComposerProps): React.ReactElement {
+  const [prompt, setPrompt] = React.useState(initialPrompt ?? "");
   const [metered, setMetered] = React.useState(false);
   // Price held in state as a decimal number; posted as a 6-dp decimal string. No
   // money math / scale literal here - the action parses with runtime decimals.

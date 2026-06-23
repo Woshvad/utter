@@ -159,5 +159,14 @@ describe("BuildStream component", () => {
       expect(screen.getByTestId("build-stream-live").textContent).toContain("live");
     });
     expect(screen.getByTestId("build-live-moment")).toBeInTheDocument();
+
+    // the iterate bar is a real GET form targeting /create with a prompt input, so
+    // refining re-utters via /create?prompt=<text> (not a static span).
+    const iterate = screen.getByTestId("build-iterate") as HTMLFormElement;
+    expect(iterate.tagName).toBe("FORM");
+    expect(iterate.getAttribute("method")).toBe("get");
+    expect(iterate.getAttribute("action")).toBe("/create");
+    const refine = screen.getByLabelText("refine prompt") as HTMLInputElement;
+    expect(refine.getAttribute("name")).toBe("prompt");
   });
 });
