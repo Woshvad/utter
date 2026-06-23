@@ -1,61 +1,51 @@
-// CreatorAvatar - a deterministic geometric Bauhaus identity block derived from an
-// address. There is no avatar/identicon primitive in the design system and the brief
-// forbids stock photography, so the creator's identity is rendered as schema-derived
-// art: the triad shapes (circle/square/triangle) placed by a cheap deterministic hash
-// of the address, mirroring the SpecPreviewTile pattern in ResourceCard. The fills are
-// the existing CSS tokens; no photo, no new dependency.
+// CreatorAvatar - the creator identity disc on /creators/:address (comp 696): an 88px
+// blue circle with a 4px canvas overlap ring and a single bold white initial derived
+// deterministically from the address. There is no avatar/identicon primitive and the
+// brief forbids stock photography, so the identity is schema-derived (the address, not a
+// photo). The same creator always renders the same initial; no network read, no new dep.
 import * as React from "react";
 
 export interface CreatorAvatarProps {
-  /** The creator address the identity block is derived from (the hash seed). */
+  /** The creator address the initial is derived from. */
   address: string;
-  /** Side length in pixels of the square frame (default 64). */
+  /** Diameter in pixels of the circle (default 88). */
   size?: number;
   className?: string;
 }
 
-/** A cheap deterministic hash of the seed string, mirroring SpecPreviewTile. */
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return h;
+/**
+ * A stable display initial for the address: the first hex char after 0x uppercased
+ * (a deterministic, at-a-glance identity), falling back to "0" for a malformed value.
+ */
+function addressInitial(address: string): string {
+  const stripped = address.toLowerCase().startsWith("0x") ? address.slice(2) : address;
+  const first = stripped.charAt(0);
+  return (first || "0").toUpperCase();
 }
 
 export function CreatorAvatar({
   address,
-  size = 64,
+  size = 88,
   className,
 }: CreatorAvatarProps): React.ReactElement {
-  // Deterministic placements from the address hash so the same creator always renders
-  // the same block (an at-a-glance identity), with no randomness or network read.
-  const h = hashSeed(address);
-  const a = h % 3;
-  const b = (h >> 3) % 3;
-  const c = (h >> 6) % 3;
+  const initial = addressInitial(address);
+  // The single initial scales with the disc (comp uses 32px on an 88px circle).
+  const fontSize = Math.round(size * (32 / 88));
 
   return (
-    <span
+    <div
       data-testid="creator-avatar"
-      className={["inline-block border border-hairline bg-raised", className]
+      role="img"
+      aria-label={`creator identity ${address}`}
+      className={[
+        "flex flex-none items-center justify-center rounded-full border-[4px] border-canvas bg-blue font-bold text-white",
+        className,
+      ]
         .filter(Boolean)
         .join(" ")}
-      style={{ width: size, height: size }}
+      style={{ width: size, height: size, fontSize }}
     >
-      <svg
-        viewBox="0 0 100 100"
-        width={size}
-        height={size}
-        role="img"
-        aria-label={`creator identity ${address}`}
-      >
-        <rect width="100" height="100" fill="var(--canvas)" />
-        <circle cx={30 + a * 8} cy="38" r="13" fill="var(--red)" />
-        <rect x={50 + b * 6} y="26" width="20" height="20" fill="var(--blue)" />
-        <polygon
-          points={`${36 + c * 4},58 ${50 + c * 4},78 ${22 + c * 4},78`}
-          fill="var(--yellow)"
-        />
-      </svg>
-    </span>
+      {initial}
+    </div>
   );
 }
