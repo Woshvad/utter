@@ -3,11 +3,19 @@
 // The loader reads a runtime decimals through the adapter (getEscrowBalance) so the
 // SSR shell can render a 6dp-aware placeholder without a chain call (no 6/1e6
 // literal). The client wallet UI (escrow balance from useEscrowBalance, the
-// AddArcTestnet control, the WalletPill) is rendered behind a mounted guard to avoid
-// the SSR hydration flash (Pitfall 6 / T-06-HYDRATION) - the server renders the
-// neutral disconnected state; the client fills in the connected account + balance.
+// AddArcTestnet control, the deposit/withdraw forms) is rendered behind a mounted
+// guard to avoid the SSR hydration flash (Pitfall 6 / T-06-HYDRATION) - the server
+// renders the neutral disconnected state; the client fills in the connected account
+// + balance.
 //
-// Wallet leads yellow (money) with red on the destructive withdraw confirm.
+// Layout pixel-matches Design/Utter.dc.html comp lines 582-636: a 1100px content
+// column with an h1 "wallet & escrow", a top 1.3fr/1fr grid (escrow card + deposit
+// card) and a bottom 1.3fr/1fr grid (transaction history + agent spend caps). The
+// transaction-history and agent-spend-cap rows have NO real data source on this
+// surface, so they render the comp's deterministic representative sample data
+// (comp data 1041-1052) - clearly fixture, distinct from the real on-chain balance.
+//
+// Wallet leads yellow (money) with red on the destructive withdraw confirm only.
 import * as React from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
@@ -19,7 +27,6 @@ import { AddArcTestnet } from "../wallet/AddArcTestnet.js";
 import { EscrowBalanceWidget } from "../components/wallet/EscrowBalanceWidget.js";
 import { DepositForm } from "../components/wallet/DepositForm.js";
 import { WithdrawForm } from "../components/wallet/WithdrawForm.js";
-import { WalletPill } from "../components/shell/WalletPill.js";
 
 /** The serialized loader payload: the runtime decimals for the SSR placeholder. */
 export interface WalletData {
@@ -47,6 +54,88 @@ function useMounted(): boolean {
   return mounted;
 }
 
+// ---------------------------------------------------------------------------
+// Representative sample data (comp 1041-1052). These are NOT real on-chain
+// values - the wallet has no transaction feed or per-agent cap feed wired on
+// this surface yet. They render the comp's deterministic fixture so the screen
+// pixel-matches; they are intentionally distinct from the live escrow balance.
+// ---------------------------------------------------------------------------
+
+interface SampleTx {
+  /** "in" => money inflow (yellow); "out" => outflow (ink-muted). */
+  dir: "in" | "out";
+  label: string;
+  /** Pre-formatted human amount string (no scale math on this surface). */
+  amt: string;
+  hash: string;
+  time: string;
+}
+
+const SAMPLE_TXS: readonly SampleTx[] = [
+  { dir: "in", label: "deposit · usdc", amt: "+$50.00", hash: "0x7a3f…b21c", time: "2h ago" },
+  { dir: "out", label: "call · summarize-url", amt: "−$0.0080", hash: "0x91c2…44de", time: "5h ago" },
+  { dir: "in", label: "earnings · sentiment-score", amt: "+$12.84", hash: "0x55ab…0f12", time: "9h ago" },
+  { dir: "out", label: "call · fx-rates-live", amt: "−$0.0010", hash: "0x33de…aa90", time: "1d ago" },
+  { dir: "out", label: "withdraw · to wallet", amt: "−$200.00", hash: "0x12fa…77bd", time: "2d ago" },
+];
+
+interface SampleCap {
+  name: string;
+  used: string;
+  cap: string;
+  pct: number;
+}
+
+const SAMPLE_CAPS: readonly SampleCap[] = [
+  { name: "research-agent", used: "$1.24", cap: "$5.00 / day", pct: 25 },
+  { name: "ops-bot", used: "$8.90", cap: "$20.00 / day", pct: 45 },
+  { name: "scraper-3", used: "$1.98", cap: "$2.00 / day", pct: 99 },
+];
+
+/** A representative transaction row (fixture). Money-in rows lead yellow; money-out muted. */
+function TxRow({ tx }: { tx: SampleTx }): React.ReactElement {
+  const color = tx.dir === "in" ? "var(--yellow)" : "var(--ink-muted)";
+  return (
+    <div
+      data-testid="wallet-tx-row"
+      className="flex items-center gap-[14px] border-b border-hairline px-[18px] py-[14px]"
+    >
+      <span
+        aria-hidden="true"
+        className="flex-none rounded-full"
+        style={{ width: 9, height: 9, background: color }}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-medium text-ink">{tx.label}</div>
+        <div className="font-mono text-[11px] text-blue">{tx.hash} ↗</div>
+      </div>
+      <div className="text-right">
+        <div className="font-mono text-[14px] font-bold tabular-nums" style={{ color }}>
+          {tx.amt}
+        </div>
+        <div className="font-mono text-[11px] text-ink-faint">{tx.time}</div>
+      </div>
+    </div>
+  );
+}
+
+/** A representative agent spend-cap row (fixture). Progress bar leads blue. */
+function CapRow({ cap }: { cap: SampleCap }): React.ReactElement {
+  return (
+    <div data-testid="wallet-cap-row" className="border-b border-hairline px-[18px] py-[16px]">
+      <div className="mb-[8px] flex items-center justify-between">
+        <span className="font-mono text-[13px] text-ink">{cap.name}</span>
+        <span className="font-mono text-[12px] text-ink-muted">
+          {cap.used} / {cap.cap}
+        </span>
+      </div>
+      <div className="h-[6px] border border-hairline bg-canvas">
+        <div className="h-full bg-blue" style={{ width: `${cap.pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export default function WalletRoute(): React.ReactElement {
   const { decimals } = useLoaderData<typeof loader>();
   const mounted = useMounted();
@@ -65,47 +154,79 @@ export default function WalletRoute(): React.ReactElement {
   const renderDecimals = balance.decimals ?? decimals;
 
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-xl p-xl">
-      <div className="flex flex-wrap items-center justify-between gap-md">
-        <h1 data-testid="wallet-title" className="text-display font-display lowercase text-ink">
-          wallet
-        </h1>
-        {/* the shell pill: client-only (mounted guard) to avoid the hydration flash */}
+    <div className="mx-auto max-w-[1100px] px-[32px] pb-[64px] pt-[28px]">
+      <h1
+        data-testid="wallet-title"
+        className="mb-[24px] text-[26px] font-semibold tracking-[-0.02em] text-ink lowercase"
+      >
+        wallet &amp; escrow
+      </h1>
+
+      {/* top grid: escrow balance card (1.3fr) + deposit card (1fr) */}
+      <div className="mb-[16px] grid grid-cols-[1.3fr_1fr] gap-[16px]">
+        <EscrowBalanceWidget
+          address={mounted ? address : undefined}
+          baseUnits={balance.raw}
+          decimals={balance.raw !== undefined ? renderDecimals : undefined}
+          loading={balance.loading}
+        />
+
+        {/* the deposit/withdraw card: client-only (mounted guard) - it reads the
+            connected account + chain via wagmi, so SSR-rendering would hydrate with a
+            different value and flash (Pitfall 6 / T-06-HYDRATION). Each tx is signed
+            in the user's own wallet; on confirm we refresh the escrow balance. */}
         {mounted ? (
-          <WalletPill
-            account={address}
-            escrowBaseUnits={balance.raw}
-            escrowDecimals={balance.raw !== undefined ? renderDecimals : undefined}
-          />
+          <section
+            data-testid="wallet-deposit-card"
+            className="flex flex-col gap-[12px] border border-hairline bg-raised p-[24px]"
+          >
+            <DepositForm decimals={balance.decimals ?? renderDecimals} onDeposited={refresh} />
+            <WithdrawForm
+              baseUnits={balance.raw}
+              decimals={balance.decimals ?? renderDecimals}
+              onWithdrawn={refresh}
+            />
+            {/* network control: keep the AddArcTestnet affordance in the deposit card */}
+            <AddArcTestnet />
+          </section>
         ) : (
-          <WalletPill />
+          <section
+            data-testid="wallet-deposit-card"
+            className="flex flex-col gap-[12px] border border-hairline bg-raised p-[24px]"
+          >
+            <span className="font-mono text-[12px] tracking-[0.06em] text-ink-faint">DEPOSIT</span>
+            <span className="font-mono text-[11px] text-ink-faint">
+              connect a wallet to deposit
+            </span>
+          </section>
         )}
       </div>
 
-      <EscrowBalanceWidget
-        baseUnits={balance.raw}
-        decimals={balance.raw !== undefined ? renderDecimals : undefined}
-        loading={balance.loading}
-      />
+      {/* bottom grid: transaction history (1.3fr) + agent spend caps (1fr) */}
+      <div className="grid grid-cols-[1.3fr_1fr] gap-[16px]">
+        <section
+          data-testid="wallet-tx-history"
+          className="border border-hairline bg-raised"
+        >
+          <div className="border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+            TRANSACTION HISTORY
+          </div>
+          {SAMPLE_TXS.map((tx) => (
+            <TxRow key={tx.hash} tx={tx} />
+          ))}
+        </section>
 
-      {/* move-money controls: client-only (mounted guard) - they read the connected
-          account + chain via wagmi, so rendering them on the server would hydrate
-          with a different value and flash (Pitfall 6 / T-06-HYDRATION). Each tx is
-          signed in the user's own wallet; on confirm we refresh the escrow balance. */}
-      {mounted ? (
-        <div className="flex flex-col gap-lg">
-          <DepositForm decimals={balance.decimals ?? renderDecimals} onDeposited={refresh} />
-          <WithdrawForm
-            baseUnits={balance.raw}
-            decimals={balance.decimals ?? renderDecimals}
-            onWithdrawn={refresh}
-          />
-        </div>
-      ) : null}
-
-      <div className="flex flex-col gap-xs">
-        <span className="text-label font-display lowercase text-ink-muted">network</span>
-        <AddArcTestnet />
+        <section
+          data-testid="wallet-agent-caps"
+          className="border border-hairline bg-raised"
+        >
+          <div className="border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+            AGENT SPEND CAPS
+          </div>
+          {SAMPLE_CAPS.map((cap) => (
+            <CapRow key={cap.name} cap={cap} />
+          ))}
+        </section>
       </div>
     </div>
   );
