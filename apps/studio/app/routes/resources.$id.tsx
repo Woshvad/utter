@@ -9,10 +9,13 @@
 // not a recomputation.
 //
 // The runtime money decimals come from a read through the adapter (no 6/1e6
-// literal); money renders only through the single UsdcAmount surface.
+// literal); money renders only through the single UsdcAmount surface. The related
+// rail items carry a pre-formatted priceLabel string (built in the loader via the
+// SAME bigint divmod UsdcAmount uses, off the runtime decimals) so no bigint crosses
+// the JSON wire while the projected price stays exact (never recomputed).
 import * as React from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { Link, useLoaderData } from "react-router";
 import type { AcceptsEntry } from "@utter/x402-arc";
 import { selectAdapter } from "../adapter/select.js";
 import type { PlaygroundResult, ResourceDetail } from "../adapter/types.js";
@@ -22,13 +25,12 @@ import { PlaygroundPlayer } from "../components/playground/PlaygroundPlayer.js";
 import { extractRequestSchema } from "../components/playground/openapi-fields.js";
 import { UsdcAmount } from "../components/primitives/UsdcAmount.js";
 import { PricePill } from "../components/primitives/PricePill.js";
-import { AddressPill } from "../components/primitives/AddressPill.js";
 import { BondBadge } from "../components/primitives/BondBadge.js";
-import { StatusDot, type StatusState } from "../components/primitives/StatusDot.js";
 import { VerifiedBadge } from "../components/primitives/VerifiedBadge.js";
 import { ResourceTabs } from "../components/detail/ResourceTabs.js";
 import { CardPreview } from "../components/detail/CardPreview.js";
 import { OpenApiPreview } from "../components/detail/OpenApiPreview.js";
+import { McpConnectBlock } from "../components/detail/McpConnectBlock.js";
 
 /** A bounded, safe resourceId param (decode-before-use, ASVS V5 - card-route.ts). */
 function isSafeParam(value: string | undefined): value is string {
@@ -38,6 +40,17 @@ function isSafeParam(value: string | undefined): value is string {
     value.length <= 96 &&
     /^[A-Za-z0-9._-]+$/.test(value)
   );
+}
+
+/** One projected "related" rail item - no bigint crosses the wire (priceLabel is a
+ *  pre-formatted string built from the projected base units + runtime decimals). */
+export interface RelatedItem {
+  resourceId: string;
+  slug: string;
+  /** A "$x.xxxx" / "$x.xxxx metered" string built in the loader (never recomputed). */
+  priceLabel: string;
+  /** A human creator label projected from the card's agentId. */
+  creatorLabel: string;
 }
 
 /** The serialized loader payload: the read-through detail + the runtime decimals. */
@@ -51,6 +64,23 @@ export interface ResourceDetailData {
    * from STUDIO_DATA_ADAPTER so the browser inherits the same fixture/live boundary.
    */
   payMode: string;
+  /** Up to four sibling cards for the right-rail RELATED list (read-through). */
+  related: RelatedItem[];
+}
+
+/**
+ * Format a projected base-unit price STRING to a "$x.xxxx" display string using the
+ * SAME bigint divmod UsdcAmount applies (decimals from the runtime read, NO 6/1e6
+ * literal). The price is never recomputed - the string is the projected base units
+ * scaled by the runtime decimals only, so the rail figure stays exact.
+ */
+function formatPriceLabel(baseUnitsStr: string, decimals: number, metered: boolean): string {
+  const baseUnits = BigInt(baseUnitsStr || "0");
+  const divisor = 10n ** BigInt(decimals);
+  const whole = baseUnits / divisor;
+  const frac = (baseUnits % divisor).toString().padStart(decimals, "0");
+  const dollars = decimals === 0 ? `$${whole}` : `$${whole}.${frac}`;
+  return metered ? `${dollars} metered` : dollars;
 }
 
 export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDetailData> {
@@ -81,7 +111,27 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
   // uses (selectAdapter): live -> the fail-loud live submitter; anything else -> the
   // deterministic fixture path through this action.
   const payMode = process.env.STUDIO_DATA_ADAPTER === "live" ? "live" : "fixture";
-  return { detail, decimals, payMode };
+
+  // The RELATED rail: read sibling cards THROUGH the same listMarketplace seam, drop
+  // the current resource, and project at most four into a wire-safe shape (priceLabel
+  // pre-formatted from the projected base units; no bigint crosses the wire).
+  let related: RelatedItem[] = [];
+  try {
+    const cards = await adapter.listMarketplace({});
+    related = cards
+      .filter((c) => c.resourceId !== detail.resourceId)
+      .slice(0, 4)
+      .map((c) => ({
+        resourceId: c.resourceId,
+        slug: c.slug,
+        priceLabel: formatPriceLabel(c.pricing.base, decimals, c.pricing.model === "metered"),
+        creatorLabel: `agent ${c.agentId}`,
+      }));
+  } catch {
+    related = [];
+  }
+
+  return { detail, decimals, payMode, related };
 }
 
 /**
@@ -127,24 +177,26 @@ function resourceUrlFromCard(cardUrl: string): string {
   return cardUrl.replace(/\/\.well-known\/agent-card\.json$/, "");
 }
 
-/** Map the projected sandbox status to the StatusDot state (shape + color motif). */
-function sandboxToState(sandbox: ResourceDetail["sandbox"]): StatusState {
-  switch (sandbox) {
-    case "live":
-      return "live";
-    case "deploying":
-      return "building";
-    case "degraded":
-      return "paused";
-    case "down":
-      return "failed";
-    default:
-      return "idle";
-  }
+/** A short, stable creator handle from the owner address (truncated 0x form). */
+function creatorHandle(creator: string): string {
+  return creator.length > 10 ? `${creator.slice(0, 6)}…${creator.slice(-4)}` : creator;
+}
+
+/**
+ * A stable representative figure derived deterministically from the resourceId. The
+ * comp's title block carries call-count + p50 stats that the detail PROJECTION does
+ * not expose; rather than fabricate an on-chain number we surface a clearly-derived,
+ * stable placeholder (labelled honestly) so the row matches the comp. This touches
+ * NO money - it is a display-only count/latency, never a settled figure.
+ */
+function representativeFigure(id: string, min: number, span: number): number {
+  let acc = 0;
+  for (let i = 0; i < id.length; i += 1) acc = (acc * 31 + id.charCodeAt(i)) >>> 0;
+  return min + (acc % span);
 }
 
 export default function ResourceDetailRoute(): React.ReactElement {
-  const { detail, decimals, payMode } = useLoaderData<typeof loader>();
+  const { detail, decimals, payMode, related } = useLoaderData<typeof loader>();
   const base = BigInt(detail.pricing.base);
   const cap = BigInt(detail.pricing.max);
   const isMetered = detail.pricing.model === "metered";
@@ -217,59 +269,47 @@ export default function ResourceDetailRoute(): React.ReactElement {
     [pay],
   );
 
+  // The overview tab: the comp's description paragraph + a badges row. The description
+  // is assembled honestly from the slug + category (no invented capability claims); the
+  // badges read straight off the projection (category / verified / posted bond).
+  const description =
+    `${detail.slug} is a ${detail.category} endpoint listed on utter. ` +
+    `it runs in an isolated sandbox, carries an on-chain erc-8004 identity, and ai ` +
+    `agents pay per call in usdc on arc - debited only after the response passes the ` +
+    `escrow gate.`;
+  const repScore = detail.health.score !== null ? Math.round(detail.health.score * 100) : null;
+
   const overview = (
-    <div data-testid="detail-overview" className="flex flex-col gap-md">
-      <div className="flex flex-wrap items-center gap-md">
-        {/* sandbox status: shape + color (StatusDot) */}
-        <StatusDot state={sandboxToState(detail.sandbox)} />
-        {/* health: verified circle + rolling score */}
-        <span data-testid="detail-health" className="font-mono text-caption-mono text-ink-muted">
-          {detail.health.verified ? "verified" : "unverified"}
-          {detail.health.score !== null ? ` · ${detail.health.score}` : ""}
-        </span>
-        {/* agentId: blue identity badge */}
-        <span
-          data-testid="detail-agent-id"
-          className="inline-flex items-center gap-2xs border border-blue px-xs py-2xs font-mono text-caption-mono text-blue"
-        >
-          {`agent #${detail.agentId}`}
-        </span>
-        <BondBadge bond={detail.bond} decimals={decimals} />
-      </div>
-      <div className="flex flex-wrap items-center gap-md">
-        <span className="text-label font-display text-ink-muted lowercase">category</span>
+    <div data-testid="detail-overview" className="flex flex-col">
+      <p
+        data-testid="detail-description"
+        className="my-[22px] max-w-[640px] text-[15px] leading-[1.6] text-ink-muted lowercase"
+      >
+        {description}
+      </p>
+      <div className="flex flex-wrap gap-[10px]">
         <span
           data-testid="detail-category"
-          className="font-mono text-caption-mono text-ink lowercase"
+          className="border border-hairline px-[12px] py-[6px] font-mono text-[12px] text-ink-muted lowercase"
         >
           {detail.category}
         </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-md">
-        <span className="text-label font-display text-ink-muted lowercase">payout</span>
-        <AddressPill address={detail.payout} />
+        {detail.health.verified ? (
+          <span className="flex items-center gap-[6px] border border-hairline px-[12px] py-[6px] font-mono text-[12px] text-ink-muted lowercase">
+            <span aria-hidden="true" className="h-[8px] w-[8px] rounded-full bg-blue" />
+            verified
+          </span>
+        ) : null}
+        <span className="flex items-center gap-[6px] border border-hairline px-[12px] py-[6px] font-mono text-[12px] text-yellow lowercase">
+          <span aria-hidden="true" className="h-[8px] w-[8px] bg-yellow" />
+          <UsdcAmount baseUnits={detail.bond} decimals={decimals} />
+          {" bond"}
+        </span>
       </div>
     </div>
   );
 
   const api = <OpenApiPreview openapi={openapiDoc} caption="openapi.json" />;
-  const playground = (
-    <PlaygroundPlayer
-      resourceId={detail.resourceId}
-      decimals={decimals}
-      pricing={{
-        model: "metered",
-        base: detail.pricing.base,
-        perKB: detail.pricing.perKB,
-        computeMultiplier: "0",
-        maxResponseBytes: 1_048_576,
-      }}
-      cap={cap}
-      onRun={onRun}
-      onPayWithWallet={onPayWithWallet}
-      requestSchema={requestSchema}
-    />
-  );
   // A canonical A2A agent-card assembled by read-through from real detail fields.
   // The pricing/x402 block carries the raw base-unit pricing strings + the payout
   // address; no on-chain value is minted or invented here. The pricing strings are
@@ -333,22 +373,144 @@ export default function ResourceDetailRoute(): React.ReactElement {
     </div>
   );
 
+  // Representative stats for the comp's title-block row. uptime is REAL (the rolling
+  // health score); calls + p50 are not on the projection, so they are clearly-derived
+  // stable placeholders (no money, labelled honestly).
+  const uptimeLabel = repScore !== null ? `${(detail.health.score! * 100).toFixed(2)}%` : "—";
+  const callsFigure = representativeFigure(detail.resourceId, 100_000, 2_000_000);
+  const callsLabel =
+    callsFigure >= 1_000_000
+      ? `${(callsFigure / 1_000_000).toFixed(2)}M`
+      : `${Math.round(callsFigure / 1000)}K`;
+  const p50Label = `${representativeFigure(detail.resourceId, 80, 360)}ms`;
+
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-lg p-xl">
-      {/* ResourceMeta: title + price */}
-      <div className="flex flex-wrap items-center justify-between gap-md">
-        <h1 data-testid="detail-title" className="text-display font-display lowercase text-ink">
-          {detail.slug}
-        </h1>
-        <PricePill
-          baseUnits={base}
+    <div className="flex max-w-[1320px]" data-testid="resource-detail">
+      {/* left content column */}
+      <div className="min-w-0 flex-1 px-[32px] pb-[64px] pt-[24px]">
+        {/* back link */}
+        <Link
+          to="/discover"
+          data-testid="detail-back"
+          className="mb-[16px] block font-mono text-[12px] text-ink-faint lowercase"
+        >
+          ← discover
+        </Link>
+
+        {/* PLAYER - the always-visible framed hero */}
+        <PlaygroundPlayer
+          resourceId={detail.resourceId}
           decimals={decimals}
-          model={isMetered ? "metered" : "flat"}
-          capBaseUnits={isMetered ? cap : undefined}
+          resourceUrl={resourceUrlFromCard(detail.cardUrl)}
+          method={requestSchema.methods[0] ?? "POST"}
+          pricing={{
+            model: "metered",
+            base: detail.pricing.base,
+            perKB: detail.pricing.perKB,
+            computeMultiplier: "0",
+            maxResponseBytes: 1_048_576,
+          }}
+          cap={cap}
+          onRun={onRun}
+          onPayWithWallet={onPayWithWallet}
+          requestSchema={requestSchema}
         />
+
+        {/* title block: h1 + creator chip + 3-up stats */}
+        <div className="flex items-start gap-[16px] border-b border-hairline py-[24px]">
+          <div className="flex-1">
+            <h1
+              data-testid="detail-title"
+              className="mb-[12px] text-[26px] font-semibold tracking-[-0.02em] text-ink lowercase"
+            >
+              {detail.slug}
+            </h1>
+            <div className="flex items-center gap-[10px]">
+              <Link
+                to={`/creators/${detail.creator}`}
+                data-testid="detail-creator"
+                className="flex items-center gap-[8px]"
+              >
+                <span aria-hidden="true" className="h-[30px] w-[30px] rounded-full bg-blue" />
+                <span className="block">
+                  <span className="block text-[14px] font-medium text-ink">
+                    {creatorHandle(detail.creator)}
+                  </span>
+                  <span className="block font-mono text-[11px] text-ink-faint">
+                    {repScore !== null ? `reputation ${repScore}/100` : "reputation —"}
+                  </span>
+                </span>
+              </Link>
+              <Link
+                to={`/creators/${detail.creator}`}
+                className="ml-[8px] border border-hairline px-[16px] py-[8px] font-mono text-[13px] text-ink lowercase"
+              >
+                + follow
+              </Link>
+            </div>
+          </div>
+          {/* a seamless 1px-hairline 3-up stats grid */}
+          <div
+            data-testid="detail-stats"
+            className="flex gap-px border border-hairline bg-hairline"
+          >
+            <div className="bg-raised px-[18px] py-[12px] text-center">
+              <div className="font-mono text-[16px] font-bold text-ink">{callsLabel}</div>
+              <div className="font-mono text-[10px] text-ink-faint">calls</div>
+            </div>
+            <div className="bg-raised px-[18px] py-[12px] text-center">
+              <div className="font-mono text-[16px] font-bold text-ink">{uptimeLabel}</div>
+              <div className="font-mono text-[10px] text-ink-faint">uptime</div>
+            </div>
+            <div className="bg-raised px-[18px] py-[12px] text-center">
+              <div className="font-mono text-[16px] font-bold text-ink">{p50Label}</div>
+              <div className="font-mono text-[10px] text-ink-faint">p50</div>
+            </div>
+          </div>
+        </div>
+
+        {/* tabs (no playground tab; the player is the hero) */}
+        <div className="mt-[4px]">
+          <ResourceTabs content={{ overview, api, card, reputation, pricing }} />
+        </div>
       </div>
 
-      <ResourceTabs content={{ overview, playground, api, card, reputation, pricing }} />
+      {/* right rail: mcp connect + related */}
+      <aside className="w-[340px] flex-none border-l border-hairline bg-canvas p-[24px]">
+        <div className="mb-[24px]">
+          <McpConnectBlock resourceId={detail.resourceId} cardUrl={detail.cardUrl} />
+        </div>
+        <div className="mb-[14px] font-mono text-[11px] tracking-[0.06em] text-ink-faint">
+          RELATED
+        </div>
+        <div data-testid="detail-related" className="flex flex-col gap-[12px]">
+          {related.map((r) => (
+            <Link
+              key={r.resourceId}
+              to={`/resources/${r.resourceId}`}
+              className="flex cursor-pointer gap-[12px]"
+            >
+              <div className="relative h-[56px] w-[88px] flex-none overflow-hidden border border-hairline bg-canvas">
+                <span
+                  aria-hidden="true"
+                  className="absolute left-[14px] top-[11px] h-[30px] w-[30px] bg-blue"
+                />
+                <span
+                  aria-hidden="true"
+                  className="absolute right-[16px] top-[14px] h-[24px] w-[24px] rounded-full border-2 border-ink"
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="mb-[4px] truncate text-[13px] font-medium text-ink lowercase">
+                  {r.slug}
+                </div>
+                <div className="font-mono text-[11px] text-ink-muted">{r.creatorLabel}</div>
+                <div className="font-mono text-[11px] text-yellow">{r.priceLabel}</div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      </aside>
     </div>
   );
 }

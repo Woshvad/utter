@@ -93,18 +93,23 @@ describe("resources.$id screen (no price recomputation)", () => {
 
     const { render, screen, within } = await import("@testing-library/react");
     const React = await import("react");
+    // The screen now renders react-router <Link>s (back link, creator chip, related
+    // rail), so it must mount inside a Router context (MemoryRouter) - mirrors any
+    // route-component render test. No navigation is exercised here.
+    const { MemoryRouter } = await import("react-router");
     const mod = await import("../app/routes/resources.$id");
     const Screen = mod.default;
 
-    render(React.createElement(Screen));
+    render(React.createElement(MemoryRouter, null, React.createElement(Screen)));
 
-    // base = "10000" base units, decimals = 6 -> $0.010000. A recompute (e.g. *1e6)
-    // would differ; we assert the exact projected string in the price pill.
-    const pills = screen.getAllByTestId("price-pill");
-    expect(pills.length).toBeGreaterThan(0);
-    expect(within(pills[0]!).getByText("$0.010000")).toBeInTheDocument();
+    // The player is the always-visible hero; its header renders the projected cap via
+    // UsdcAmount. cap = max = "10000" base units @ 6dp -> $0.010000. A recompute (e.g.
+    // *1e6) would differ; we assert the exact projected string straight off the render.
+    const monies = screen.getAllByTestId("usdc-amount");
+    expect(monies.length).toBeGreaterThan(0);
+    expect(within(screen.getByTestId("playground-player")).getByText("$0.010000")).toBeInTheDocument();
 
-    // the title is the projected slug; the payout pill is the projected address
+    // the title is the projected slug
     expect(screen.getByTestId("detail-title").textContent).toBe(data.detail.slug);
 
     vi.doUnmock("react-router");
@@ -130,9 +135,12 @@ describe("resource-detail tabs (real adapter content)", () => {
 
     const rtl = await import("@testing-library/react");
     const React = await import("react");
+    // The screen renders react-router <Link>s; mount inside a MemoryRouter so the
+    // Link context resolves (no navigation is exercised by these tab-content tests).
+    const { MemoryRouter } = await import("react-router");
     const mod = await import("../app/routes/resources.$id");
     const user = userEvent.setup();
-    rtl.render(React.createElement(mod.default));
+    rtl.render(React.createElement(MemoryRouter, null, React.createElement(mod.default)));
     return { ...rtl, data, user };
   }
 
