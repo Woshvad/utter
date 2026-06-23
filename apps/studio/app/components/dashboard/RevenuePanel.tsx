@@ -13,6 +13,7 @@
 // are the representative comp series, clearly representative.
 import * as React from "react";
 import { UsdcAmount } from "../primitives/UsdcAmount";
+import { SampleBadge } from "../primitives/SampleBadge";
 import { BauhausChart, type ChartPoint, type TriadColor } from "../charts/BauhausChart";
 
 export interface RevenuePanelProps {
@@ -82,6 +83,8 @@ function ChartCard({
           style={{ background: dot[color] }}
         />
         <span className="text-[14px] font-semibold">{title}</span>
+        {/* the 12-month series has no real history source - mark it as sample */}
+        <SampleBadge className="ml-auto" />
       </div>
       <BauhausChart series={series} color={color} ariaLabel={ariaLabel} />
     </div>

@@ -18,6 +18,7 @@
 // handler, never during render, so the screen renders server-side without a crash.
 import * as React from "react";
 import { Link } from "react-router";
+import { SampleBadge } from "../components/primitives/SampleBadge.js";
 
 /** The mcp server config snippet (representative values, comp 757-765). */
 const MCP_CONFIG_SNIPPET = `{
@@ -115,8 +116,9 @@ export default function McpConnectRoute(): React.ReactElement {
       <div className="grid grid-cols-[1.4fr_1fr] gap-[16px]">
         {/* RECENT PAID CALLS (comp 784-794) */}
         <div className="border border-hairline bg-raised">
-          <div className="border-b border-hairline p-[16px_18px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            RECENT PAID CALLS
+          <div className="flex items-center justify-between border-b border-hairline p-[16px_18px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+            <span>RECENT PAID CALLS</span>
+            <SampleBadge />
           </div>
           {RECENT_PAID_CALLS.map((tx) => (
             <div
@@ -137,8 +139,9 @@ export default function McpConnectRoute(): React.ReactElement {
 
         {/* SPEND CAP (comp 795-801) - the lone YELLOW money accent */}
         <div className="border border-hairline bg-raised p-[20px]">
-          <div className="mb-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            SPEND CAP
+          <div className="mb-[16px] flex items-center justify-between font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+            <span>SPEND CAP</span>
+            <SampleBadge />
           </div>
           <div className="mb-[4px] font-mono text-[36px] font-bold text-yellow">$5.00</div>
           <div className="mb-[18px] font-mono text-[12px] text-ink-muted">

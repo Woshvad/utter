@@ -27,6 +27,7 @@ import { AddArcTestnet } from "../wallet/AddArcTestnet.js";
 import { EscrowBalanceWidget } from "../components/wallet/EscrowBalanceWidget.js";
 import { DepositForm } from "../components/wallet/DepositForm.js";
 import { WithdrawForm } from "../components/wallet/WithdrawForm.js";
+import { SampleBadge } from "../components/primitives/SampleBadge.js";
 
 /** The serialized loader payload: the runtime decimals for the SSR placeholder. */
 export interface WalletData {
@@ -208,8 +209,9 @@ export default function WalletRoute(): React.ReactElement {
           data-testid="wallet-tx-history"
           className="border border-hairline bg-raised"
         >
-          <div className="border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            TRANSACTION HISTORY
+          <div className="flex items-center justify-between border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+            <span>TRANSACTION HISTORY</span>
+            <SampleBadge />
           </div>
           {SAMPLE_TXS.map((tx) => (
             <TxRow key={tx.hash} tx={tx} />
@@ -220,8 +222,9 @@ export default function WalletRoute(): React.ReactElement {
           data-testid="wallet-agent-caps"
           className="border border-hairline bg-raised"
         >
-          <div className="border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            AGENT SPEND CAPS
+          <div className="flex items-center justify-between border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+            <span>AGENT SPEND CAPS</span>
+            <SampleBadge />
           </div>
           {SAMPLE_CAPS.map((cap) => (
             <CapRow key={cap.name} cap={cap} />
