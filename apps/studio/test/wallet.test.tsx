@@ -137,8 +137,8 @@ describe("EscrowBalanceWidget (mono balance + outflow confirm)", () => {
   });
 });
 
-describe("WalletPill (mono escrow + truncated address)", () => {
-  it("renders the escrow mono and a truncated address pill when connected", async () => {
+describe("WalletPill (yellow escrow figure, comp pill)", () => {
+  it("renders the escrow mono figure when connected (comp shows only the value)", async () => {
     const { WalletPill } = await import("../app/components/shell/WalletPill");
     render(
       React.createElement(WalletPill, {
@@ -149,7 +149,8 @@ describe("WalletPill (mono escrow + truncated address)", () => {
     );
     expect(screen.getByTestId("wallet-pill").getAttribute("data-connected")).toBe("true");
     expect(screen.getByTestId("usdc-amount").textContent).toContain("$25.000000");
-    expect(screen.getByTestId("address-pill")).toBeInTheDocument();
+    // The comp escrow pill shows ONLY the yellow figure - no address/word labels.
+    expect(screen.queryByTestId("address-pill")).toBeNull();
   });
 
   it("renders the neutral disconnected state with no faked figure (SSR-safe)", async () => {

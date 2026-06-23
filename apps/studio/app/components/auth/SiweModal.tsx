@@ -1,11 +1,9 @@
-// SiweModal - the STU-05 connect-wallet -> sign SIWE login modal (D-STU-05).
-//
-// The browser does the signing: it builds the EIP-4361 message (embedding the
-// server-issued nonce passed in via props) and calls wagmi's signMessage (personal_
-// sign). Only the message string + signature are POSTed back to /auth - a private key
-// NEVER reaches the server. The modal wraps the Plan-02 bordered + scrim Modal and
-// exposes one primary action ("connect & sign") with connect/signing/error/success
-// states.
+// SiweModal - the STU-05 connect-wallet -> sign SIWE login surface (D-STU-05),
+// re-presented as the comp's full-bleed centered auth card (comp lines 35-64) rather
+// than a scrim dialog. The SIWE connect->sign logic is unchanged: the browser builds
+// the EIP-4361 message (embedding the server-issued nonce passed in via props) and
+// calls wagmi's signMessage (personal_sign). Only the message string + signature are
+// POSTed back to /auth - a private key NEVER reaches the server.
 //
 // chainId + domain come from the chain object / server nonce, never a hand-written
 // literal in the signing path. The nonce is the server-issued one-time token; the
@@ -14,11 +12,8 @@ import * as React from "react";
 import { useAccount, useConnect, useSignMessage } from "wagmi";
 import { SiweMessage } from "siwe";
 import { arcTestnet } from "@utter/chain";
-import { Modal } from "../primitives/Modal.js";
 
 export interface SiweModalProps {
-  open: boolean;
-  onClose: () => void;
   /** The server-issued one-time nonce to embed in the signed message. */
   nonce: string;
   /** Whether the parent is mid-submit (verify in flight). */
@@ -29,13 +24,7 @@ export interface SiweModalProps {
 
 type Phase = "connect" | "signing" | "error" | "success";
 
-export function SiweModal({
-  open,
-  onClose,
-  nonce,
-  busy = false,
-  onSign,
-}: SiweModalProps): React.ReactElement {
+export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): React.ReactElement {
   const { address, isConnected } = useAccount();
   const { connect, connectors } = useConnect();
   const { signMessageAsync } = useSignMessage();
@@ -87,51 +76,139 @@ export function SiweModal({
     }
   }, [address, isConnected, connect, connectors, nonce, signMessageAsync, onSign]);
 
-  const label = busy || phase === "signing" ? "signing…" : isConnected ? "sign in" : "connect & sign";
+  const signing = busy || phase === "signing";
+  const label = signing ? "signing…" : "connect & sign";
 
   return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="sign in"
-      description="connect your wallet and sign a one-time message. no password, no private key leaves your wallet."
-      footer={
+    <div
+      data-screen-label="auth"
+      className="relative flex min-h-screen items-center justify-center overflow-hidden bg-canvas"
+    >
+      {/* decorative Bauhaus backdrop (behind the card) */}
+      <div aria-hidden="true" className="absolute inset-0 opacity-50">
+        <div
+          className="absolute rounded-full"
+          style={{ left: -60, top: 80, width: 260, height: 260, border: "2px solid var(--blue)" }}
+        />
+        <div
+          className="absolute"
+          style={{ right: 120, bottom: -40, width: 200, height: 200, background: "var(--red)" }}
+        />
+        <div
+          className="absolute"
+          style={{
+            right: 300,
+            top: 120,
+            width: 0,
+            height: 0,
+            borderLeft: "80px solid transparent",
+            borderRight: "80px solid transparent",
+            borderBottom: "140px solid var(--yellow)",
+          }}
+        />
+      </div>
+
+      {/* the auth card (no scrim) */}
+      <div className="relative w-[420px] max-w-[92vw] border border-hairline bg-raised p-[40px]">
+        <div className="mb-[28px] flex items-center gap-[10px]">
+          <span
+            aria-hidden="true"
+            className="inline-block rounded-full"
+            style={{ width: 18, height: 18, background: "var(--red)" }}
+          />
+          <span
+            aria-hidden="true"
+            style={{
+              width: 0,
+              height: 0,
+              borderTop: "6px solid transparent",
+              borderBottom: "6px solid transparent",
+              borderLeft: "10px solid var(--ink)",
+            }}
+          />
+          <span className="text-[20px] font-display font-bold tracking-tighter text-ink lowercase">
+            utter
+          </span>
+        </div>
+
+        <div className="mb-[6px] text-[24px] font-display font-semibold leading-[1.1] tracking-tight text-ink lowercase">
+          connect wallet
+        </div>
+        <div className="mb-[28px] text-[14px] text-ink-muted lowercase">
+          sign in with ethereum. one signature, no password.
+        </div>
+
         <button
           type="button"
           data-testid="siwe-connect-sign"
           onClick={() => void onConnectAndSign()}
-          disabled={busy || phase === "signing"}
-          className="border border-blue bg-blue px-md py-xs font-mono text-caption-mono text-paper outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yellow disabled:opacity-50 lowercase"
+          disabled={signing}
+          className="flex w-full items-center justify-center gap-[10px] border-none bg-red p-[16px] text-[15px] font-display font-semibold text-white cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-yellow disabled:opacity-50 lowercase"
+          style={{ color: "#fff" }}
         >
+          <span
+            aria-hidden="true"
+            style={{
+              width: 0,
+              height: 0,
+              borderTop: "6px solid transparent",
+              borderBottom: "6px solid transparent",
+              borderLeft: "10px solid #fff",
+            }}
+          />
           {label}
         </button>
-      }
-    >
-      <div className="flex flex-col gap-xs">
-        {isConnected && address ? (
-          <span data-testid="siwe-account" className="font-mono text-caption-mono text-ink-muted">
-            {`${address.slice(0, 6)}…${address.slice(-4)}`}
-          </span>
-        ) : (
-          <span className="font-mono text-caption-mono text-ink-faint lowercase">
-            no wallet connected
-          </span>
-        )}
-        {phase === "error" && error ? (
-          <span
-            data-testid="siwe-error"
-            role="alert"
-            className="border border-red px-xs py-2xs font-mono text-caption-mono text-red"
+
+        <div className="mt-[14px] flex gap-[10px]">
+          <button
+            type="button"
+            onClick={() => void onConnectAndSign()}
+            disabled={signing}
+            className="flex-1 border border-hairline bg-transparent p-[13px] font-mono text-[13px] text-ink cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50 lowercase"
           >
-            {error}
-          </span>
-        ) : null}
-        {phase === "success" ? (
-          <span data-testid="siwe-success" className="font-mono text-caption-mono text-yellow">
-            signed — verifying…
-          </span>
-        ) : null}
+            metamask
+          </button>
+          <button
+            type="button"
+            onClick={() => void onConnectAndSign()}
+            disabled={signing}
+            className="flex-1 border border-hairline bg-transparent p-[13px] font-mono text-[13px] text-ink cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-50 lowercase"
+          >
+            walletconnect
+          </button>
+        </div>
+
+        {/* connection-status / error caption, restyled minimally to fit the card */}
+        <div className="mt-[14px] flex flex-col gap-[8px]">
+          {isConnected && address ? (
+            <span data-testid="siwe-account" className="font-mono text-[12px] text-ink-muted">
+              {`${address.slice(0, 6)}…${address.slice(-4)}`}
+            </span>
+          ) : (
+            <span className="font-mono text-[12px] text-ink-faint lowercase">no wallet connected</span>
+          )}
+          {phase === "error" && error ? (
+            <span
+              data-testid="siwe-error"
+              role="alert"
+              className="border border-red px-[8px] py-[4px] font-mono text-[12px] text-red"
+            >
+              {error}
+            </span>
+          ) : null}
+          {phase === "success" ? (
+            <span data-testid="siwe-success" className="font-mono text-[12px] text-yellow">
+              signed — verifying…
+            </span>
+          ) : null}
+        </div>
+
+        {/* footer chain line: 8px blue circle + the network/settlement caption */}
+        <div className="mt-[28px] flex items-center gap-[8px] border-t border-hairline pt-[18px] font-mono text-[12px] text-ink-faint lowercase">
+          <span aria-hidden="true" className="inline-block rounded-full" style={{ width: 8, height: 8, background: "var(--blue)" }} />
+          arc mainnet · usdc settlement
+        </div>
       </div>
-    </Modal>
+    </div>
   );
 }

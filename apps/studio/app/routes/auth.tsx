@@ -87,12 +87,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
 export default function AuthRoute(): React.ReactElement {
   const { nonce } = useLoaderData<typeof loader>() as { nonce: string };
   const fetcher = useFetcher();
-  const [open, setOpen] = React.useState(true);
 
+  // Full-bleed centered auth card (comp lines 35-64); the SIWE connect->sign flow
+  // is unchanged - SiweModal signs in the browser and hands back {message, signature}
+  // for this route to POST to the /auth action.
   return (
     <SiweModal
-      open={open}
-      onClose={() => setOpen(false)}
       nonce={nonce}
       busy={fetcher.state !== "idle"}
       onSign={(message, signature) => {
