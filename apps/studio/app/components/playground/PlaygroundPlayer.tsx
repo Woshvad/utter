@@ -1,17 +1,20 @@
 // PlaygroundPlayer - the "watch-page hero" (UI-SPEC §Resource detail / Playground).
 //
-// The request builder (method + JSON params from the OpenAPI), the big triangle Run,
-// and the split request/response (mono, line numbers, latency). Run calls the INJECTED
-// `onRun` (which the screen wires to adapter.runPlayground) - in the fixture path that
-// drives runTestEndpoint against an in-process createApp + mock chain, reusing the
-// FROZEN requirePayment gate (reserve-before-run, T-06-FREECOMPUTE). The player NEVER
-// calls a handler against an unreserved authorization: it has no fetch/handler of its
-// own; the only call path is through the adapter seam.
+// The player is a single framed unit (the comp's always-visible hero): a header with a
+// POST method badge + the resource url + the "<= $cap metered" note, a request|response
+// split body, and a footer carrying the big triangle Run + the 18px yellow metered
+// value. Run calls the INJECTED `onRun` (which the screen wires to adapter.runPlayground)
+// - in the fixture path that drives runTestEndpoint against an in-process createApp +
+// mock chain, reusing the FROZEN requirePayment gate (reserve-before-run,
+// T-06-FREECOMPUTE). The player NEVER calls a handler against an unreserved
+// authorization: it has no fetch/handler of its own; the only call path is through the
+// adapter seam.
 //
-// When the result reports an unfunded buyer (`paywall`), the PaywallSheet 402 beat slides
-// in; paying re-runs through the same seam and streams the result. The metered price ticks
-// via MeteredTicker (computeMeteredAmount, clamped to cap). Money renders only through
-// UsdcAmount / the ticker (no 1e6/6 literal).
+// When the result reports an unfunded buyer (`paywall`), the PaywallSheet 402 overlay
+// mounts ABSOLUTELY over the (relative) player frame; paying re-runs through the same
+// seam and streams the result. The metered price ticks via MeteredTicker
+// (computeMeteredAmount, clamped to cap). Money renders only through UsdcAmount / the
+// ticker (no 1e6/6 literal).
 import * as React from "react";
 import type { Pricing } from "@utter/x402-arc";
 import type { AcceptsEntry } from "@utter/x402-arc";
@@ -19,6 +22,7 @@ import type { PlaygroundResult } from "../../adapter/types.js";
 import { MeteredTicker } from "./MeteredTicker.js";
 import { PaywallSheet } from "./PaywallSheet.js";
 import { RequestBuilder } from "./RequestBuilder.js";
+import { UsdcAmount } from "../primitives/UsdcAmount.js";
 import { buildBody, type RequestSchema } from "./openapi-fields.js";
 
 export interface PlaygroundPlayerProps {
@@ -30,6 +34,10 @@ export interface PlaygroundPlayerProps {
   pricing: Pricing;
   /** The signed spend cap in base units (the hard ceiling). */
   cap: bigint;
+  /** The resource origin URL shown in the player header (read from the card). */
+  resourceUrl?: string;
+  /** The HTTP method shown in the header badge (read from the OpenAPI doc). */
+  method?: string;
   /**
    * Run the pay-flow for a request body. The screen wires this to adapter.runPlayground,
    * which reuses the frozen gate (reserve-before-run). A `paywall` in the result triggers
@@ -67,6 +75,8 @@ export function PlaygroundPlayer({
   decimals,
   pricing,
   cap,
+  resourceUrl,
+  method: methodProp,
   onRun,
   funded = false,
   requestSchema,
@@ -74,7 +84,7 @@ export function PlaygroundPlayer({
 }: PlaygroundPlayerProps): React.ReactElement {
   const schema: RequestSchema = requestSchema ?? { methods: [], fields: [] };
   const hasFields = schema.fields.length > 0;
-  const [method, setMethod] = React.useState(schema.methods[0] ?? "POST");
+  const [method, setMethod] = React.useState(methodProp ?? schema.methods[0] ?? "POST");
   // Default to the typed form only when the schema offers fields; otherwise the
   // raw-JSON editor is the default (the current behavior preserved).
   const [mode, setMode] = React.useState<"form" | "raw">(hasFields ? "form" : "raw");
@@ -148,86 +158,141 @@ export function PlaygroundPlayer({
     [onPayWithWallet, doRun],
   );
 
-  return (
-    <div className="flex flex-col gap-md" data-testid="playground-player" data-resource={resourceId}>
-      {/* request builder + the split request/response */}
-      <div className="grid grid-cols-1 gap-md lg:grid-cols-2">
-        {/* request side: the OpenAPI-driven builder (method + typed fields + raw toggle) */}
-        <RequestBuilder
-          schema={schema}
-          method={method}
-          onMethodChange={setMethod}
-          mode={mode}
-          onModeChange={setMode}
-          values={values}
-          onValuesChange={setValues}
-          rawBody={requestBody}
-          onRawBodyChange={setRequestBody}
-        />
+  const hasResult = state.phase === "running" || state.phase === "done";
 
-        {/* response side */}
-        <div className="flex flex-col gap-xs border border-hairline bg-raised">
-          <div className="flex items-center justify-between border-b border-hairline px-sm py-2xs">
-            <span className="font-mono text-caption-mono text-ink-faint lowercase">response</span>
+  return (
+    <div
+      className="relative border border-hairline bg-raised"
+      data-testid="playground-player"
+      data-resource={resourceId}
+    >
+      {/* header: method badge + resource url + the metered-cap note */}
+      <div className="flex items-center justify-between border-b border-hairline px-[18px] py-[14px]">
+        <div className="flex items-center gap-[10px]">
+          <span className="bg-blue px-[8px] py-[3px] font-mono text-[12px] text-white">
+            {method}
+          </span>
+          {resourceUrl ? (
+            <span className="font-mono text-[13px] text-ink">{resourceUrl}</span>
+          ) : null}
+        </div>
+        <span className="font-mono text-[12px] text-yellow">
+          {"≤ "}
+          <UsdcAmount baseUnits={cap} decimals={decimals} />
+          {" metered"}
+        </span>
+      </div>
+
+      {/* body: request | response split */}
+      <div className="grid grid-cols-2">
+        {/* request pane */}
+        <div className="border-r border-hairline">
+          <RequestBuilder
+            schema={schema}
+            method={method}
+            onMethodChange={setMethod}
+            mode={mode}
+            onModeChange={setMode}
+            values={values}
+            onValuesChange={setValues}
+            rawBody={requestBody}
+            onRawBodyChange={setRequestBody}
+          />
+        </div>
+
+        {/* response pane */}
+        <div className="relative min-h-[180px]">
+          <div className="flex items-center justify-between border-b border-hairline px-[16px] py-[10px] font-mono text-[11px] tracking-[0.06em] text-ink-faint">
+            <span>RESPONSE</span>
             {state.phase === "done" ? (
-              <span className="font-mono text-caption-mono text-ink-muted tabular-nums lowercase">
-                {`${state.latencyMs}ms`}
-              </span>
+              <span className="text-blue">{`${state.latencyMs}ms`}</span>
             ) : null}
           </div>
-          <pre
-            data-testid="playground-response"
-            className="min-h-[8rem] overflow-x-auto p-sm font-mono text-caption-mono leading-relaxed text-ink"
-          >
-            {state.phase === "running"
-              ? "running…"
-              : state.phase === "done"
-                ? JSON.stringify(state.result.body, null, 2)
-                : ""}
-          </pre>
-          {/* metered ticking, shown once a paid result returns */}
-          {state.phase === "done" && state.result.paid ? (
-            <div className="border-t border-hairline px-sm py-2xs">
-              <MeteredTicker
-                pricing={pricing}
-                cap={cap}
-                decimals={decimals}
-                bodyBytes={state.result.bodyBytes ?? 0}
-                handlerMs={state.result.handlerMs ?? state.latencyMs}
+          {!hasResult ? (
+            // idle state: a centered triangle + "run to see the response"
+            <div
+              data-testid="playground-idle"
+              className="absolute inset-x-0 bottom-0 top-[36px] flex flex-col items-center justify-center gap-[12px] text-ink-faint"
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 0,
+                  height: 0,
+                  borderTop: "13px solid transparent",
+                  borderBottom: "13px solid transparent",
+                  borderLeft: "22px solid var(--hairline)",
+                }}
               />
+              <span className="font-mono text-[12px] lowercase">run to see the response</span>
             </div>
-          ) : null}
+          ) : (
+            <pre
+              data-testid="playground-response"
+              className="m-0 overflow-x-auto px-[16px] py-[18px] font-mono text-[12.5px] leading-[1.7] text-ink"
+              style={{ whiteSpace: "pre-wrap" }}
+            >
+              {state.phase === "running"
+                ? "running…"
+                : state.phase === "done"
+                  ? JSON.stringify(state.result.body, null, 2)
+                  : ""}
+            </pre>
+          )}
         </div>
       </div>
 
-      {/* the big triangle Run control (red, the product's "play") */}
-      <button
-        type="button"
-        data-testid="playground-run"
-        onClick={() => void doRun()}
-        disabled={state.phase === "running"}
-        className="inline-flex min-h-[44px] items-center gap-sm self-start border border-red bg-red px-lg py-xs font-display text-label text-paper lowercase outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-60"
-      >
-        <span
-          aria-hidden="true"
-          style={{
-            width: 0,
-            height: 0,
-            borderTop: "7px solid transparent",
-            borderBottom: "7px solid transparent",
-            borderLeft: "12px solid var(--paper)",
-          }}
-        />
-        run
-      </button>
+      {/* footer: the big triangle Run + the 18px yellow metered value */}
+      <div className="flex items-center gap-[16px] border-t border-hairline px-[18px] py-[14px]">
+        <button
+          type="button"
+          data-testid="playground-run"
+          onClick={() => void doRun()}
+          disabled={state.phase === "running"}
+          className="flex items-center gap-[10px] bg-red px-[24px] py-[12px] text-[15px] font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-blue disabled:opacity-60"
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              width: 0,
+              height: 0,
+              borderTop: "7px solid transparent",
+              borderBottom: "7px solid transparent",
+              borderLeft: "12px solid #fff",
+            }}
+          />
+          run
+        </button>
+        <div className="flex-1" />
+        <div className="text-right">
+          <div className="font-mono text-[11px] text-ink-faint">metered this call</div>
+          {state.phase === "done" && state.result.paid ? (
+            <MeteredTicker
+              pricing={pricing}
+              cap={cap}
+              decimals={decimals}
+              bodyBytes={state.result.bodyBytes ?? 0}
+              handlerMs={state.result.handlerMs ?? state.latencyMs}
+            />
+          ) : (
+            <div
+              data-testid="metered-idle"
+              className="font-mono text-[18px] font-bold text-yellow"
+            >
+              <UsdcAmount baseUnits={0n} decimals={decimals} />
+            </div>
+          )}
+        </div>
+      </div>
 
-      {/* the 402 paywall beat slides in when the buyer is unfunded */}
+      {/* the 402 paywall overlay mounts absolutely over the player when unfunded */}
       {state.phase === "paywall" ? (
         <PaywallSheet
           quote={state.quote}
           decimals={decimals}
           funded={funded}
           onPay={() => onPay(state.quote)}
+          onCancel={() => setState({ phase: "idle" })}
         />
       ) : null}
     </div>
