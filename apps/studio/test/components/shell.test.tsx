@@ -126,6 +126,21 @@ describe("TopBar search", () => {
   });
 });
 
+describe("TopBar avatar initial", () => {
+  it("derives the avatar initial from the connected account (not a constant)", () => {
+    render(<TopBar account="0xAb34000000000000000000000000000000000000" />);
+    // first hex char after 0x is "a" -> "A"
+    expect(screen.getByTestId("account-avatar").textContent).toBe("A");
+  });
+
+  it("uses a neutral glyph when no account is connected", () => {
+    render(<TopBar />);
+    const avatar = screen.getByTestId("account-avatar");
+    // no hardcoded letter; a neutral, non-alphabetic glyph
+    expect(avatar.textContent).not.toMatch(/[a-z]/i);
+  });
+});
+
 describe("SidebarNavItem", () => {
   it("active item carries the blue active treatment", () => {
     render(<SidebarNavItem label="create" href="/create" active />);

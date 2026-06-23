@@ -9,6 +9,19 @@ import { UsdcAmount } from "../primitives/UsdcAmount";
 /** The fixture creator used when no connected address is handy (comp avatar -> profile). */
 const FIXTURE_CREATOR = "0x1111111111111111111111111111111111111111";
 
+/**
+ * Derive a deterministic avatar initial from the connected account address: the first
+ * hex character after the 0x prefix, uppercased. Falls back to a neutral dot when no
+ * address is present (never a constant letter). This is presentation only - no money or
+ * identity is recomputed.
+ */
+function avatarInitial(account: string | undefined): string {
+  if (!account) return "·";
+  const hex = account.toLowerCase().startsWith("0x") ? account.slice(2) : account;
+  const first = hex.charAt(0);
+  return first ? first.toUpperCase() : "·";
+}
+
 export interface TopBarProps {
   /** Escrow balance in base units (read through getEscrowBalance), or undefined. */
   escrowBaseUnits?: bigint;
@@ -31,6 +44,8 @@ export function TopBar({
 }: TopBarProps): React.ReactElement {
   const hasEscrow = escrowBaseUnits !== undefined && escrowDecimals !== undefined;
   const profileAddress = account ?? FIXTURE_CREATOR;
+  // The avatar initial reflects the connected account (not a hardcoded letter).
+  const initial = avatarInitial(account);
 
   // Local controlled query so the search fires on submit (Enter / the search glyph),
   // not on every keystroke. onSearch stays optional, so the input is no-op-safe.
@@ -92,14 +107,15 @@ export function TopBar({
         utter
       </button>
 
-      {/* 34px blue account avatar with the creator initial -> profile */}
+      {/* 34px blue account avatar with the account-derived initial -> profile */}
       <a
         href={`/creators/${profileAddress}`}
         aria-label="account"
+        data-testid="account-avatar"
         className="flex h-[34px] w-[34px] items-center justify-center rounded-full bg-blue text-[14px] font-bold text-white cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue"
         style={{ color: "#fff" }}
       >
-        v
+        {initial}
       </a>
     </header>
   );
