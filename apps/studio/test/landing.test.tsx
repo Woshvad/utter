@@ -96,9 +96,9 @@ describe("landing screen (hero + how-it-works + marketplace strip)", () => {
   it("renders the hero with the tagline", async () => {
     const { screen } = await renderScreen({ cards: TWO_CARDS, decimals: 6 });
     expect(screen.getByTestId("landing-hero")).toBeInTheDocument();
-    expect(
-      screen.getByText(/you utter a sentence; you get a paid api/i),
-    ).toBeInTheDocument();
+    // The h1 carries an explicit <br/> per the comp, so the tagline is two text nodes.
+    expect(screen.getByText(/you utter a sentence;/i)).toBeInTheDocument();
+    expect(screen.getByText(/you get a paid api\./i)).toBeInTheDocument();
   });
 
   it("renders exactly five how-it-works steps in the paper block", async () => {

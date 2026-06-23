@@ -1,73 +1,50 @@
-// Hero - the landing front-door hero, transcribed from the LANDING section of
-// Design/Utter.dc.html into React with the dark-Bauhaus tokens (no inline hex; the
-// shapes use var(--token) inline styles exactly as AppShell's LogoLockup does).
+// Hero - the landing front-door hero, transcribed pixel-for-pixel from the LANDING
+// section of Design/Utter.dc.html (lines 84-122) into React with the dark-Bauhaus
+// tokens (no inline hex; the shapes use var(--token) inline styles exactly as the
+// header lockup does).
 //
-// Dual-audience entry: the primary "start uttering" CTA serves creators (-> /create);
-// the secondary "browse marketplace" CTA serves agent operators (-> /discover). The
-// "$0.01 / call" line is STATIC display copy (mono), not a render of an on-chain
-// amount, so it carries no UsdcAmount and introduces no money literal.
+// The wordmark lives ONLY in the header (routes/_index.tsx); the hero body starts with
+// the eyebrow per the comp. Dual-audience entry: the primary "start uttering" CTA serves
+// creators (-> /create); the secondary "browse marketplace" CTA serves agent operators
+// (-> /discover). The "$0.01 / call" line is STATIC display copy (mono), not a render of
+// an on-chain amount, so it carries no UsdcAmount and introduces no money literal.
 import * as React from "react";
 import { Link } from "react-router";
 
-/** The wordmark lockup: red circle + ink triangle + lowercase "utter" (the brand glyph,
- *  same primitive shapes as AppShell's LogoLockup). */
-function Wordmark(): React.ReactElement {
-  return (
-    <div className="flex items-center gap-xs">
-      <span
-        aria-hidden="true"
-        className="inline-block rounded-full"
-        style={{ width: 18, height: 18, background: "var(--red)" }}
-      />
-      <span
-        aria-hidden="true"
-        style={{
-          width: 0,
-          height: 0,
-          borderTop: "6px solid transparent",
-          borderBottom: "6px solid transparent",
-          borderLeft: "10px solid var(--ink)",
-        }}
-      />
-      <span className="text-heading font-display font-bold tracking-tighter text-ink lowercase">
-        utter
-      </span>
-    </div>
-  );
-}
-
 /** The asymmetric Bauhaus composition (blue square / red ring / yellow triangle / paper
- *  square). Purely decorative; aria-hidden so it is skipped by assistive tech. */
+ *  square), 380px tall and ALWAYS visible (comp 98-103). Purely decorative; aria-hidden
+ *  so it is skipped by assistive tech. */
 function HeroComposition(): React.ReactElement {
   return (
-    <div aria-hidden="true" className="relative hidden h-80 lg:block">
+    <div aria-hidden="true" className="relative h-[380px]">
       <div
         className="absolute right-0 top-0"
-        style={{ width: 200, height: 200, background: "var(--blue)" }}
+        style={{ width: 240, height: 240, background: "var(--blue)" }}
       />
       <div
-        className="absolute rounded-full"
-        style={{ left: 16, top: 64, width: 176, height: 176, border: "22px solid var(--red)" }}
+        className="absolute left-[20px] top-[80px] rounded-full"
+        style={{ width: 200, height: 200, border: "24px solid var(--red)" }}
       />
       <div
-        className="absolute right-12 bottom-0"
+        className="absolute right-[60px] bottom-0"
         style={{
           width: 0,
           height: 0,
-          borderLeft: "76px solid transparent",
-          borderRight: "76px solid transparent",
-          borderBottom: "136px solid var(--yellow)",
+          borderLeft: "90px solid transparent",
+          borderRight: "90px solid transparent",
+          borderBottom: "160px solid var(--yellow)",
         }}
       />
       <div
-        className="absolute left-12 bottom-6"
-        style={{ width: 104, height: 104, background: "var(--paper-bg)" }}
+        className="absolute left-[60px] bottom-[30px]"
+        style={{ width: 120, height: 120, background: "var(--paper)" }}
       />
     </div>
   );
 }
 
-/** One proof block in the three-up strip: a small glyph, a heading, and a one-line note. */
+/** One proof block in the seamless three-up grid: a small glyph, a heading, and a
+ *  one-line note (comp 107-121). */
 function ProofBlock({
   glyph,
   title,
@@ -80,12 +57,14 @@ function ProofBlock({
   mono?: boolean;
 }): React.ReactElement {
   return (
-    <div className="border border-hairline bg-canvas p-lg">
-      <div className="mb-sm">{glyph}</div>
-      <div className="mb-xs text-heading font-display font-semibold tracking-tight text-ink lowercase">
+    <div className="bg-canvas p-[28px]">
+      <div className="mb-[16px]">{glyph}</div>
+      <div className="mb-[6px] text-[22px] font-display font-semibold tracking-[-0.02em] text-ink lowercase">
         {title}
       </div>
-      <div className={`text-body text-ink-muted ${mono ? "font-mono text-caption-mono" : ""}`}>
+      <div
+        className={`text-[14px] text-ink-muted ${mono ? "font-mono" : ""}`}
+      >
         {note}
       </div>
     </div>
@@ -94,33 +73,34 @@ function ProofBlock({
 
 export function Hero(): React.ReactElement {
   return (
-    <section data-testid="landing-hero" className="flex flex-col gap-xl">
-      <div className="grid grid-cols-1 items-center gap-xl py-xl lg:grid-cols-[1.1fr_0.9fr]">
+    <section data-testid="landing-hero" className="flex flex-col">
+      <div className="grid grid-cols-[1.1fr_0.9fr] items-center gap-[48px] pt-[72px] pb-[64px]">
         <div className="flex flex-col">
-          <Wordmark />
-          {/* kicker line */}
-          <div className="mt-lg mb-md flex items-center gap-xs font-mono text-caption-mono tracking-wide text-yellow">
+          {/* eyebrow: 8px yellow square + uppercase mono kicker with real -> arrows */}
+          <div className="mb-[24px] flex items-center gap-[8px] font-mono text-[12px] tracking-[0.08em] text-yellow">
             <span
               aria-hidden="true"
               className="inline-block"
               style={{ width: 8, height: 8, background: "var(--yellow)" }}
             />
-            sentence -&gt; paid api -&gt; onchain
+            SENTENCE → PAID API → ONCHAIN
           </div>
 
-          <h1 className="text-hero font-display font-bold tracking-tighter text-ink lowercase">
-            you utter a sentence; you get a paid api.
+          <h1 className="mb-[24px] text-[64px] font-display font-bold leading-[0.98] tracking-[-0.04em] text-ink lowercase">
+            you utter a sentence;
+            <br />
+            you get a paid api.
           </h1>
 
-          <p className="mt-md max-w-md text-body text-ink-muted lowercase">
+          <p className="mb-[36px] max-w-[440px] text-[18px] leading-[1.5] text-ink-muted lowercase">
             describe an endpoint in plain english. utter writes, deploys, verifies and
             lists it. agents discover it and pay per call in usdc. you earn the majority.
           </p>
 
-          <div className="mt-lg flex flex-wrap items-center gap-sm">
+          <div className="flex items-center gap-[12px]">
             <Link
               to="/create"
-              className="inline-flex items-center gap-xs px-lg py-md text-body font-display font-semibold text-canvas"
+              className="inline-flex items-center gap-[10px] px-[26px] py-[16px] text-[15px] font-display font-semibold text-white"
               style={{ background: "var(--red)" }}
             >
               <span
@@ -130,14 +110,14 @@ export function Hero(): React.ReactElement {
                   height: 0,
                   borderTop: "6px solid transparent",
                   borderBottom: "6px solid transparent",
-                  borderLeft: "10px solid var(--canvas)",
+                  borderLeft: "10px solid #fff",
                 }}
               />
               start uttering
             </Link>
             <Link
               to="/discover"
-              className="inline-flex items-center px-lg py-md text-body font-mono text-ink border border-hairline lowercase"
+              className="inline-flex items-center border border-hairline px-[26px] py-[16px] text-[15px] font-mono text-ink lowercase"
             >
               browse marketplace
             </Link>
@@ -147,8 +127,8 @@ export function Hero(): React.ReactElement {
         <HeroComposition />
       </div>
 
-      {/* proof strip: three blocks, stacking to one column on mobile */}
-      <div className="grid grid-cols-1 gap-px sm:grid-cols-3">
+      {/* proof strip: seamless 1px hairline grid (comp 106-122) */}
+      <div className="mb-[8px] grid grid-cols-3 gap-px border border-hairline bg-hairline">
         <ProofBlock
           glyph={
             <span
