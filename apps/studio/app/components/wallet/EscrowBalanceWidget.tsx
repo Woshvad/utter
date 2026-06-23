@@ -1,115 +1,76 @@
-// EscrowBalanceWidget - the STU-06 escrow balance surface. The balance renders BIG
-// and mono via the single UsdcAmount surface (6dp-aware; the decimals come from the
-// runtime read in useEscrowBalance - no 6/1e6 literal here). Wallet leads yellow
-// (money). Deposit and withdraw are user-signed browser txs; withdraw is an OUTFLOW
-// and therefore opens a bordered confirm Modal + scrim showing the mono amount before
-// signing (never one-click - the destructive-action discipline, T-06-OUTFLOW).
+// EscrowBalanceWidget - the STU-06 escrow balance card (comp 586-594). The balance
+// renders BIG (52px) and mono via the single UsdcAmount surface (6dp-aware; the
+// decimals come from the runtime read in useEscrowBalance - no 6/1e6 literal here).
+// Wallet leads yellow (money). A faint yellow corner square is the Bauhaus accent.
+//
+// This card is READ-ONLY: it shows the balance, the connected address pill and the
+// "arc testnet" chain label. The deposit/withdraw move-money controls live in the
+// deposit card alongside this one (the destructive withdraw confirm stays there).
 import * as React from "react";
 import { UsdcAmount } from "../primitives/UsdcAmount";
-import { Modal } from "../primitives/Modal";
+import { AddressPill } from "../primitives/AddressPill";
 
 export interface EscrowBalanceWidgetProps {
+  /** The connected wallet address (rendered as a plain comp pill). Undefined => no pill. */
+  address?: string;
   /** Escrow balance in base units (from useEscrowBalance), or undefined while loading. */
   baseUnits?: bigint;
   /** Runtime USDC decimals (from readUsdcBalance). Required to render the amount. */
   decimals?: number;
   /** True while the balance read is in flight. */
   loading?: boolean;
-  /** Deposit handler (user-signed inflow; no confirm gate required). */
-  onDeposit?: () => void;
-  /** Withdraw handler (user-signed OUTFLOW; gated behind the confirm modal). */
-  onWithdraw?: () => void;
 }
 
 export function EscrowBalanceWidget({
+  address,
   baseUnits,
   decimals,
   loading = false,
-  onDeposit,
-  onWithdraw,
 }: EscrowBalanceWidgetProps): React.ReactElement {
-  const [confirmOpen, setConfirmOpen] = React.useState(false);
   const hasBalance = baseUnits !== undefined && decimals !== undefined;
 
-  const confirmWithdraw = React.useCallback(() => {
-    setConfirmOpen(false);
-    onWithdraw?.();
-  }, [onWithdraw]);
-
   return (
-    <section data-testid="escrow-balance-widget" className="flex flex-col gap-md">
-      <span className="text-label font-display lowercase text-ink-muted">escrow balance</span>
+    <section
+      data-testid="escrow-balance-widget"
+      className="relative overflow-hidden border border-hairline bg-raised p-[28px]"
+    >
+      {/* faint yellow corner square - the Bauhaus money accent (comp 587) */}
+      <div
+        aria-hidden="true"
+        className="absolute right-[-30px] top-[-30px] h-[120px] w-[120px] bg-yellow opacity-[0.08]"
+      />
 
-      {/* big mono USDC (yellow emphasis - money) */}
-      <div data-testid="escrow-balance-amount" className="flex items-baseline gap-xs">
+      <div className="mb-[12px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+        ESCROW BALANCE · USDC
+      </div>
+
+      {/* big mono USDC (52px, yellow emphasis - money) */}
+      <div data-testid="escrow-balance-amount" className="leading-none">
         {loading || !hasBalance ? (
-          <span className="font-mono tabular-nums text-display text-ink-faint">$—</span>
+          <span className="font-mono tabular-nums text-[52px] font-bold tracking-[-0.02em] text-ink-faint leading-none">
+            $—
+          </span>
         ) : (
           <UsdcAmount
             baseUnits={baseUnits}
             decimals={decimals}
-            className="text-display text-yellow"
+            className="text-[52px] font-bold tracking-[-0.02em] text-yellow leading-none"
           />
         )}
-        <span className="text-label font-display lowercase text-ink-faint">usdc</span>
       </div>
 
-      <div className="flex items-center gap-xs">
-        {/* deposit: inflow, no confirm gate */}
-        <button
-          type="button"
-          data-testid="escrow-deposit"
-          onClick={onDeposit}
-          className="inline-flex items-center bg-yellow px-md py-xs text-label font-display font-semibold lowercase outline-none focus-visible:ring-2 focus-visible:ring-blue"
-          style={{ color: "var(--paper-ink, #0C0C0D)" }}
-        >
-          deposit
-        </button>
-        {/* withdraw: OUTFLOW - opens the bordered confirm modal first (never one-click) */}
-        <button
-          type="button"
-          data-testid="escrow-withdraw"
-          onClick={() => setConfirmOpen(true)}
-          className="inline-flex items-center border border-red px-md py-xs text-label font-display font-semibold text-red lowercase outline-none focus-visible:ring-2 focus-visible:ring-blue"
-        >
-          withdraw
-        </button>
+      <div className="mt-[16px] flex items-center gap-[8px]">
+        {address ? (
+          <AddressPill
+            address={address}
+            copy={false}
+            className="border border-hairline px-[10px] py-[6px] text-[12px] text-ink-muted"
+          />
+        ) : (
+          <span className="font-mono text-[12px] text-ink-faint">not connected</span>
+        )}
+        <span className="font-mono text-[11px] text-ink-faint">arc testnet</span>
       </div>
-
-      <Modal
-        open={confirmOpen}
-        onClose={() => setConfirmOpen(false)}
-        title="confirm withdraw"
-        description="withdrawing moves usdc out of escrow. this is a signed on-chain transaction."
-        footer={
-          <>
-            <button
-              type="button"
-              data-testid="withdraw-cancel"
-              onClick={() => setConfirmOpen(false)}
-              className="border border-hairline px-md py-xs text-label font-display lowercase text-ink-muted outline-none focus-visible:ring-2 focus-visible:ring-blue"
-            >
-              cancel
-            </button>
-            <button
-              type="button"
-              data-testid="withdraw-confirm"
-              onClick={confirmWithdraw}
-              className="bg-red px-md py-xs text-label font-display font-semibold lowercase text-white outline-none focus-visible:ring-2 focus-visible:ring-blue"
-              style={{ color: "#fff" }}
-            >
-              withdraw
-            </button>
-          </>
-        }
-      >
-        {hasBalance ? (
-          <div className="flex items-baseline gap-xs">
-            <span className="text-label font-display lowercase text-ink-muted">balance</span>
-            <UsdcAmount baseUnits={baseUnits} decimals={decimals} className="text-heading text-ink" />
-          </div>
-        ) : null}
-      </Modal>
     </section>
   );
 }

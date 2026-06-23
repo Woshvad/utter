@@ -108,15 +108,14 @@ describe("useEscrowBalance (readUsdcBalance, runtime decimals)", () => {
   });
 });
 
-describe("EscrowBalanceWidget (mono balance + outflow confirm)", () => {
-  it("renders the balance mono via UsdcAmount and gates withdraw behind a confirm modal", async () => {
+describe("EscrowBalanceWidget (read-only comp card: 52px mono balance + pill + chain)", () => {
+  it("renders the balance mono via UsdcAmount, a no-copy address pill and the arc testnet label", async () => {
     const { EscrowBalanceWidget } = await import("../app/components/wallet/EscrowBalanceWidget");
-    const onWithdraw = vi.fn();
     render(
       React.createElement(EscrowBalanceWidget, {
+        address: "0x4f2a000000000000000000000000000000000091c0",
         baseUnits: 25000000n,
         decimals: 6,
-        onWithdraw,
       }),
     );
     // mono balance: 25000000 base units @ 6dp -> $25.000000
@@ -124,16 +123,14 @@ describe("EscrowBalanceWidget (mono balance + outflow confirm)", () => {
     expect(amounts.length).toBeGreaterThan(0);
     expect(screen.getByTestId("escrow-balance-amount").textContent).toContain("$25.000000");
 
-    // withdraw is NOT one-click: it opens the confirm modal first (T-06-OUTFLOW)
-    await act(async () => {
-      screen.getByTestId("escrow-withdraw").click();
-    });
-    expect(onWithdraw).not.toHaveBeenCalled();
-    const confirm = await screen.findByTestId("withdraw-confirm");
-    await act(async () => {
-      confirm.click();
-    });
-    expect(onWithdraw).toHaveBeenCalledTimes(1);
+    // comp escrow card: a plain (no-copy) address pill + the "arc testnet" chain label.
+    expect(screen.getByTestId("address-pill")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /copy address/i })).toBeNull();
+    expect(screen.getByText("arc testnet")).toBeTruthy();
+
+    // the read-only card carries NO move-money controls (those live in the deposit card)
+    expect(screen.queryByTestId("escrow-withdraw")).toBeNull();
+    expect(screen.queryByTestId("escrow-deposit")).toBeNull();
   });
 });
 
