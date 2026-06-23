@@ -1,0 +1,4 @@
+# File-backed runtime stores (FileApiKeyStore default path). Holds only SHA-256
+# hashes of API keys, never raw keys, but it is runtime state and must never be
+# committed. Tests redirect this to an OS temp file via STUDIO_API_KEYS_PATH.
+.data/

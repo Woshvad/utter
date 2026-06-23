@@ -13,13 +13,18 @@
 //     or throws 401. The raw key is never logged.
 //
 // Raw keys never enter this module's logs (zero console.* in the auth path).
-import { InMemoryApiKeyStore, type ApiKeyStore } from "./apikey.server.js";
+import { FileApiKeyStore, type ApiKeyStore } from "./apikey.server.js";
 
 /**
- * The process-wide API-key store (autonomous default: in-memory). A real deployment
- * swaps a Postgres-backed ApiKeyStore here; call sites depend only on the interface.
+ * The process-wide API-key store. Now file-backed (FileApiKeyStore) so minted keys
+ * survive a restart and are shared across processes that point at the same path; it
+ * persists ONLY SHA-256 hashes (never the raw key), writes atomically, and degrades
+ * to empty on a corrupt file. The path comes from STUDIO_API_KEYS_PATH (the test
+ * suite points this at an OS temp file) or defaults to <app>/.data/api-keys.json. A
+ * real deployment can still swap a Postgres-backed ApiKeyStore here; call sites depend
+ * only on the interface.
  */
-export const apiKeyStore: ApiKeyStore = new InMemoryApiKeyStore();
+export const apiKeyStore: ApiKeyStore = new FileApiKeyStore();
 
 /**
  * Programmatic (non-SIWE) auth: verify a presented `Authorization: Bearer <raw>` key
