@@ -33,6 +33,7 @@ export default [
   layout("routes/_shell.tsx", [
     route("create", "routes/create.tsx"),
     route("discover", "routes/discover.tsx"),
+    route("mcp", "routes/mcp.tsx"),
     route("dashboard", "routes/dashboard.tsx"),
     route("wallet", "routes/wallet.tsx"),
     route("keys", "routes/keys.tsx"),
