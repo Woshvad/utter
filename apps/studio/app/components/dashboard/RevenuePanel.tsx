@@ -1,100 +1,134 @@
-// RevenuePanel - the STU-04 revenue summary panel. Every money figure renders
-// through the single UsdcAmount surface (mono, 6dp-aware, NO 1e6/6/18 literal); the
-// creator/platform split is the projected RevenueSummary value, NOT recomputed here
-// (T-06-REDERIVE). The dashboard leads yellow (money) per the color discipline:
-// revenue figures + the revenue chart are yellow, the calls chart is blue.
+// RevenuePanel - the STU-04 revenue summary panel (comp 643-663).
 //
-// The BauhausChart plots plain numeric series. When a money series is charted, the
-// base units are scaled to a display number via the SAME runtime-decimals path
-// UsdcAmount uses (`scaleToDisplay`) - there is no money-scale literal here either.
+// Two regions: (1) four stat cells in the signature seamless 1px hairline grid
+// (gap-px over a bg-hairline wrapper, each cell bg-raised) - TOTAL EARNINGS (yellow,
+// the money hero) / CALLS - 30D (blue) / LIVE APIS / STRIKES; (2) two chart cards
+// with a color-dot title each - "revenue - usdc / month" (yellow) and "calls /
+// month" (blue) - each a 12-bar BauhausChart.
+//
+// Money discipline: TOTAL EARNINGS renders through the single UsdcAmount surface
+// (mono, decimal-aware, NO 1e6/6/18 literal); the aggregate is the projected
+// read-through creator earnings, NOT recomputed here (T-06-REDERIVE). The dashboard
+// leads yellow (money). The 12-month chart series have no real monthly history; they
+// are the representative comp series, clearly representative.
 import * as React from "react";
 import { UsdcAmount } from "../primitives/UsdcAmount";
-import { BauhausChart, type ChartPoint } from "../charts/BauhausChart";
-import type { RevenueSummary } from "../../adapter/types";
+import { BauhausChart, type ChartPoint, type TriadColor } from "../charts/BauhausChart";
 
 export interface RevenuePanelProps {
-  /** The read-through revenue summary (calls/gross/shares/refunds + receipts). */
-  revenue: RevenueSummary;
-  /** Runtime USDC decimals (from getEscrowBalance/readUsdcBalance). The ONLY scale. */
+  /** Aggregate creator earnings across all resources, base units (read-through). */
+  earnings: bigint;
+  /** Total settled calls across all resources. */
+  totalCalls: number;
+  /** Count of currently-active (live) resources. */
+  liveApis: number;
+  /** Active strikes / alerts count. */
+  strikes: number;
+  /** Runtime USDC decimals (from getEscrowBalance). The ONLY money scale. */
   decimals: number;
+  /** Representative 12-point monthly revenue series (no real history). */
+  revenueSeries: number[];
+  /** Representative 12-point monthly calls series (no real history). */
+  callsSeries: number[];
 }
 
-/**
- * Scale a base-unit bigint to a display number for the chart, using ONLY the runtime
- * decimals (built as 10n ** BigInt(decimals)) - no money-scale literal. The chart
- * needs a plain number; we keep full precision through the bigint divmod and only
- * lose precision at the final Number() for the visual bar height.
- */
-function scaleToDisplay(baseUnits: bigint, decimals: number): number {
-  const divisor = 10n ** BigInt(decimals);
-  const whole = baseUnits / divisor;
-  const frac = baseUnits % divisor;
-  // Compose whole.frac as a number for the bar height only (display, not money math).
-  return Number(whole) + Number(frac) / Number(divisor);
+/** Format an integer count with thousands separators (locale-stable grouping). */
+function formatCount(n: number): string {
+  return n.toLocaleString("en-US");
 }
 
-/** A single labelled money figure, rendered mono via UsdcAmount. */
-function Figure({
+/** One stat cell of the seamless 1px grid: mono label + mono value. */
+function StatCell({
   label,
-  baseUnits,
-  decimals,
-  emphasis,
+  children,
+  testid,
 }: {
   label: string;
-  baseUnits: bigint;
-  decimals: number;
-  emphasis?: boolean;
+  children: React.ReactNode;
+  testid: string;
 }): React.ReactElement {
   return (
-    <div data-testid={`revenue-figure-${label}`} className="flex flex-col gap-2xs">
-      <span className="text-label font-display lowercase text-ink-muted">{label}</span>
-      <UsdcAmount
-        baseUnits={baseUnits}
-        decimals={decimals}
-        className={emphasis ? "text-display-sm text-yellow" : "text-heading text-ink"}
-      />
+    <div data-testid={testid} className="bg-raised p-[20px]">
+      <div className="mb-[8px] font-mono text-[11px] text-ink-faint">{label}</div>
+      <div className="font-mono text-[26px] font-bold">{children}</div>
     </div>
   );
 }
 
-export function RevenuePanel({ revenue, decimals }: RevenuePanelProps): React.ReactElement {
-  // Revenue chart series (yellow): gross / creator / platform / refunds, scaled to a
-  // display number via the runtime-decimals path (no literal).
-  const revenueSeries: ChartPoint[] = [
-    { label: "gross", value: scaleToDisplay(revenue.gross, decimals) },
-    { label: "creator", value: scaleToDisplay(revenue.creatorShare, decimals) },
-    { label: "platform", value: scaleToDisplay(revenue.platformShare, decimals) },
-    { label: "refunds", value: scaleToDisplay(revenue.refunds, decimals) },
-  ];
-  // Calls chart series (blue): a single calls bar (plain count, never money).
-  const callsSeries: ChartPoint[] = [{ label: "calls", value: revenue.calls }];
-
+/** One chart card: a color-dot title row over a 12-bar BauhausChart. */
+function ChartCard({
+  title,
+  color,
+  values,
+  ariaLabel,
+}: {
+  title: string;
+  color: TriadColor;
+  values: number[];
+  ariaLabel: string;
+}): React.ReactElement {
+  const dot: Record<TriadColor, string> = {
+    red: "var(--red)",
+    blue: "var(--blue)",
+    yellow: "var(--yellow)",
+  };
+  const series: ChartPoint[] = values.map((v, i) => ({ label: `m${i + 1}`, value: v }));
   return (
-    <section data-testid="revenue-panel" className="flex flex-col gap-lg">
-      {/* the money figures - yellow leads (revenue is the hero figure) */}
-      <div className="grid grid-cols-2 gap-lg md:grid-cols-4">
-        <Figure label="gross" baseUnits={revenue.gross} decimals={decimals} emphasis />
-        <Figure label="creator" baseUnits={revenue.creatorShare} decimals={decimals} />
-        <Figure label="platform" baseUnits={revenue.platformShare} decimals={decimals} />
-        <Figure label="refunds" baseUnits={revenue.refunds} decimals={decimals} />
+    <div data-testid="chart-card" className="border border-hairline bg-raised p-[20px]">
+      <div className="mb-[18px] flex items-center gap-[8px]">
+        <span
+          aria-hidden="true"
+          className="h-[10px] w-[10px]"
+          style={{ background: dot[color] }}
+        />
+        <span className="text-[14px] font-semibold">{title}</span>
+      </div>
+      <BauhausChart series={series} color={color} ariaLabel={ariaLabel} />
+    </div>
+  );
+}
+
+export function RevenuePanel({
+  earnings,
+  totalCalls,
+  liveApis,
+  strikes,
+  decimals,
+  revenueSeries,
+  callsSeries,
+}: RevenuePanelProps): React.ReactElement {
+  return (
+    <section data-testid="revenue-panel">
+      {/* four stat cells in the seamless 1px hairline grid (the signature motif) */}
+      <div className="mb-[16px] grid grid-cols-4 gap-px border border-hairline bg-hairline">
+        <StatCell label="TOTAL EARNINGS" testid="stat-total-earnings">
+          <UsdcAmount baseUnits={earnings} decimals={decimals} className="text-yellow" />
+        </StatCell>
+        <StatCell label="CALLS · 30D" testid="stat-calls-30d">
+          <span className="text-blue">{formatCount(totalCalls)}</span>
+        </StatCell>
+        <StatCell label="LIVE APIS" testid="stat-live-apis">
+          <span className="text-ink">{liveApis}</span>
+        </StatCell>
+        <StatCell label="STRIKES" testid="stat-strikes">
+          <span className="text-ink">{strikes}</span>
+        </StatCell>
       </div>
 
-      {/* calls is a plain count, mono numeric, never money */}
-      <div data-testid="revenue-calls" className="flex items-baseline gap-xs">
-        <span className="text-label font-display lowercase text-ink-muted">calls</span>
-        <span className="font-mono tabular-nums text-heading text-ink">{revenue.calls}</span>
-      </div>
-
-      {/* charts: revenue=yellow, calls=blue (the color discipline) */}
-      <div className="grid grid-cols-1 gap-lg md:grid-cols-2">
-        <div className="flex flex-col gap-xs">
-          <span className="text-label font-display lowercase text-ink-muted">revenue</span>
-          <BauhausChart series={revenueSeries} color="yellow" ariaLabel="revenue breakdown in usdc" />
-        </div>
-        <div className="flex flex-col gap-xs">
-          <span className="text-label font-display lowercase text-ink-muted">calls</span>
-          <BauhausChart series={callsSeries} color="blue" ariaLabel="total settled calls" />
-        </div>
+      {/* two chart cards: revenue=yellow, calls=blue (the color discipline) */}
+      <div className="mb-[16px] grid grid-cols-2 gap-[16px]">
+        <ChartCard
+          title="revenue · usdc / month"
+          color="yellow"
+          values={revenueSeries}
+          ariaLabel="monthly revenue in usdc (representative)"
+        />
+        <ChartCard
+          title="calls / month"
+          color="blue"
+          values={callsSeries}
+          ariaLabel="monthly calls (representative)"
+        />
       </div>
     </section>
   );
