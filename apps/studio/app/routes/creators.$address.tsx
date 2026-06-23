@@ -53,6 +53,8 @@ export interface CreatorProfileData {
   totalCalls: number;
   /** Total creator earnings in base units (sum of getRevenue.creatorShare). */
   totalEarnings: bigint;
+  /** An honest 0-100 reputation score = round(avg(card.uptime) * 100), 0 when no cards. */
+  repScore: number;
 }
 
 /** The empty-creator payload (unknown/bad address): zero totals, no cards, honest decimals. */
@@ -65,6 +67,7 @@ function emptyPayload(address: string, decimals: number): CreatorProfileData {
     reputation: 0n,
     totalCalls: 0,
     totalEarnings: 0n,
+    repScore: 0,
   };
 }
 
@@ -102,6 +105,13 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<CreatorPro
   const totalCalls = revenues.reduce((sum, r) => sum + r.calls, 0);
   const totalEarnings = revenues.reduce((sum, r) => sum + r.creatorShare, 0n);
 
+  // An honest 0-100 reputation score derived from the owned cards' real uptime
+  // (0..1). No fabricated score exists on-chain; this is round(avg(uptime) * 100).
+  const repScore =
+    cards.length === 0
+      ? 0
+      : Math.round((cards.reduce((sum, c) => sum + c.uptime, 0) / cards.length) * 100);
+
   return {
     address,
     cards,
@@ -110,22 +120,21 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<CreatorPro
     reputation,
     totalCalls,
     totalEarnings,
+    repScore,
   };
 }
 
 export default function CreatorProfileRoute(): React.ReactElement {
-  const { address, cards, decimals, apiCount, reputation, totalCalls, totalEarnings } =
+  const { address, cards, decimals, apiCount, reputation, totalCalls, totalEarnings, repScore } =
     useLoaderData<typeof loader>();
 
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-lg p-xl">
-      <header className="flex flex-col gap-xs">
-        <span className="text-caption-mono font-mono text-ink-faint lowercase">channel</span>
-        <h1 className="text-display font-display lowercase text-ink">creator</h1>
-      </header>
-
+    // The banner is full-bleed within the 1280px container (no horizontal padding here);
+    // the inner content wrapper supplies the 32px gutter (comp 688-738).
+    <div className="mx-auto max-w-[1280px] pb-[64px]">
       <ChannelHeader
         address={address}
+        repScore={repScore}
         reputation={reputation}
         apiCount={apiCount}
         totalCalls={totalCalls}
@@ -133,14 +142,18 @@ export default function CreatorProfileRoute(): React.ReactElement {
         decimals={decimals}
       />
 
-      <section className="flex flex-col gap-md">
-        <h2 className="text-heading font-display lowercase text-ink">apis</h2>
+      {/* published apis: aligned with the header content via the same 32px gutter. */}
+      <div className="px-[32px]">
+        <div className="mb-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+          PUBLISHED APIS
+        </div>
         <CardGrid
           cards={cards}
           decimals={decimals}
+          thumbHeight={130}
           hrefFor={(card) => `/resources/${card.resourceId}`}
         />
-      </section>
+      </div>
     </div>
   );
 }
