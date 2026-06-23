@@ -206,7 +206,7 @@ export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): Reac
         {/* footer chain line: 8px blue circle + the network/settlement caption */}
         <div className="mt-[28px] flex items-center gap-[8px] border-t border-hairline pt-[18px] font-mono text-[12px] text-ink-faint lowercase">
           <span aria-hidden="true" className="inline-block rounded-full" style={{ width: 8, height: 8, background: "var(--blue)" }} />
-          arc mainnet · usdc settlement
+          arc testnet · usdc settlement
         </div>
       </div>
     </div>
