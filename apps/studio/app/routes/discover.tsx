@@ -171,43 +171,53 @@ export default function DiscoverRoute(): React.ReactElement {
     minReputation: criteria.minReputation !== undefined ? criteria.minReputation.toString() : undefined,
   };
 
+  // The card count copy: "{n} apis" inline next to the h1 (singular "1 api"), comp 369.
+  const countLabel = `${cards.length} ${cards.length === 1 ? "api" : "apis"}`;
+
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-lg p-xl">
-      {/* lead neutral + blue per the color discipline (no red/yellow chrome here) */}
-      <header className="flex flex-col gap-xs">
-        <h1 className="text-display font-display lowercase text-ink">discover</h1>
-        <p className="text-body text-ink-muted lowercase">
-          browse live, agent-payable apis. pay per call in usdc.
-        </p>
+    <div className="max-w-[1320px] px-[32px] pt-[28px] pb-[64px]">
+      {/* header: "discover" + the inline "{n} apis" count (comp 367-370) */}
+      <header className="mb-[20px] flex items-baseline gap-[16px]">
+        <h1 className="m-0 text-[26px] font-semibold tracking-[-0.02em] lowercase text-ink">
+          discover
+        </h1>
+        <span className="font-mono text-[13px] text-ink-faint tabular-nums lowercase">
+          {countLabel}
+        </span>
       </header>
 
-      <CategoryChips
-        categories={categories}
-        active={criteria.category}
-        hrefFor={(c) => withParam(params, "category", c)}
-      />
-
-      <div className="flex flex-col gap-lg lg:flex-row">
-        <aside className="lg:w-72 lg:shrink-0">
-          <FilterPanel values={filterValues} />
-        </aside>
-
-        <section className="flex flex-1 flex-col gap-md">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-caption-mono text-ink-faint tabular-nums lowercase">
-              {`${cards.length} ${cards.length === 1 ? "resource" : "resources"}`}
-            </span>
-            <SortControl active={sort} hrefFor={(s) => withParam(params, "sort", s)} />
-          </div>
-
-          <CardGrid
-            cards={cards}
-            decimals={decimals}
-            query={query}
-            hrefFor={(card) => `/resources/${card.resourceId}`}
-          />
-        </section>
+      {/* category chips row (comp 371-375) */}
+      <div className="mb-[18px]">
+        <CategoryChips
+          categories={categories}
+          active={criteria.category}
+          hrefFor={(c) => withParam(params, "category", c)}
+        />
       </div>
+
+      {/* sort bar (comp 376-381): "sort" label + the sort items. The advanced
+          FilterPanel is preserved but hidden by default (a <details> disclosure whose
+          "filters" summary sits at the right end of the bar) so the resting layout
+          matches the comp single column exactly. */}
+      <details data-testid="filters-disclosure" className="mb-[24px]">
+        <div className="flex items-center gap-[6px] border-b border-hairline pb-[2px]">
+          <span className="mr-[6px] font-mono text-[12px] text-ink-faint lowercase">sort</span>
+          <SortControl active={sort} hrefFor={(s) => withParam(params, "sort", s)} />
+          <summary className="ml-auto cursor-pointer list-none px-[13px] py-[8px] font-mono text-[12px] text-ink-faint lowercase hover:text-ink [&::-webkit-details-marker]:hidden">
+            filters
+          </summary>
+        </div>
+        <div className="pt-[16px]">
+          <FilterPanel values={filterValues} />
+        </div>
+      </details>
+
+      <CardGrid
+        cards={cards}
+        decimals={decimals}
+        query={query}
+        hrefFor={(card) => `/resources/${card.resourceId}`}
+      />
     </div>
   );
 }
