@@ -72,9 +72,13 @@ export function MeteredTicker({
     <div
       data-testid="metered-ticker"
       aria-live="polite"
-      className="inline-flex items-baseline gap-xs font-mono text-body text-ink tabular-nums"
+      className="inline-flex items-baseline gap-xs font-mono tabular-nums"
     >
-      <span data-testid="metered-value">
+      {/* the footer metered value: 18px bold yellow (the comp's metered figure) */}
+      <span
+        data-testid="metered-value"
+        className="font-mono text-[18px] font-bold text-yellow"
+      >
         <UsdcAmount baseUnits={shown} decimals={decimals} />
       </span>
       {isMetered ? (

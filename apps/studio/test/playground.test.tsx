@@ -100,24 +100,26 @@ describe("PlaygroundPlayer (Run drives runPlayground via the frozen gate)", () =
   });
 });
 
-describe("PaywallSheet (the 402 red-bar beat from the accepts quote)", () => {
-  it("renders the red bar + the mono cap price read from the quote (never recomputed)", () => {
+describe("PaywallSheet (the 402 overlay beat from the accepts quote)", () => {
+  it("renders the 402 red bar + the mono cap price read from the quote (never recomputed)", () => {
     render(<PaywallSheet quote={QUOTE} decimals={6} funded={false} onPay={vi.fn()} />);
     const sheet = screen.getByTestId("paywall-sheet");
-    // the red-bar beat marker
-    expect(within(sheet).getByTestId("paywall-bar")).toBeInTheDocument();
-    // cap 50000 base units, decimals 6 -> $0.050000 read straight from the quote
-    expect(within(sheet).getByText("$0.050000")).toBeInTheDocument();
+    // the 402 red-bar beat marker carries the comp copy
+    expect(within(sheet).getByTestId("paywall-bar").textContent).toMatch(/402 · PAYMENT REQUIRED/);
+    // the call-to-action line
+    expect(within(sheet).getByText(/pay to run this call/i)).toBeInTheDocument();
+    // cap 50000 base units, decimals 6 -> $0.050000 read straight from the quote (it
+    // appears both in the capped-at line and the pay button label)
+    expect(within(sheet).getAllByText("$0.050000").length).toBeGreaterThan(0);
   });
 
-  it("offers 'deposit & pay' when unfunded and 'pay from balance' when funded", () => {
-    const { rerender } = render(
-      <PaywallSheet quote={QUOTE} decimals={6} funded={false} onPay={vi.fn()} />,
-    );
-    expect(screen.getByText(/deposit & pay/i)).toBeInTheDocument();
-
-    rerender(<PaywallSheet quote={QUOTE} decimals={6} funded onPay={vi.fn()} />);
-    expect(screen.getByText(/pay from balance/i)).toBeInTheDocument();
+  it("offers a pay-from-balance control, a deposit & pay link (-> /wallet), and a cancel", () => {
+    render(<PaywallSheet quote={QUOTE} decimals={6} funded onPay={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByTestId("paywall-pay").textContent).toMatch(/from balance/i);
+    const deposit = screen.getByTestId("paywall-deposit");
+    expect(deposit.textContent).toMatch(/deposit & pay/i);
+    expect(deposit).toHaveAttribute("href", "/wallet");
+    expect(screen.getByTestId("paywall-cancel").textContent).toMatch(/cancel/i);
   });
 
   it("invokes onPay when the pay control is clicked (then the result streams)", () => {
@@ -125,6 +127,13 @@ describe("PaywallSheet (the 402 red-bar beat from the accepts quote)", () => {
     render(<PaywallSheet quote={QUOTE} decimals={6} funded onPay={onPay} />);
     fireEvent.click(screen.getByTestId("paywall-pay"));
     expect(onPay).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes onCancel when the cancel control is clicked", () => {
+    const onCancel = vi.fn();
+    render(<PaywallSheet quote={QUOTE} decimals={6} funded onPay={vi.fn()} onCancel={onCancel} />);
+    fireEvent.click(screen.getByTestId("paywall-cancel"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
 
