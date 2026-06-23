@@ -202,7 +202,8 @@ describe("discover screen (filter/sort/chips + empty/no-results states)", () => 
       sort: "top",
       categories: [],
     });
-    expect(screen.getByText(/nothing here yet\. utter the first one\./i)).toBeInTheDocument();
+    expect(screen.getByText(/nothing here yet\./i)).toBeInTheDocument();
+    expect(screen.getByText(/utter the first one\./i)).toBeInTheDocument();
   });
 
   it("renders the no-results copy with the query when filtered to nothing", async () => {

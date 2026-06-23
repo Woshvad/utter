@@ -1,6 +1,6 @@
-// CardGrid - the responsive marketplace grid (16px gap) with the four states from
-// the copywriting contract: data, loading (SQUARE skeletons, never a spinner),
-// empty ("nothing here yet. utter the first one."), and no-results (with the query).
+// CardGrid - the responsive marketplace grid (comp 395: auto-fill minmax(290px), 16px
+// gap) with the four states: data, loading (hairline-block skeletons, never a spinner),
+// empty ("nothing here yet." / "utter the first one."), and no-results (with the query).
 import * as React from "react";
 import type { ResourceCardData } from "../../adapter/types";
 import { ResourceCard } from "./ResourceCard";
@@ -8,7 +8,7 @@ import { ResourceCard } from "./ResourceCard";
 export interface CardGridProps {
   cards: ResourceCardData[];
   decimals: number;
-  /** When true, render square skeletons instead of cards. */
+  /** When true, render skeletons instead of cards. */
   loading?: boolean;
   /** The active search query - drives the no-results vs empty copy. */
   query?: string;
@@ -20,9 +20,12 @@ export interface CardGridProps {
   skeletonCount?: number;
 }
 
+/** The auto-fill grid (comp 395). */
+const GRID_CLASS = "grid grid-cols-[repeat(auto-fill,minmax(290px,1fr))] gap-[16px]";
+
 function Skeletons({ count }: { count: number }): React.ReactElement {
   return (
-    <div className="grid grid-cols-1 gap-md sm:grid-cols-2 lg:grid-cols-3">
+    <div className={GRID_CLASS}>
       {Array.from({ length: count }).map((_, i) => (
         <div
           key={i}
@@ -30,8 +33,8 @@ function Skeletons({ count }: { count: number }): React.ReactElement {
           className="border border-hairline bg-raised"
           aria-hidden="true"
         >
-          <div className="aspect-[16/9] w-full bg-g1" />
-          <div className="flex flex-col gap-sm p-md">
+          <div className="h-[150px] w-full bg-canvas" />
+          <div className="flex flex-col gap-[10px] p-[14px]">
             <div className="h-4 w-2/3 bg-g2" />
             <div className="h-3 w-1/2 bg-g1" />
             <div className="h-5 w-1/3 bg-g2" />
@@ -58,39 +61,42 @@ export function CardGrid({
   if (cards.length === 0) {
     const hasQuery = Boolean(query && query.length > 0);
     return (
-      <div
-        data-testid="card-grid-empty"
-        className="flex flex-col items-start gap-md border border-hairline bg-raised p-2xl"
-      >
-        {/* constructivist art block + one terse line */}
-        <div aria-hidden="true" className="flex items-center gap-sm">
-          <span className="inline-block rounded-full" style={{ width: 20, height: 20, background: "var(--red)" }} />
-          <span className="inline-block" style={{ width: 20, height: 20, background: "var(--blue)" }} />
+      <div data-testid="card-grid-empty" className="py-[80px] text-center">
+        {/* three outline triad shapes (comp 385-389) */}
+        <div aria-hidden="true" className="mb-[20px] inline-flex gap-[10px]">
+          <span className="inline-block border-2 border-hairline" style={{ width: 20, height: 20 }} />
+          <span
+            className="inline-block rounded-full border-2 border-hairline"
+            style={{ width: 20, height: 20 }}
+          />
           <span
             style={{
               width: 0,
               height: 0,
               borderLeft: "11px solid transparent",
               borderRight: "11px solid transparent",
-              borderBottom: "20px solid var(--yellow)",
+              borderBottom: "18px solid var(--hairline)",
             }}
           />
         </div>
         {hasQuery ? (
-          <p className="text-body text-ink-muted lowercase">
+          <p className="text-[14px] text-ink-muted lowercase">
             {`no results for "${query}". try a different term or clear filters.`}
           </p>
         ) : (
-          <p className="text-body text-ink-muted lowercase">
-            nothing here yet. utter the first one.
-          </p>
+          <>
+            <div className="mb-[6px] text-[18px] font-semibold lowercase text-ink">
+              nothing here yet.
+            </div>
+            <div className="text-[14px] text-ink-muted lowercase">utter the first one.</div>
+          </>
         )}
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 gap-md sm:grid-cols-2 lg:grid-cols-3">
+    <div className={GRID_CLASS}>
       {cards.map((card) => (
         <ResourceCard
           key={card.resourceId}

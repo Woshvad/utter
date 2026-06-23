@@ -1,8 +1,9 @@
 // ResourceCard is the most important marketplace component. It RENDERS card data
-// (price/identity/bond/reputation projected by Phase 5); it must never re-derive a
-// price. These tests pin: the lowercase title, the mono price pill (flat / metered
-// cap), the reputation + bond + verified badges, and the read-through discipline
-// (the price shown equals the base units passed in, never recomputed).
+// (price/identity/reputation projected by Phase 5); it must never re-derive a price.
+// These tests pin the comp form (Utter.dc.html 397-433): the lowercase title, the
+// mono yellow price pill (flat "$X / call" / metered "<= $cap"), the "/100" reputation
+// in the creator row, the in-thumbnail verified badge, the calls figure, and the
+// read-through discipline (the price shown equals the base units passed in).
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { ResourceCard } from "../../app/components/discover/ResourceCard";
@@ -46,20 +47,21 @@ describe("ResourceCard", () => {
     expect(pill).toHaveAttribute("data-model", "flat");
   });
 
-  it("renders a metered price pill with the cap suffix", () => {
+  it("renders a metered price pill showing the cap (comp '<= $cap' form)", () => {
     render(<ResourceCard card={METERED_CARD} decimals={6} verified />);
     const pill = screen.getByTestId("price-pill");
     expect(pill).toHaveAttribute("data-model", "metered");
-    // base $0.002000 and cap $0.050000 both rendered from the passed base units
-    expect(within(pill).getByText("$0.002000")).toBeInTheDocument();
+    // metered shows the cap $0.050000, rendered from the passed cap base units
     expect(within(pill).getByText("$0.050000")).toBeInTheDocument();
   });
 
-  it("renders the reputation, bond, and verified badges", () => {
+  it("renders the '/100' reputation in the creator row and the in-thumbnail verified badge", () => {
     render(<ResourceCard card={FLAT_CARD} decimals={6} verified />);
-    expect(screen.getByTestId("reputation-badge")).toBeInTheDocument();
-    expect(screen.getByTestId("bond-badge")).toBeInTheDocument();
-    expect(screen.getByTestId("verified-badge")).toHaveAttribute("data-verified", "true");
+    const rep = screen.getByTestId("reputation-badge");
+    expect(rep).toHaveAttribute("data-variant", "score");
+    expect(rep.textContent).toBe("12/100");
+    // the in-thumbnail badge: the literal "verified" label renders only when verified
+    expect(screen.getByText("verified")).toBeInTheDocument();
   });
 
   it("never recomputes the price - it renders exactly the base units it was given", () => {
@@ -84,7 +86,8 @@ describe("CardGrid", () => {
 
   it("renders the empty-state copy when there are no cards", () => {
     render(<CardGrid cards={[]} decimals={6} />);
-    expect(screen.getByText(/nothing here yet\. utter the first one\./i)).toBeInTheDocument();
+    expect(screen.getByText(/nothing here yet\./i)).toBeInTheDocument();
+    expect(screen.getByText(/utter the first one\./i)).toBeInTheDocument();
   });
 
   it("renders the no-results copy with the query when filtered to nothing", () => {

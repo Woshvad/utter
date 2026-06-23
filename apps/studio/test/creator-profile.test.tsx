@@ -181,8 +181,7 @@ describe("creator-profile screen (channel header + apis grid)", () => {
       totalEarnings: 0n,
     });
 
-    expect(
-      screen.getByText(/nothing here yet\. utter the first one\./i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/nothing here yet\./i)).toBeInTheDocument();
+    expect(screen.getByText(/utter the first one\./i)).toBeInTheDocument();
   });
 });
