@@ -42,11 +42,12 @@ export async function loader({ request: _request }: LoaderFunctionArgs): Promise
   return { cards, decimals };
 }
 
-/** The slim marketing top bar (wordmark left; discover / connect / +utter links right). */
+/** The slim marketing top bar (wordmark left; discover / connect / +utter links right).
+ *  72px tall with a hairline base rule, matching the comp header (Utter.dc.html 71-82). */
 function TopBar(): React.ReactElement {
   return (
-    <header className="flex h-16 items-center justify-between border-b border-hairline">
-      <div className="flex items-center gap-xs">
+    <header className="flex h-[72px] items-center justify-between border-b border-hairline">
+      <div className="flex items-center gap-[10px]">
         <span
           aria-hidden="true"
           className="inline-block rounded-full"
@@ -62,20 +63,27 @@ function TopBar(): React.ReactElement {
             borderLeft: "9px solid var(--ink)",
           }}
         />
-        <span className="text-heading font-display font-bold tracking-tighter text-ink lowercase">
+        <span className="text-[18px] font-display font-bold tracking-[-0.03em] text-ink lowercase">
           utter
         </span>
       </div>
-      <nav aria-label="marketing" className="flex items-center gap-xs font-mono text-caption-mono">
-        <Link to="/discover" className="px-md py-sm text-ink-muted lowercase">
+      <nav
+        aria-label="marketing"
+        className="flex items-center gap-[8px] font-mono text-[13px]"
+      >
+        <Link to="/discover" className="px-[14px] py-[10px] text-ink-muted lowercase">
           discover
         </Link>
-        <Link to="/auth" className="border border-hairline px-md py-sm text-ink lowercase">
+        <Link
+          to="/auth"
+          className="border border-hairline px-[16px] py-[10px] text-ink lowercase"
+        >
           connect wallet
         </Link>
+        {/* +utter: white text on red (the comp fix - it was near-black/text-canvas). */}
         <Link
           to="/create"
-          className="px-md py-sm font-semibold text-canvas lowercase"
+          className="px-[18px] py-[10px] font-semibold text-white lowercase"
           style={{ background: "var(--red)" }}
         >
           + utter
@@ -90,7 +98,7 @@ export default function LandingRoute(): React.ReactElement {
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
-      <div className="mx-auto max-w-6xl px-xl">
+      <div className="mx-auto max-w-[1320px] px-[32px]">
         <TopBar />
         <Hero />
       </div>
