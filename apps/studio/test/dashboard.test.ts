@@ -87,8 +87,35 @@ describe("dashboard loader (read-through revenue)", () => {
   });
 });
 
-describe("dashboard screen (mono money + ArcScan TxLinks)", () => {
-  it("renders money figures mono via UsdcAmount and a TxLink per receipt row", async () => {
+describe("dashboard loader (aggregates + per-resource rows)", () => {
+  it("sums earnings/calls, counts live, and builds a row per listed resource", async () => {
+    const { loader } = await import("../app/routes/dashboard");
+    const data = await loader({
+      params: {},
+      request: await authedGet("http://x/dashboard"),
+      context: {},
+    } as never);
+
+    // one row per listed marketplace card (fixture has 2)
+    expect(data.rows.length).toBeGreaterThan(0);
+    for (const row of data.rows) {
+      expect(typeof row.revenue).toBe("bigint");
+      expect(typeof row.calls).toBe("number");
+      expect(typeof row.bond).toBe("bigint");
+      expect(typeof row.active).toBe("boolean");
+      expect(typeof row.slug).toBe("string");
+    }
+
+    // totals are the read-through sums, never recomputed splits
+    expect(data.totals.earnings).toBe(data.rows.reduce((s, r) => s + r.revenue, 0n));
+    expect(data.totals.calls).toBe(data.rows.reduce((s, r) => s + r.calls, 0));
+    expect(data.totals.liveApis).toBe(data.rows.filter((r) => r.active).length);
+    expect(data.totals.strikes).toBe(data.alerts.length);
+  });
+});
+
+describe("dashboard screen (comp stat cells + table + ArcScan disclosure)", () => {
+  it("renders the 4 stat cells, the resource rows, and a TxLink per receipt", async () => {
     const { loader } = await import("../app/routes/dashboard");
     const data = await loader({
       params: {},
@@ -109,13 +136,28 @@ describe("dashboard screen (mono money + ArcScan TxLinks)", () => {
 
     render(React.createElement(Screen));
 
-    // every money figure is a UsdcAmount (mono surface); gross is the yellow hero
+    // the four comp stat cells are present
+    expect(screen.getByTestId("stat-total-earnings")).toBeInTheDocument();
+    expect(screen.getByTestId("stat-calls-30d")).toBeInTheDocument();
+    expect(screen.getByTestId("stat-live-apis")).toBeInTheDocument();
+    expect(screen.getByTestId("stat-strikes")).toBeInTheDocument();
+
+    // TOTAL EARNINGS renders mono via UsdcAmount (the money surface)
     const monies = screen.getAllByTestId("usdc-amount");
     expect(monies.length).toBeGreaterThan(0);
-    // gross = 1280000 base units @ 6dp -> $1.280000
-    expect(screen.getByTestId("revenue-figure-gross").textContent).toContain("$1.280000");
 
-    // a TxLink per receipt row, each pointing at the explorer base + the hash
+    // the yellow withdraw-earnings action targets /wallet
+    expect(screen.getByTestId("withdraw-earnings").getAttribute("href")).toContain("/wallet");
+
+    // one resource row per loader row, each linking to /resources/<id>
+    const rows = screen.getAllByTestId("resource-row");
+    expect(rows.length).toBe(data.rows.length);
+    for (const r of rows) {
+      expect(r.getAttribute("href")).toContain("/resources/");
+    }
+
+    // KEEP FUNCTION: a TxLink per receipt row in the settlements disclosure, each
+    // pointing at the explorer base + the hash
     const txLinks = screen.getAllByTestId("tx-link");
     expect(txLinks.length).toBe(data.revenue.receipts.length);
     for (const link of txLinks) {

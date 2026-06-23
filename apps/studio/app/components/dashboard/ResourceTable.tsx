@@ -13,7 +13,6 @@
 // settlements" <details> disclosure (TxLink to ArcScan + the alert lines), so the
 // resting dashboard matches the comp but the ArcScan access is not lost.
 import * as React from "react";
-import { Link } from "react-router";
 import { UsdcAmount } from "../primitives/UsdcAmount";
 import { TxLink } from "../primitives/TxLink";
 import type { RevenueReceipt } from "../../adapter/types";
@@ -80,13 +79,13 @@ export function ResourceTable({
           <span className="font-mono text-[12px] tracking-[0.06em] text-ink-faint">
             YOUR RESOURCES
           </span>
-          <Link
-            to="/wallet"
+          <a
+            href="/wallet"
             data-testid="withdraw-earnings"
             className="bg-yellow px-[16px] py-[8px] font-mono text-[13px] font-bold text-paper-ink"
           >
             withdraw earnings
-          </Link>
+          </a>
         </div>
 
         {/* column header (comp 670-672) */}
@@ -107,9 +106,9 @@ export function ResourceTable({
           </div>
         ) : (
           rows.map((row) => (
-            <Link
+            <a
               key={row.resourceId}
-              to={`/resources/${row.resourceId}`}
+              href={`/resources/${row.resourceId}`}
               data-testid="resource-row"
               className={`${COL} items-center border-b border-hairline p-[14px_18px]`}
             >
@@ -133,7 +132,7 @@ export function ResourceTable({
               <div className="text-right font-mono text-[13px] text-ink-muted">
                 <UsdcAmount baseUnits={row.bond} decimals={decimals} />
               </div>
-            </Link>
+            </a>
           ))
         )}
       </div>
