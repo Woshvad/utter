@@ -29,6 +29,7 @@ vi.mock("wagmi", () => ({
 
 vi.mock("wagmi/connectors", () => ({
   injected: () => ({ type: "injected" }),
+  walletConnect: (opts: { projectId: string }) => ({ type: "walletConnect", id: "walletConnect", ...opts }),
 }));
 
 beforeEach(() => {
@@ -49,6 +50,34 @@ describe("wagmi config (arcTestnet, ssr:true)", () => {
     expect(cfg.chains[0]!.id).toBe(arcTestnet.id);
     expect(cfg.ssr).toBe(true);
     expect(Object.keys(cfg.transports)).toContain(String(arcTestnet.id));
+  });
+});
+
+describe("resolveConnectors (walletConnect gated on projectId)", () => {
+  it("returns injected only when no projectId is configured", async () => {
+    const { resolveConnectors } = await import("../app/wallet/config");
+    const none = resolveConnectors(undefined) as unknown as Array<{ type: string }>;
+    const empty = resolveConnectors("") as unknown as Array<{ type: string }>;
+    const blank = resolveConnectors("   ") as unknown as Array<{ type: string }>;
+    expect(none).toHaveLength(1);
+    expect(empty).toHaveLength(1);
+    expect(blank).toHaveLength(1);
+    expect(none[0]!.type).toBe("injected");
+  });
+
+  it("adds the walletConnect connector when a non-empty projectId is given", async () => {
+    const { resolveConnectors } = await import("../app/wallet/config");
+    const connectors = resolveConnectors("test-project-id") as unknown as Array<{
+      type: string;
+      id?: string;
+      projectId?: string;
+    }>;
+    expect(connectors).toHaveLength(2);
+    expect(connectors[0]!.type).toBe("injected");
+    const wc = connectors[1]!;
+    expect(wc.type).toBe("walletConnect");
+    expect(wc.id).toBe("walletConnect");
+    expect(wc.projectId).toBe("test-project-id");
   });
 });
 
