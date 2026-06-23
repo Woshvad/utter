@@ -187,6 +187,7 @@ describe("WR-01: every registered route resolves to a module", () => {
       "routes/_shell.tsx": () => import("../app/routes/_shell"),
       "routes/create.tsx": () => import("../app/routes/create"),
       "routes/discover.tsx": () => import("../app/routes/discover"),
+      "routes/mcp.tsx": () => import("../app/routes/mcp"),
       "routes/dashboard.tsx": () => import("../app/routes/dashboard"),
       "routes/wallet.tsx": () => import("../app/routes/wallet"),
       "routes/keys.tsx": () => import("../app/routes/keys"),
