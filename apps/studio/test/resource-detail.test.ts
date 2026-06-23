@@ -41,6 +41,19 @@ describe("resources.$id loader (read-through)", () => {
     expect(typeof data.decimals).toBe("number");
   });
 
+  it("returns a real adapter-sourced calls (== getRevenue(id).calls) and no p50 field", async () => {
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+
+    const { loader } = await import("../app/routes/resources.$id");
+    const data = await loader({ params: { id: ID }, request: new Request("http://x/"), context: {} } as never);
+
+    const revenue = await adapter.getRevenue(ID);
+    expect(data.calls).toBe(revenue.calls);
+    // the fabricated p50 latency is gone from the payload
+    expect((data as unknown as Record<string, unknown>).p50).toBeUndefined();
+  });
+
   it("validates params.id and surfaces a 404 not-found path for a malformed id", async () => {
     const { loader } = await import("../app/routes/resources.$id");
     let thrown: unknown;
@@ -111,6 +124,13 @@ describe("resources.$id screen (no price recomputation)", () => {
 
     // the title is the projected slug
     expect(screen.getByTestId("detail-title").textContent).toBe(data.detail.slug);
+
+    // the title-block stats show the real calls + uptime and NO fabricated p50 latency
+    const stats = within(screen.getByTestId("detail-stats"));
+    expect(stats.getByText("calls")).toBeInTheDocument();
+    expect(stats.getByText("uptime")).toBeInTheDocument();
+    expect(stats.queryByText("p50")).toBeNull();
+    expect(screen.queryByText(/ms$/)).toBeNull();
 
     vi.doUnmock("react-router");
   });

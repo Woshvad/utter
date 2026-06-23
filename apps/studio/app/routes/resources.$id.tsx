@@ -57,6 +57,10 @@ export interface RelatedItem {
 export interface ResourceDetailData {
   detail: ResourceDetail;
   decimals: number;
+  /** Real settled-calls count sourced from the adapter getRevenue (the legitimate data
+   *  path; fixture-backed by default). The title-block calls stat renders from this,
+   *  never from a hash. */
+  calls: number;
   /**
    * The client pay-submission mode (260622-wlu). "live" selects the operator-gated
    * fail-loud submitter; anything else (the autonomous default) routes the signed cap
@@ -107,6 +111,10 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
 
   // Runtime money scale read through the adapter (no 6/1e6 literal in the render).
   const { decimals } = await adapter.getEscrowBalance(detail.payout);
+  // Real settled-calls count sourced THROUGH the adapter getRevenue (fixture-backed by
+  // default). This replaces the old hash-fabricated title-block figure with a legitimate
+  // adapter-sourced count.
+  const { calls } = await adapter.getRevenue(detail.resourceId);
   // The client pay-submission mode inherits the same fixture/live boundary the adapter
   // uses (selectAdapter): live -> the fail-loud live submitter; anything else -> the
   // deterministic fixture path through this action.
@@ -131,7 +139,7 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
     related = [];
   }
 
-  return { detail, decimals, payMode, related };
+  return { detail, decimals, calls, payMode, related };
 }
 
 /**
@@ -182,21 +190,8 @@ function creatorHandle(creator: string): string {
   return creator.length > 10 ? `${creator.slice(0, 6)}…${creator.slice(-4)}` : creator;
 }
 
-/**
- * A stable representative figure derived deterministically from the resourceId. The
- * comp's title block carries call-count + p50 stats that the detail PROJECTION does
- * not expose; rather than fabricate an on-chain number we surface a clearly-derived,
- * stable placeholder (labelled honestly) so the row matches the comp. This touches
- * NO money - it is a display-only count/latency, never a settled figure.
- */
-function representativeFigure(id: string, min: number, span: number): number {
-  let acc = 0;
-  for (let i = 0; i < id.length; i += 1) acc = (acc * 31 + id.charCodeAt(i)) >>> 0;
-  return min + (acc % span);
-}
-
 export default function ResourceDetailRoute(): React.ReactElement {
-  const { detail, decimals, payMode, related } = useLoaderData<typeof loader>();
+  const { detail, decimals, calls, payMode, related } = useLoaderData<typeof loader>();
   const base = BigInt(detail.pricing.base);
   const cap = BigInt(detail.pricing.max);
   const isMetered = detail.pricing.model === "metered";
@@ -373,16 +368,16 @@ export default function ResourceDetailRoute(): React.ReactElement {
     </div>
   );
 
-  // Representative stats for the comp's title-block row. uptime is REAL (the rolling
-  // health score); calls + p50 are not on the projection, so they are clearly-derived
-  // stable placeholders (no money, labelled honestly).
+  // Stats for the comp's title-block row. Both figures are REAL: calls is the
+  // adapter-sourced settled-calls count (getRevenue), uptime is the rolling health
+  // score. The old hash-fabricated p50 latency is dropped (no real telemetry source).
   const uptimeLabel = repScore !== null ? `${(detail.health.score! * 100).toFixed(2)}%` : "—";
-  const callsFigure = representativeFigure(detail.resourceId, 100_000, 2_000_000);
   const callsLabel =
-    callsFigure >= 1_000_000
-      ? `${(callsFigure / 1_000_000).toFixed(2)}M`
-      : `${Math.round(callsFigure / 1000)}K`;
-  const p50Label = `${representativeFigure(detail.resourceId, 80, 360)}ms`;
+    calls >= 1_000_000
+      ? `${(calls / 1_000_000).toFixed(2)}M`
+      : calls >= 1_000
+        ? `${(calls / 1_000).toFixed(1)}K`
+        : `${calls}`;
 
   return (
     <div className="flex max-w-[1320px]" data-testid="resource-detail">
@@ -449,7 +444,8 @@ export default function ResourceDetailRoute(): React.ReactElement {
               </Link>
             </div>
           </div>
-          {/* a seamless 1px-hairline 3-up stats grid */}
+          {/* a seamless 1px-hairline stats grid - calls + uptime, both real. The
+              comp's p50 cell is dropped (no real latency telemetry to source it). */}
           <div
             data-testid="detail-stats"
             className="flex gap-px border border-hairline bg-hairline"
@@ -461,10 +457,6 @@ export default function ResourceDetailRoute(): React.ReactElement {
             <div className="bg-raised px-[18px] py-[12px] text-center">
               <div className="font-mono text-[16px] font-bold text-ink">{uptimeLabel}</div>
               <div className="font-mono text-[10px] text-ink-faint">uptime</div>
-            </div>
-            <div className="bg-raised px-[18px] py-[12px] text-center">
-              <div className="font-mono text-[16px] font-bold text-ink">{p50Label}</div>
-              <div className="font-mono text-[10px] text-ink-faint">p50</div>
             </div>
           </div>
         </div>
