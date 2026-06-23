@@ -175,23 +175,33 @@ describe("selectSubmitPayment (fixture routes through the action; live is fail-l
     expect(typeof submit).toBe("function");
   });
 
-  it("the live submitter throws RequiresLivePaymentError (fail-loud, never a faked call)", async () => {
-    const fetchSpy = vi.fn();
-    globalThis.fetch = fetchSpy as unknown as typeof fetch;
-    const submit = liveSubmitPayment();
-    await expect(submit("HEADER", ("0x" + "00".repeat(32)) as `0x${string}`)).rejects.toBeInstanceOf(
-      RequiresLivePaymentError,
+  it("the live submitter (260623-deq) performs the real x402 POST, never throwing for a wired endpoint", async () => {
+    const fetchSpy = vi.fn(
+      async (): Promise<Response> =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
     );
-    // no network call was faked
-    expect(fetchSpy).not.toHaveBeenCalled();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const submit = liveSubmitPayment({
+      resourceUrl: "https://x.resources.example",
+      getRequestBody: () => ({ text: "hi" }),
+    });
+    const result = await submit("HEADER", ("0x" + "00".repeat(32)) as `0x${string}`);
+    expect(result.paid).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("selectSubmitPayment(mode:'live') is the fail-loud live submitter", async () => {
+  it("selectSubmitPayment(mode:'live') with NO resourceUrl is the fail-loud live submitter", async () => {
     const fetchSpy = vi.fn();
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
     const submit = selectSubmitPayment({ resourceId: "0xres", mode: "live" });
     await expect(submit("HEADER", ("0x" + "00".repeat(32)) as `0x${string}`)).rejects.toThrow(
       /operator-gated/i,
+    );
+    await expect(submit("HEADER", ("0x" + "00".repeat(32)) as `0x${string}`)).rejects.toBeInstanceOf(
+      RequiresLivePaymentError,
     );
     expect(fetchSpy).not.toHaveBeenCalled();
   });

@@ -224,12 +224,29 @@ export default function ResourceDetailRoute(): React.ReactElement {
   };
   const requestSchema = extractRequestSchema(openapiDoc);
 
+  // The resource origin derived from the projected cardUrl (the only URL the projection
+  // exposes). The live transport POSTs the signed X-PAYMENT here; in fixture mode this is
+  // ignored. Memoized so the submitter memo below stays stable.
+  const resourceUrl = React.useMemo(
+    () => resourceUrlFromCard(detail.cardUrl),
+    [detail.cardUrl],
+  );
+
+  // The LAST playground request body, captured in a ref (260623-deq). The PAID call must
+  // reuse the SAME body that triggered the 402, so the live transport reads it at call time
+  // via getRequestBody. A ref (not state) so the submitter memo does not churn per keystroke
+  // and exactly-once/retry semantics stay intact.
+  const lastReqRef = React.useRef<unknown>(null);
+  const getRequestBody = React.useCallback(() => lastReqRef.current, []);
+
   // The Run seam: POST the body to this route's action, which drives
   // adapter.runPlayground (reserve-before-run inside the adapter). The component never
   // calls a handler directly. The action serializes debitAmount as a string; re-read
   // it as a bigint here so the metered render path stays base-unit bigint.
   const onRun = React.useCallback(
     async (req: unknown): Promise<PlaygroundResult> => {
+      // Capture the body so a subsequent wallet pay submits the SAME body that hit the 402.
+      lastReqRef.current = req;
       const res = await fetch(`/resources/${detail.resourceId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -243,12 +260,20 @@ export default function ResourceDetailRoute(): React.ReactElement {
     [detail.resourceId],
   );
 
-  // The client-side wallet pay seam (260622-wlu). The signed X-PAYMENT submission routes
-  // through the selected submitter (fixture -> this route's action; live -> fail-loud).
-  // The submitter result IS a PlaygroundResult; usePayPerCall returns it under `result`.
+  // The client-side wallet pay seam (260622-wlu, 260623-deq). The signed X-PAYMENT
+  // submission routes through the selected submitter (fixture -> this route's action; live
+  // -> the real x402 transport when a resourceUrl is configured, else fail-loud). The
+  // submitter result IS a PlaygroundResult; usePayPerCall returns it under `result`. The
+  // request body is read via the ref at call time so the memo stays stable.
   const submitPayment = React.useMemo(
-    () => selectSubmitPayment({ resourceId: detail.resourceId, mode: payMode }),
-    [detail.resourceId, payMode],
+    () =>
+      selectSubmitPayment({
+        resourceId: detail.resourceId,
+        mode: payMode,
+        resourceUrl,
+        getRequestBody,
+      }),
+    [detail.resourceId, payMode, resourceUrl, getRequestBody],
   );
   const { pay } = usePayPerCall({ decimals, submitPayment });
 
