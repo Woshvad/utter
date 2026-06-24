@@ -27,10 +27,10 @@ services:
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
       - traefik-letsencrypt:/letsencrypt
     environment:
-      # DNS-01 provider credentials (operator-provisioned). EMPTY locally; the
-      # real values live ONLY in .env.local (gitignored), never here.
-      - DNS_PROVIDER=${DNS_PROVIDER:-}
-      - DNS_API_TOKEN=${DNS_API_TOKEN:-}
+      # DNS-01 provider credentials (operator-provisioned). EMPTY by default; the
+      # real values live ONLY in .env.local (gitignored), passed via --env-file.
+      - NAMECHEAP_API_USER=${NAMECHEAP_API_USER:-}
+      - NAMECHEAP_API_KEY=${NAMECHEAP_API_KEY:-}
 
   # Response cache (DEP-03) + future deployment-record backing. In-memory is the
   # TEST DEFAULT; this service is for local integration runs against real Redis.

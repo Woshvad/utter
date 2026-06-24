@@ -28,12 +28,12 @@ certificatesResolvers:
   le:
     acme:
       # Operator's ops contact for the ACME account.
-      email: ops@example.com
+      email: ops@utter.technology
       storage: /letsencrypt/acme.json
       dnsChallenge:
-        # Operator's DNS provider (e.g. cloudflare). API credentials are injected
-        # via env (DNS_PROVIDER / DNS_API_TOKEN) and live ONLY in .env.local.
-        provider: cloudflare
+        # Operator's DNS provider (Namecheap). Credentials are injected via env
+        # (NAMECHEAP_API_USER / NAMECHEAP_API_KEY) and live ONLY in .env.local.
+        provider: namecheap
 
 # No api/dashboard exposed by default (least surface). The operator enables it
 # behind auth on the provisioned host if needed.
