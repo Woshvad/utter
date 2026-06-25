@@ -178,3 +178,38 @@ describe("service-dockerode-spec - translation carries the relaxed fields + hard
     });
   });
 });
+
+describe("service-runspec - optional non-secret labels (reconcile-loop identity)", () => {
+  const LABELS = { "io.utter.resource-id": "0x" + "ab".repeat(32), "io.utter.slug": "echo" };
+
+  it("passes labels through to the spec when provided", () => {
+    const svc = buildResourceServiceSpec(baseOpts("gvisor", { labels: LABELS }));
+    expect(svc.labels).toEqual(LABELS);
+  });
+
+  it("carries labels into the dockerode create-options as Labels", () => {
+    const svc = buildResourceServiceSpec(baseOpts("gvisor", { labels: LABELS }));
+    expect(toServiceDockerodeCreateOptions(svc).Labels).toEqual(LABELS);
+  });
+
+  it("omitting labels leaves the spec isolation-identical (no behavior change)", () => {
+    const withLabels = buildResourceServiceSpec(baseOpts("gvisor", { labels: LABELS }));
+    const without = buildResourceServiceSpec(baseOpts("gvisor"));
+    // No labels field at all when absent (additive, not a default).
+    expect("labels" in without).toBe(false);
+    expect(without.labels).toBeUndefined();
+    // Every isolation-relevant field is identical with or without labels.
+    expect(without.runtime).toBe(withLabels.runtime);
+    expect(without.readonlyRootfs).toBe(withLabels.readonlyRootfs);
+    expect(without.capDrop).toEqual(withLabels.capDrop);
+    expect(without.capAdd).toEqual(withLabels.capAdd);
+    expect(without.securityOpt).toEqual(withLabels.securityOpt);
+    expect(without.tmpfs).toEqual(withLabels.tmpfs);
+    expect(without.pidsLimit).toBe(withLabels.pidsLimit);
+    expect(without.memoryBytes).toBe(withLabels.memoryBytes);
+    expect(without.cpus).toBe(withLabels.cpus);
+    expect(without.network).toBe(withLabels.network);
+    // The dockerode create-options omit Labels entirely when absent.
+    expect(toServiceDockerodeCreateOptions(without).Labels).toBeUndefined();
+  });
+});

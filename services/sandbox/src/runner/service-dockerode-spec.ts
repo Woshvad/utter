@@ -59,6 +59,9 @@ export function toServiceDockerodeCreateOptions(
     name: spec.name,
     Image: spec.image,
     Env: env,
+    // Non-secret operator labels (resourceId/slug) so the reconcile loop can read
+    // managed containers back. Omitted entirely when absent.
+    ...(spec.labels ? { Labels: spec.labels } : {}),
     ExposedPorts: { [portKey]: {} },
     HostConfig: {
       Runtime: spec.runtime, // runsc (gvisor) | runc (docker-dev)

@@ -60,6 +60,13 @@ export interface BuildResourceServiceSpecOptions {
   restartPolicy?: ServiceRestartPolicy;
   /** Optional tmpfs mounts (forced noexec,nosuid); defaults to a small /tmp. */
   tmpfs?: Record<string, string>;
+  /**
+   * Optional non-secret container labels (resourceId/slug, for the reconcile loop
+   * to read managed containers back). No secret guard is applied: these are
+   * operator-set identity/routing metadata, NOT handler-supplied env. Absent leaves
+   * the spec isolation-identical.
+   */
+  labels?: Record<string, string>;
 }
 
 /**
@@ -124,6 +131,9 @@ export function buildResourceServiceSpec(
     name,
     restartPolicy: opts.restartPolicy ?? DEFAULT_SERVICE_RESTART_POLICY,
     port,
+    // Labels are non-secret operator metadata (resourceId/slug), so no secret guard
+    // is applied here - they are not handler-supplied env.
+    ...(opts.labels ? { labels: opts.labels } : {}),
     // NOTE: no timeoutSeconds - a service is long-lived and never auto-killed.
   };
 

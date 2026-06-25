@@ -162,6 +162,14 @@ export interface ResourceServiceSpec {
   restartPolicy: ServiceRestartPolicy;
   /** The container port Traefik routes to (the service's listen port). */
   port: number;
+  /**
+   * OPTIONAL non-secret operator metadata to stamp on the container as Docker
+   * labels (e.g. the resourceId + slug, so the reconcile loop can read managed
+   * containers back). This is NEVER a secret and is NOT part of the env allowlist:
+   * it is operator-set routing/identity metadata, not handler-supplied. Absent =
+   * no labels (the isolation surface is identical).
+   */
+  labels?: Record<string, string>;
 }
 
 /**
