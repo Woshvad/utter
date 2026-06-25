@@ -26,8 +26,9 @@
 // are NEVER logged.
 import { config as loadEnv } from "dotenv";
 import { webcrypto } from "node:crypto";
-import { pathToFileURL } from "node:url";
-import { type Address, type Hex, type PublicClient } from "viem";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, resolve } from "node:path";
+import { decodeEventLog, type Address, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   arcTestnet,
@@ -60,6 +61,7 @@ import {
 } from "./register-resource";
 import {
   resolveDockerHandle,
+  resolveFacilitatorUrl,
   launchEchoContainer,
   writeTraefikDynamicFile,
   waitForUnpaid402,
@@ -72,17 +74,23 @@ import {
 // stdio bins (e.g. the buyer MCP server) whose stdout carries JSON-RPC frames - an
 // unsilenced banner there would corrupt the channel (Pitfall 1 / T-07-STDOUT). The env is
 // still loaded identically; only the banner is suppressed.
-loadEnv({ path: ".env.local", quiet: true });
+//
+// Resolve .env.local relative to THIS module (NOT cwd), mirroring orchestrate.ts's
+// defaultDynamicDir: src/live-deploy.ts -> ../../../.env.local (the repo root). The
+// operator may run this from the repo root OR from services/deployer (the RUNBOOK
+// shows both); a cwd-relative path only worked from the repo root and otherwise
+// failed with a misleading "missing DEPLOY_DOMAIN". The module-relative path makes
+// both cwd forms load the same repo-root env.
+loadEnv({
+  path: resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env.local"),
+  quiet: true,
+});
 
 /** The deterministic resource id + slug for the live echo deploy. The id derives
  * from the shared @utter/x402-arc helper so the register/payTo id, the resource
  * RESOURCE_ID env, and the studio all agree (single source of truth). */
 const RESOURCE_ID: Hex = resourceIdForLabel(ECHO_RESOURCE_LABEL);
 const SLUG = process.env.DEPLOY_SLUG?.trim() || "echo";
-// The in-network facilitator the echo's gate POSTs verify/settle/release to. On the
-// H1 compose stack the facilitator is reachable as `facilitator` on utter_appnet;
-// overridable for a non-default deploy. The echo container reads this as FACILITATOR_URL.
-const FACILITATOR_URL = process.env.FACILITATOR_URL?.trim() || "http://facilitator:8787";
 const MAX_TIMEOUT_SECONDS = Number(process.env.RESOURCE_TIMEOUT_SECONDS ?? "30");
 const SETTLE_BUFFER_SECONDS = Number(process.env.SETTLE_BUFFER_SECONDS ?? "90");
 const PRICING: Pricing = {
@@ -109,6 +117,14 @@ export interface LiveDeployResult {
   /** True when the resourceId was already registered + active before this run
    * (registration was a no-op; the redeploy idempotency path). */
   alreadyActive: boolean;
+  /** The on-chain settle tx hash (from the X-PAYMENT-RESPONSE receipt). */
+  settleTx?: Hex;
+  /** The debited amount in USDC base units (from the on-chain Debited event). */
+  debitAmount?: string;
+  /** The creator's share of the debit (USDC base units, on-chain Debited). */
+  toCreator?: string;
+  /** The treasury's share of the debit (USDC base units, on-chain Debited). */
+  toTreasury?: string;
 }
 
 /** Read a required env var or throw an operator-friendly error (never logs the value). */
@@ -289,8 +305,18 @@ export async function liveDeployEcho(
         "(it builds + runs the echo container under runsc). See infrastructure/RUNBOOK.md.",
     );
   }
+  // Resolve the facilitator URL the echo container will POST verify/settle/release
+  // to. An explicit FACILITATOR_URL env override still wins (a non-default deploy);
+  // otherwise we auto-resolve the facilitator's on-network IP. The IP (not the name)
+  // is mandatory because the resource runs under runsc, which cannot use Docker's
+  // embedded DNS at 127.0.0.11 (the name `facilitator` would EAI_AGAIN inside the
+  // container). The resolved value is a non-secret IP:port, safe to log.
+  const facilitatorUrl =
+    process.env.FACILITATOR_URL?.trim() || (await resolveFacilitatorUrl(docker));
+  console.log(`[live-deploy] facilitator resolved to ${facilitatorUrl}`);
+
   const launched = await launchEchoContainer(docker, {
-    facilitatorUrl: FACILITATOR_URL,
+    facilitatorUrl,
     resourceId: RESOURCE_ID,
     cap,
     pricing: PRICING,
@@ -363,10 +389,67 @@ export async function liveDeployEcho(
   if (paid.status !== 200) {
     throw new Error(`[live-deploy] expected 200 on the paid HTTPS call, got ${paid.status}: ${await paid.text()}`);
   }
-  if (!paid.headers.get("X-PAYMENT-RESPONSE")) {
+  const receiptHeader = paid.headers.get("X-PAYMENT-RESPONSE");
+  if (!receiptHeader) {
     throw new Error("[live-deploy] paid 200 missing X-PAYMENT-RESPONSE receipt header");
   }
   console.log("[live-deploy] paid HTTPS call returned 200 with the receipt (paywall holds in production)");
+
+  // (3a) Surface + VERIFY the on-chain settle. The 200 proves the gate released, but
+  // the genuine money proof is the Debited event the settle tx emitted. Reuse the
+  // PROVEN shape from packages/x402-arc/examples/echo/live-money-path.ts: decode the
+  // base64 X-PAYMENT-RESPONSE -> { tx, amount }, read the receipt, find the Debited
+  // log on PAYMENT_ESCROW, and ASSERT the cap + the configured split. A failed
+  // assertion THROWS (a real failure). Amounts are non-secret and safe to log; a key
+  // is never logged.
+  const receipt = JSON.parse(Buffer.from(receiptHeader, "base64").toString("utf8")) as {
+    tx: Hex;
+    amount: string;
+  };
+  console.log(`[live-deploy] settle tx ${receipt.tx}`);
+  console.log(`[live-deploy] ArcScan: ${arcTestnet.blockExplorers?.default.url}/tx/${receipt.tx}`);
+
+  const txReceipt = await publicClient.getTransactionReceipt({ hash: receipt.tx });
+  const debited = txReceipt.logs
+    .filter((l) => l.address.toLowerCase() === PAYMENT_ESCROW.toLowerCase())
+    .map((l) => {
+      try {
+        return decodeEventLog({ abi: escrowAbi, data: l.data, topics: l.topics }) as {
+          eventName: string;
+          args: Record<string, unknown>;
+        };
+      } catch {
+        return null;
+      }
+    })
+    .find((d) => d?.eventName === "Debited");
+  if (!debited) {
+    throw new Error(`[live-deploy] no Debited event found in the settle tx ${receipt.tx}`);
+  }
+
+  const debitAmount = debited.args.amount as bigint;
+  const toCreator = debited.args.toCreator as bigint;
+  const toTreasury = debited.args.toTreasury as bigint;
+  if (debitAmount > cap) {
+    throw new Error(`[live-deploy] debit ${debitAmount} exceeds cap ${cap}`);
+  }
+  if (toCreator + toTreasury !== debitAmount) {
+    throw new Error(`[live-deploy] split ${toCreator}+${toTreasury} != amount ${debitAmount}`);
+  }
+  // The split is a RATIO check, not a literal: treasury == floor(amount * platformFeeBps
+  // / 10000), using the SAME platformFeeBps this run derived creatorBps from. Never a
+  // hardcoded 3000 - the bps is the single source of truth for the split.
+  const expectedTreasury = (debitAmount * BigInt(platformFeeBps)) / 10_000n;
+  if (toTreasury !== expectedTreasury) {
+    throw new Error(
+      `[live-deploy] treasury cut ${toTreasury} != expected ${expectedTreasury} ` +
+        `(platformFeeBps ${platformFeeBps})`,
+    );
+  }
+  console.log(
+    `[live-deploy] on-chain Debited verified: debit ${debitAmount} <= cap ${cap}; ` +
+      `creator ${toCreator} / treasury ${toTreasury} (platformFeeBps ${platformFeeBps}) split holds.`,
+  );
 
   // (4) PRX-02: confirm a non-allowlisted host is unreachable from inside the
   // gVisor container netns, using the REAL blocked-host probe-runner the RUNBOOK
@@ -394,6 +477,10 @@ export async function liveDeployEcho(
     nonAllowlistedUnreachable,
     registrationTx: registration.registrationTx,
     alreadyActive: registration.alreadyActive,
+    settleTx: receipt.tx,
+    debitAmount: debitAmount.toString(),
+    toCreator: toCreator.toString(),
+    toTreasury: toTreasury.toString(),
   };
 }
 
@@ -458,6 +545,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   liveDeployEcho()
     .then((r) => {
       console.log(`[live-deploy] OK: ${r.url} 402(unpaid)->200(paid); PRX-02 unreachable=${r.nonAllowlistedUnreachable}`);
+      if (r.settleTx) {
+        console.log(`[live-deploy] settle tx ${r.settleTx} (debit ${r.debitAmount}, creator ${r.toCreator} / treasury ${r.toTreasury})`);
+        console.log(`[live-deploy] ArcScan: ${arcTestnet.blockExplorers?.default.url}/tx/${r.settleTx}`);
+      }
     })
     .catch((err: unknown) => {
       console.error("[live-deploy] failed:", err instanceof Error ? err.message : err);
