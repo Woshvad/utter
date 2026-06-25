@@ -41,15 +41,57 @@ export interface DeploymentRecord {
 }
 
 /**
+ * Thrown by put() when a slug is already claimed by a DIFFERENT resourceId (M5).
+ *
+ * This is the fail-loud upstream slug-allocation guard. Two resourceIds sharing one
+ * slug derive the SAME utter_pairnet_<slug> internal bridge and co-tenant a single
+ * network, re-opening the cross-tenant free-compute HIGH (infrastructure/
+ * RESOURCE-DEPLOY-SECURITY-REVIEW.md:81-89). The network-layer ensurePairNetwork
+ * resourceId-label guard is only a backstop; the store is the upstream allocator that
+ * must reject a duplicate slug before any pairnet/Traefik file write. The message names
+ * the slug AND both resourceIds so an operator sees exactly which deploy double-allocated.
+ */
+export class SlugConflictError extends Error {
+  readonly slug: string;
+  readonly existingResourceId: Hex;
+  readonly incomingResourceId: Hex;
+
+  constructor(slug: string, existingResourceId: Hex, incomingResourceId: Hex) {
+    super(
+      `slug "${slug}" is already claimed by resourceId ${existingResourceId}; ` +
+        `resourceId ${incomingResourceId} cannot reuse it`,
+    );
+    this.name = "SlugConflictError";
+    this.slug = slug;
+    this.existingResourceId = existingResourceId;
+    this.incomingResourceId = incomingResourceId;
+  }
+}
+
+/**
  * Deployment records keyed on resourceId. All methods async so the Redis adapter
  * implements the identical contract. A redeploy bumps `deployVersion` while
  * keeping `agentId` + `slug` fixed (DEP-04).
+ *
+ * Slug uniqueness (M5): put() enforces a global slug -> resourceId mapping. A slug
+ * may belong to exactly ONE resourceId at a time; a put() of an already-held slug by a
+ * different resourceId throws SlugConflictError. A same-resourceId redeploy (same slug,
+ * bumped deployVersion) is idempotent and never throws. The Redis-backed adapter MUST
+ * perform the identical atomic claim via a reverse key (for example SETNX slug:<slug> ->
+ * resourceId, or a WATCH/Lua transaction) with the SAME throw-on-mismatch and
+ * idempotent-same-owner semantics, so a Redis adapter cannot silently diverge from the
+ * in-memory one.
  */
 export interface DeploymentStore {
-  /** Insert or update a deployment record (a redeploy bumps deployVersion). */
+  /**
+   * Insert or update a deployment record (a redeploy bumps deployVersion). Throws
+   * SlugConflictError if record.slug is already held by a different resourceId (M5).
+   */
   put(record: DeploymentRecord): Promise<void>;
   /** Fetch a deployment record by resourceId, or null if absent. */
   get(resourceId: Hex): Promise<DeploymentRecord | null>;
+  /** Fetch the deployment record owning a slug, or null if the slug is unclaimed. */
+  getBySlug(slug: string): Promise<DeploymentRecord | null>;
   /** List all current deployment records (the reconcile loop's desired state). */
   list(): Promise<DeploymentRecord[]>;
 }
@@ -78,12 +120,40 @@ export interface ResponseCache {
  */
 export class InMemoryDeploymentStore implements DeploymentStore {
   private readonly deployments = new Map<Hex, DeploymentRecord>();
+  /** Reverse index slug -> owning resourceId; the source of slug-uniqueness truth (M5). */
+  private readonly slugToResourceId = new Map<string, Hex>();
 
   async put(record: DeploymentRecord): Promise<void> {
+    // The check and the claim run in ONE synchronous tick with no await between the
+    // read and the write, which is what makes the in-memory slug claim atomic: no
+    // other put() can interleave, so two concurrent puts cannot both pass the check.
+    const existingOwner = this.slugToResourceId.get(record.slug);
+    if (existingOwner !== undefined && existingOwner !== record.resourceId) {
+      // Throw BEFORE mutating either Map so the conflict path leaves the original
+      // owner's record byte-for-byte unchanged and still resolvable.
+      throw new SlugConflictError(record.slug, existingOwner, record.resourceId);
+    }
+
+    // If this resourceId already held a DIFFERENT slug (an own-slug change), free the
+    // stale reverse-index entry so the freed slug is not falsely reserved.
+    const previous = this.deployments.get(record.resourceId);
+    if (previous && previous.slug !== record.slug) {
+      this.slugToResourceId.delete(previous.slug);
+    }
+
+    // Claim the slug and store the record. A same-resourceId same-slug redeploy is a
+    // no-op on the reverse index and never throws (DEP-04 idempotence).
+    this.slugToResourceId.set(record.slug, record.resourceId);
     this.deployments.set(record.resourceId, record);
   }
 
   async get(resourceId: Hex): Promise<DeploymentRecord | null> {
+    return this.deployments.get(resourceId) ?? null;
+  }
+
+  async getBySlug(slug: string): Promise<DeploymentRecord | null> {
+    const resourceId = this.slugToResourceId.get(slug);
+    if (resourceId === undefined) return null;
     return this.deployments.get(resourceId) ?? null;
   }
 
