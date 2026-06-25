@@ -18,8 +18,10 @@ import {
   writeTraefikDynamicFile,
   removeTraefikDynamicFile,
   resolveDockerHandle,
+  resolveFacilitatorUrl,
   waitForUnpaid402,
   ECHO_SERVICE,
+  type DockerHandle,
 } from "../src/orchestrate";
 import { parseTraefikDynamicConfig } from "../src/traefik-config";
 
@@ -131,6 +133,58 @@ describe("resolveDockerHandle host gate", () => {
   it("returns undefined when UTTER_SANDBOX_HOST is unset", () => {
     delete process.env.UTTER_SANDBOX_HOST;
     expect(resolveDockerHandle()).toBeUndefined();
+  });
+});
+
+describe("resolveFacilitatorUrl", () => {
+  // A minimal docker stub: only getNetwork().inspect() is exercised. The Containers
+  // map mirrors dockerode's NetworkInspectInfo shape (keyed by container id; each
+  // value carries Name + IPv4Address with a /CIDR suffix). No real docker.
+  function stubDocker(
+    containers: Record<string, { Name: string; IPv4Address: string }>,
+    capture?: (network: string) => void,
+  ): DockerHandle {
+    return {
+      getNetwork(network: string) {
+        capture?.(network);
+        return {
+          inspect: async () => ({ Containers: containers }),
+        };
+      },
+    } as unknown as DockerHandle;
+  }
+
+  it("returns the facilitator IP:port, stripping the /CIDR suffix and defaulting port 8787", async () => {
+    let inspected: string | undefined;
+    const docker = stubDocker(
+      {
+        c1: { Name: "utter_facilitator_1", IPv4Address: "172.20.0.5/16" },
+        c2: { Name: "utter_traefik_1", IPv4Address: "172.20.0.2/16" },
+      },
+      (n) => {
+        inspected = n;
+      },
+    );
+
+    const url = await resolveFacilitatorUrl(docker);
+    expect(url).toBe("http://172.20.0.5:8787");
+    // Defaults to the echo service's app network.
+    expect(inspected).toBe(ECHO_SERVICE.network);
+  });
+
+  it("honors an explicit port override", async () => {
+    const docker = stubDocker({
+      c1: { Name: "facilitator", IPv4Address: "10.0.0.9/24" },
+    });
+    const url = await resolveFacilitatorUrl(docker, { port: 9999 });
+    expect(url).toBe("http://10.0.0.9:9999");
+  });
+
+  it("throws when no facilitator container is attached to the network", async () => {
+    const docker = stubDocker({
+      c1: { Name: "utter_traefik_1", IPv4Address: "172.20.0.2/16" },
+    });
+    await expect(resolveFacilitatorUrl(docker)).rejects.toThrow(/no container matching/);
   });
 });
 

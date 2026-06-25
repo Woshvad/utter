@@ -85,6 +85,60 @@ export const ECHO_SERVICE = {
 /** The default echo image tag the build produces + the runner launches. */
 export const ECHO_IMAGE_TAG = "utter-resource-echo:latest";
 
+/** Options for {@link resolveFacilitatorUrl}. */
+export interface ResolveFacilitatorUrlOpts {
+  /** The network to inspect for the facilitator container (default ECHO_SERVICE.network). */
+  network?: string;
+  /** The facilitator listen port (default 8787). */
+  port?: number;
+  /** The substring (case-insensitive) that marks the facilitator container's Name (default "facilitator"). */
+  containerNameHint?: string;
+}
+
+/**
+ * Resolve the facilitator's reachable URL by its on-network IP, NOT its DNS name.
+ *
+ * WHY: a deployed resource runs under runsc/gVisor, whose sandboxed network stack
+ * cannot use Docker's embedded DNS resolver at 127.0.0.11. A resource container that
+ * POSTs to the facilitator by the service name `facilitator` gets EAI_AGAIN (the
+ * name never resolves). So we inspect the app network here, read the facilitator
+ * container's IPv4 address, and hand the resource the literal `http://<ip>:<port>`.
+ * An explicit FACILITATOR_URL env still wins at the call site (live-deploy.ts).
+ *
+ * Future improvement (durable, production): pin the facilitator to a static IP on
+ * the app network or inject an ExtraHosts mapping into the resource container so the
+ * name resolves without an inspect step. For the first live proof the inspect is the
+ * smallest no-manual-step fix.
+ *
+ * @throws if no container whose Name contains the hint is attached to the network
+ *         (the operator must bring the platform stack up first).
+ */
+export async function resolveFacilitatorUrl(
+  docker: DockerHandle,
+  opts: ResolveFacilitatorUrlOpts = {},
+): Promise<string> {
+  const network = opts.network ?? ECHO_SERVICE.network;
+  const port = opts.port ?? 8787;
+  const hint = (opts.containerNameHint ?? "facilitator").toLowerCase();
+
+  const dockerApi = docker as unknown as Docker;
+  const info = await dockerApi.getNetwork(network).inspect();
+  const containers = info.Containers ?? {};
+
+  for (const entry of Object.values(containers)) {
+    if (!entry?.Name?.toLowerCase().includes(hint)) continue;
+    // IPv4Address carries a `/CIDR` suffix (e.g. "172.20.0.5/16"); strip it.
+    const ip = (entry.IPv4Address ?? "").split("/")[0]?.trim();
+    if (!ip) continue;
+    return `http://${ip}:${port}`;
+  }
+
+  throw new Error(
+    `resolveFacilitatorUrl: no container matching "${hint}" found on network "${network}". ` +
+      "Bring the platform stack up first (docker compose ... up -d), then re-run. See infrastructure/RUNBOOK.md.",
+  );
+}
+
 /** Inputs to {@link buildEchoServiceEnv}. */
 export interface BuildEchoServiceEnvOpts {
   /** The facilitator base URL the echo's gate POSTs verify/settle/release to. */

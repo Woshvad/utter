@@ -132,6 +132,7 @@ export {
 // reapEchoContainer are the real launch/reap the future reconcile hooks (H3) reuse.
 export {
   resolveDockerHandle,
+  resolveFacilitatorUrl,
   buildEchoServiceEnv,
   writeTraefikDynamicFile,
   removeTraefikDynamicFile,
@@ -140,6 +141,7 @@ export {
   waitForUnpaid402,
   ECHO_SERVICE,
   ECHO_IMAGE_TAG,
+  type ResolveFacilitatorUrlOpts,
   type BuildEchoServiceEnvOpts,
   type WriteTraefikDynamicFileOpts,
   type LaunchEchoContainerOpts,
