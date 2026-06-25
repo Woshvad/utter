@@ -26,6 +26,7 @@
     "@secretlint/secretlint-rule-preset-recommend": "13.0.2",
     "@types/dockerode": "4.0.1",
     "dotenv": "17.4.2",
+    "esbuild": "0.27.7",
     "secretlint": "13.0.2"
   }
 }

@@ -86,6 +86,7 @@ export {
   buildResourceImage,
   generateDockerfile,
   assertPinnedByDigest,
+  resolveBaseImage,
   PINNED_BASE_IMAGES,
   type BuildResourceImageOpts,
   type BuildResult,
@@ -100,3 +101,13 @@ export {
 // in the autonomous suite (needs the provisioned host + *.resources.<domain> cert);
 // recorded as a Deferred Item in STATE.md (Plan 06).
 export { liveDeployEcho, type LiveDeployResult } from "./live-deploy";
+
+// Echo bundler (deploy plane B): esbuild the echo into a single self-contained
+// server.js + a prebundled Dockerfile (FROM the resolved digest, CMD node
+// server.js) - the standalone artifact buildResourceImage streams to dockerode.
+export {
+  bundleEcho,
+  buildEchoDockerfile,
+  type BundleEchoOpts,
+  type BundleEchoResult,
+} from "./bundle-echo";

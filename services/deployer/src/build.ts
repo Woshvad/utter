@@ -36,6 +36,26 @@ export const PINNED_BASE_IMAGES = {
 /** The supported bundle runtimes (which pinned base + lockfile install to use). */
 export type BundleRuntime = keyof typeof PINNED_BASE_IMAGES;
 
+/** The env var an operator sets to pin the real scanned node base digest. */
+const BASE_IMAGE_ENV: Record<BundleRuntime, string> = {
+  node: "DEPLOY_BASE_IMAGE_NODE",
+  python: "DEPLOY_BASE_IMAGE_PYTHON",
+};
+
+/**
+ * Resolve the base image for a runtime: the operator override
+ * (DEPLOY_BASE_IMAGE_NODE / DEPLOY_BASE_IMAGE_PYTHON) when set, else the pinned
+ * placeholder constant. The result is still asserted pinned-by-digest by the
+ * caller, so a bad env value fails loud rather than silently shipping an unpinned
+ * (mutable-tag) base. This lets an operator pin the real scanned digest for the
+ * provisioned build host without editing code.
+ */
+export function resolveBaseImage(runtime: BundleRuntime): string {
+  const override = process.env[BASE_IMAGE_ENV[runtime]];
+  if (override && override.trim().length > 0) return override.trim();
+  return PINNED_BASE_IMAGES[runtime];
+}
+
 /** Network-isolation posture of a build. Locally we NEVER claim 'isolated'. */
 export type NetworkIsolation = "operator-gated" | "isolated";
 
@@ -190,7 +210,9 @@ export async function buildResourceImage(
   bundlePath: string,
   opts: BuildResourceImageOpts,
 ): Promise<BuildResult> {
-  const baseImage = PINNED_BASE_IMAGES[opts.runtime];
+  // Resolve the base image (operator env override or the pinned constant), then
+  // assert it is pinned BY DIGEST so a bad override fails loud (T-03-17).
+  const baseImage = resolveBaseImage(opts.runtime);
   assertPinnedByDigest(baseImage);
 
   // Resolve the registry: explicit opt wins, else the env, else empty (public).
