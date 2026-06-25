@@ -82,36 +82,79 @@ the runsc runtime registration in PROVISION.md.
 
 ---
 
-## Acceptance 3 - live HTTPS 402->200 paywalled deploy (DEP-01 / DEP-02 / PRX-02)
+## Acceptance 3 - live HTTPS 402->200 paywalled deploy (DEP-01 / DEP-02)
 
-**Goal:** the echo bundle is reachable over real wildcard TLS at
-`https://<slug>.resources.<domain>`, returns **402 unpaid** and **200 after a
-paid call**, and a non-allowlisted host is unreachable from the container.
+**Goal (Phase 1, trusted echo + in-process gate):** the deploy orchestrator BUILDS
+the echo image, RUNS it as a hardened runsc service named `utter_res_echo` on the
+`utter_appnet` network, WRITES the Traefik route to disk, ENSURES the buyer's escrow
+deposit, and proves the echo is reachable over real wildcard TLS at
+`https://<slug>.resources.<domain>` returning **402 unpaid** then **200 after a paid
+call**, with a real on-chain `Debited` event (70/30 split) on Arc Testnet.
+
+> The PRX-02 blocked-host egress probe is **Phase-2-gated**: it runs only when
+> `UTTER_RUN_EGRESS_PROBE=1` (the probe image is built + the host nftables rules land
+> with the Phase 2 increment). In Phase 1 it SKIPS with a clear log, recorded as a
+> skip - not a pass and not a blocker for the live 402->200 proof.
+
+The EXACT operator host sequence:
 
 ```bash
-# 1. Fund the buyer EOA (native USDC) at https://faucet.circle.com and set the keys
-#    + the domain in .env.local (gitignored - never commit a real key):
-#      DEPLOY_DOMAIN          = your domain (the apex is resources.<domain>)
-#      TEST_BUYER_PRIVATE_KEY = the funded buyer EOA key
-#      ARC_RPC_URL            = https://rpc.testnet.arc.network  (optional; default)
-# 2. Run the operator-gated live deploy (deploys the echo bundle behind the wildcard
-#    edge, then curls 402-unpaid -> 200-paid over HTTPS + asserts PRX-02). Run it from
-#    the deployer package dir, after `pnpm install`, with the native-Node TS resolver
-#    the package's own start script uses (TS is strip-types, not a bare .ts run):
-cd services/deployer
-node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/live-deploy.ts
+# 1. Pull the latest code + install.
+cd /opt/utter && git pull && pnpm install
+
+# 2. Pin the node base image BY DIGEST (the build asserts pinned-by-digest, so a
+#    floating tag fails loud). Pull, read the digest, and set it in .env.local:
+docker pull node:22-bookworm-slim
+docker inspect --format '{{index .RepoDigests 0}}' node:22-bookworm-slim
+#   -> set DEPLOY_BASE_IMAGE_NODE=node:22-bookworm-slim@sha256:<digest> in .env.local
+
+# 3. Confirm .env.local (gitignored - never commit a real key) has:
+#      DEPLOY_DOMAIN              = utter.technology     (apex is resources.<domain>)
+#      RELAYER_SIGNER_KEYS        = the relayer/escrow-admin key(s)
+#      TEST_BUYER_PRIVATE_KEY     = the funded buyer EOA key
+#      REGISTRY_ADMIN_PRIVATE_KEY = the registry Ownable owner key
+#      PLATFORM_TREASURY          = the platform split recipient address
+#      DEPLOY_BASE_IMAGE_NODE     = the digest-pinned base from step 2
+#      FACILITATOR_URL            = http://facilitator:8787  (optional; in-network default)
+#      ARC_RPC_URL                = https://rpc.testnet.arc.network  (optional; default)
+#    Fund the buyer + relayer with testnet USDC at https://faucet.circle.com - the
+#    deposit + settle spend REAL testnet USDC.
+
+# 4. Bring up the platform stack (traefik, redis, data-proxy, facilitator) on appnet:
+docker compose --env-file .env.local -f infrastructure/docker-compose.yml up -d --build
+
+# 5. Run the deploy from the deployer package WITH the host gate. UTTER_SANDBOX_HOST=1
+#    is REQUIRED: it tells resolveDockerHandle to construct a real dockerode so the
+#    orchestrator can build + run the container (off-host it refuses, no dead-URL curl):
+cd services/deployer && UTTER_SANDBOX_HOST=1 node --import ../../scripts/ts-resolver.mjs \
+  --experimental-strip-types src/live-deploy.ts
 ```
 
-`liveDeployEcho` (`services/deployer/src/live-deploy.ts`) generates the per-resource
-Traefik dynamic config for `<slug>.resources.<domain>`, then:
+`liveDeployEcho` (`services/deployer/src/live-deploy.ts`) then:
 
-- curls `https://<slug>.resources.<domain>/echo` with **no X-PAYMENT** -> asserts **402**,
-- signs a real `DebitAuthorization` and re-curls with `X-PAYMENT` -> asserts **200** + the `X-PAYMENT-RESPONSE` receipt over HTTPS,
-- attempts a non-allowlisted host from inside the container -> asserts it is unreachable (**PRX-02**).
+- registers the resource on-chain (or logs "already active" on a redeploy),
+- ensures `balanceOf(buyer) >= cap` on `PaymentEscrow`: a guarded ERC-20 `approve`
+  (only when allowance is short - `deposit()` pulls via `safeTransferFrom`) then a
+  `deposit(need)`,
+- BUILDS the echo image, RUNS `utter_res_echo` under runsc on `utter_appnet`,
+- WRITES `infrastructure/traefik/dynamic/<slug>.yml` atomically (the file provider
+  hot-loads it; the loadBalancer targets `http://utter_res_echo:8080`),
+- polls `https://<slug>.resources.<domain>/echo` with **no X-PAYMENT** until **402**
+  (tolerating container boot + first-time ACME wildcard-cert issuance latency),
+- signs a real `DebitAuthorization` and re-calls with `X-PAYMENT` -> asserts **200** +
+  the `X-PAYMENT-RESPONSE` receipt over HTTPS.
 
-**Pass:** the script prints `402(unpaid)->200(paid); PRX-02 unreachable=true`.
-**Fail:** any of the three assertions throws - the live paywall, the wildcard cert,
-or the egress containment is not holding in production.
+**Expected:** the registration tx (or "already active"), the echo image built, the
+container running under runsc on `utter_appnet`, the Traefik file written, 402 then
+200 + the receipt, and a settle tx. Confirm the `Debited` event with debit <= cap and
+the 70/30 split on `https://testnet.arcscan.app/tx/<tx>`.
+
+**Fail:** any assertion throws - the build, the run, the route, the deposit, the live
+paywall, or the wildcard cert is not holding in production.
+
+Security notes hold throughout: the deploy is operator-gated (`UTTER_SANDBOX_HOST=1`),
+keys are read only from `.env.local` and are NEVER logged (the script logs only
+amounts, image tags, container names, and the written path).
 
 ---
 

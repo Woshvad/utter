@@ -35,6 +35,8 @@ import {
   createArcWalletClient,
   USDC,
   erc20Abi,
+  escrowAbi,
+  PAYMENT_ESCROW,
 } from "@utter/chain";
 import {
   signDebitAuthorization,
@@ -51,12 +53,19 @@ import {
   createLiveHostProbe,
   DEFAULT_PROBE_TARGETS,
 } from "@utter/sandbox";
-import { buildTraefikDynamicConfig } from "./traefik-config";
 import {
   registerResourceIfNeeded,
   type RegistryAdminWriter,
   type RegistryReader,
 } from "./register-resource";
+import {
+  resolveDockerHandle,
+  launchEchoContainer,
+  writeTraefikDynamicFile,
+  waitForUnpaid402,
+  ECHO_SERVICE,
+  type DockerHandle,
+} from "./orchestrate";
 
 // `quiet: true` keeps dotenv's stdout "injected env" banner off stdout. This module's
 // top-level load fires at IMPORT time, and @utter/deployer is reachable transitively from
@@ -70,6 +79,10 @@ loadEnv({ path: ".env.local", quiet: true });
  * RESOURCE_ID env, and the studio all agree (single source of truth). */
 const RESOURCE_ID: Hex = resourceIdForLabel(ECHO_RESOURCE_LABEL);
 const SLUG = process.env.DEPLOY_SLUG?.trim() || "echo";
+// The in-network facilitator the echo's gate POSTs verify/settle/release to. On the
+// H1 compose stack the facilitator is reachable as `facilitator` on utter_appnet;
+// overridable for a non-default deploy. The echo container reads this as FACILITATOR_URL.
+const FACILITATOR_URL = process.env.FACILITATOR_URL?.trim() || "http://facilitator:8787";
 const MAX_TIMEOUT_SECONDS = Number(process.env.RESOURCE_TIMEOUT_SECONDS ?? "30");
 const SETTLE_BUFFER_SECONDS = Number(process.env.SETTLE_BUFFER_SECONDS ?? "90");
 const PRICING: Pricing = {
@@ -179,6 +192,60 @@ export async function liveDeployEcho(
   })) as number;
   const cap = 10n ** BigInt(decimals) / 100n; // 0.01 USDC
 
+  // (0a) ENSURE the buyer's escrow balance >= cap (money-critical). The gate's
+  // /verify checks balanceOf(buyer) >= cap on-chain; without a funded deposit the
+  // paid call reverts at /settle. This replicates the PROVEN flow from
+  // packages/x402-arc/examples/echo/live-money-path.ts: read balanceOf(buyer) on
+  // PAYMENT_ESCROW and deposit(need) if short. PaymentEscrow.deposit() pulls USDC
+  // via safeTransferFrom (read of the contract), so it REQUIRES a prior ERC-20
+  // approve - the proven live run did a separate `approve USDC` tx before deposit
+  // (contracts/DEPLOYMENTS.md). We add a GUARDED approve: read allowance first and
+  // approve only when it is short, so a re-run with standing allowance skips it. We
+  // log amounts only, never a key.
+  const escrowBalance = (await publicClient.readContract({
+    address: PAYMENT_ESCROW,
+    abi: escrowAbi,
+    functionName: "balanceOf",
+    args: [buyer],
+  })) as bigint;
+  if (escrowBalance < cap) {
+    const need = cap - escrowBalance;
+    // Guarded approve: deposit() calls usdc.safeTransferFrom(msg.sender, ...), which
+    // needs allowance(buyer, PAYMENT_ESCROW) >= need. Approve only when short.
+    const allowance = (await publicClient.readContract({
+      address: USDC,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [buyer, PAYMENT_ESCROW],
+    })) as bigint;
+    if (allowance < need) {
+      console.log(`[live-deploy] approving ${need} base units of USDC to PaymentEscrow...`);
+      const approveTx = await buyerWallet.writeContract({
+        address: USDC,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [PAYMENT_ESCROW, need],
+        account: buyerAccount,
+        chain: arcTestnet,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx });
+      console.log(`[live-deploy] approve confirmed (tx ${approveTx})`);
+    }
+    console.log(`[live-deploy] depositing ${need} base units into PaymentEscrow...`);
+    const depositTx = await buyerWallet.writeContract({
+      address: PAYMENT_ESCROW,
+      abi: escrowAbi,
+      functionName: "deposit",
+      args: [need],
+      account: buyerAccount,
+      chain: arcTestnet,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: depositTx });
+    console.log(`[live-deploy] deposit confirmed (tx ${depositTx})`);
+  } else {
+    console.log(`[live-deploy] buyer escrow balance ${escrowBalance} >= cap ${cap} (no deposit needed)`);
+  }
+
   // (0b) Register the resource on-chain BEFORE any debit can fire. The same keccak
   // RESOURCE_ID the quote advertises as payTo must be registered + active, or
   // PaymentEscrow.debit reverts ResourceInactive (design §5.1/§5.3). The admin
@@ -211,13 +278,40 @@ export async function liveDeployEcho(
     );
   }
 
-  // (1) Generate the live Traefik config (the operator writes it to the file
-  // provider dir; the wildcard cert is DNS-01-provisioned). The slug.apex host is
-  // the live URL.
-  const { yaml } = buildTraefikDynamicConfig({ slug: SLUG, domain });
+  // (0c) BUILD + RUN the echo as a hardened runsc service on utter_appnet. This is
+  // the genuine launch the curl needs: without a built + running container the URL
+  // serves nothing. It is HOST-GATED (UTTER_SANDBOX_HOST=1): resolveDockerHandle
+  // returns undefined off-host, so refuse loudly rather than curling a dead URL.
+  const docker: DockerHandle | undefined = resolveDockerHandle();
+  if (!docker) {
+    throw new Error(
+      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
+        "(it builds + runs the echo container under runsc). See infrastructure/RUNBOOK.md.",
+    );
+  }
+  const launched = await launchEchoContainer(docker, {
+    facilitatorUrl: FACILITATOR_URL,
+    resourceId: RESOURCE_ID,
+    cap,
+    pricing: PRICING,
+    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+  });
+  console.log(
+    `[live-deploy] echo container ${ECHO_SERVICE.name} running under runsc on ` +
+      `${ECHO_SERVICE.network} (image ${launched.imageTag})`,
+  );
+
+  // (1) WRITE the live Traefik route to disk (atomically) so the file provider
+  // hot-loads a router for Host(<slug>.resources.<domain>) -> the container on
+  // appnet. The wildcard cert is DNS-01-provisioned. The slug.apex host is the URL.
   const apex = `resources.${domain}`;
   const url = `https://${SLUG}.${apex}/echo`;
-  console.log(`[live-deploy] deploying echo at ${url} (Traefik dynamic config generated, ${yaml.length} bytes)`);
+  const routePath = await writeTraefikDynamicFile({
+    slug: SLUG,
+    domain,
+    containerUrl: ECHO_SERVICE.containerUrl,
+  });
+  console.log(`[live-deploy] deploying echo at ${url} (Traefik route written to ${routePath})`);
 
   const reqInit = {
     method: "POST",
@@ -225,8 +319,12 @@ export async function liveDeployEcho(
     body: JSON.stringify({ text: "live" }),
   };
 
-  // (2) Unpaid call over HTTPS -> expect 402 with the accepts quote.
-  const unpaid = await fetchImpl(url, reqInit);
+  // (2) Unpaid call over HTTPS -> expect 402 with the accepts quote. Poll until the
+  // paywall is live: a fresh deploy needs the container to boot + the first-time
+  // ACME wildcard cert to issue, during which the URL transiently throws/404s/502s.
+  const unpaid = await waitForUnpaid402(url, fetchImpl);
+  // Belt-and-braces: waitForUnpaid402 only resolves on a real 402, but keep the
+  // explicit assertion so the contract is obvious at the call site.
   if (unpaid.status !== 402) {
     throw new Error(`[live-deploy] expected 402 on the unpaid HTTPS call, got ${unpaid.status}`);
   }
@@ -272,11 +370,22 @@ export async function liveDeployEcho(
 
   // (4) PRX-02: confirm a non-allowlisted host is unreachable from inside the
   // gVisor container netns, using the REAL blocked-host probe-runner the RUNBOOK
-  // documents (createLiveHostProbe + assertBlocked), NOT a fake HTTP call to a
-  // route that does not exist. It is HOST-GATED: it only runs when a real docker
-  // handle is available on the provisioned gVisor host; otherwise it SKIPS with an
-  // operator-gated log and reports unreachable=false (a skip, not a false pass).
-  const nonAllowlistedUnreachable = await runEgressProbe(resolveDockerHandle());
+  // documents (createLiveHostProbe + assertBlocked). In PHASE 1 (trusted echo, in-
+  // process gate) this is GATED OFF by default: the blocked-host probe image is not
+  // built yet, and the full PRX-02 enforcement lands with the Phase 2 nftables
+  // increment. It runs ONLY when UTTER_RUN_EGRESS_PROBE=1; otherwise it SKIPS with a
+  // clear log and reports unreachable=false (a skip, NOT a false pass), so a missing
+  // probe image can never break the live 402->200 proof.
+  let nonAllowlistedUnreachable = false;
+  if (process.env.UTTER_RUN_EGRESS_PROBE === "1") {
+    nonAllowlistedUnreachable = await runEgressProbe(docker);
+  } else {
+    console.log(
+      "[live-deploy] PRX-02 SKIPPED (Phase 1): set UTTER_RUN_EGRESS_PROBE=1 to run the " +
+        "blocked-host probe. The full egress enforcement lands with the Phase 2 nftables " +
+        "increment; recorded as a skip, NOT a pass.",
+    );
+  }
 
   return {
     url,
@@ -288,26 +397,12 @@ export async function liveDeployEcho(
   };
 }
 
-/** A minimal docker handle the egress probe needs (the GvisorRunner constructor
- * accepts a dockerode instance). Kept structural so the host gate can hand a real
- * dockerode in and a test can hand a spy in without a live daemon. */
-export type DockerHandle = ConstructorParameters<typeof GvisorRunner>[0];
-
-/**
- * Resolve a real dockerode handle on the provisioned host, or `undefined` when no
- * docker daemon is available (the autonomous box). It is intentionally lazy +
- * best-effort: a failure to load dockerode or construct it returns `undefined` so
- * the probe SKIPS (operator-gated) rather than throwing on a dev box. dockerode is
- * already a deployer dependency (the build path uses it), so no new import lands.
- */
-function resolveDockerHandle(): DockerHandle | undefined {
-  if (process.env.UTTER_SANDBOX_HOST !== "1") {
-    // The probe is only meaningful on the provisioned gVisor host. Refuse to even
-    // construct a docker handle off-host so a dev box can never accidentally run it.
-    return undefined;
-  }
-  return undefined;
-}
+// `resolveDockerHandle` + the `DockerHandle` type now live in orchestrate.ts (the
+// canonical launch plane); they are imported above and re-exported here for
+// back-compat with the barrel and existing callers. The old always-undefined stub
+// is gone: resolveDockerHandle now constructs a real dockerode on the provisioned
+// host (UTTER_SANDBOX_HOST=1) so the deploy can actually build + run the container.
+export type { DockerHandle };
 
 /**
  * The REAL PRX-02 egress assertion (design §4.3 residual risk 4 regression test).
