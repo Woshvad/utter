@@ -21,7 +21,7 @@
 // LiveDeps is imported TYPE-ONLY from live-deps.server.js so the class never bundles
 // the server module (T-mdx-01); the deps are injected by select.ts (production) or a
 // test (offline). All money is base-unit bigint; there is NO 1e6/6/18 literal here.
-import { createHash } from "node:crypto";
+import { resourceIdForLabel } from "@utter/x402-arc";
 import { filterResources, type IndexRecord } from "@utter/marketplace";
 import { readUsdcBalance } from "@utter/chain";
 import type { Address } from "viem";
@@ -84,15 +84,15 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Derive a valid 0x-prefixed 32-byte (64 hex) resourceId from the prompt plus a
- *  monotonic local counter, so repeated identical prompts get distinct ids. This is a
- *  LOCAL-DEV id (a sha256 digest), NEVER an on-chain mint; the Mint stage is labeled
- *  local-sim and downstream never treats it as a canonical on-chain identity. */
-let localResourceCounter = 0;
-function deriveLocalResourceId(prompt: string): Hex {
-  const seed = `${prompt}#${localResourceCounter++}#${Date.now()}`;
-  const digest = createHash("sha256").update(seed).digest("hex");
-  return `0x${digest}` as Hex;
+/** The studio label scheme for a created resource: a stable, colon-namespaced
+ *  `utter:resource:<slug>` string (matching the shared scheme in @utter/x402-arc's
+ *  resource-id helper). The resourceId is the keccak of this label via the SAME shared
+ *  resourceIdForLabel the deployer registers with, so the studio's displayed/escrow id
+ *  equals the deployer-registered id and the resource's RESOURCE_ID env when the slugs
+ *  agree (RESOURCE-DEPLOY-DESIGN.md §5.5). The keccak of a stable label is deterministic
+ *  by design, so there is no counter: the same slug always yields the same canonical id. */
+function labelForSlug(slug: string): string {
+  return `utter:resource:${slug}`;
 }
 
 /** Derive a bounded discovery slug from the prompt: lowercase, alnum-hyphen, trimmed,
@@ -132,9 +132,14 @@ function recordToCard(r: IndexRecord): ResourceCardData {
 
 /**
  * Project a read-through IndexRecord into the resource detail. Pricing/health/bond/
- * cardUrl come straight from the record; creator/payout source from the LOCAL-DEV
- * default (the record has no owner field until the on-chain read lands); sandbox maps
- * from the active flag. Never invents a money/identity value.
+ * cardUrl come straight from the record; sandbox maps from the active flag.
+ *
+ * payout is set to the canonical bytes32 resourceId: that is the escrow target the
+ * wallet signs (PaymentEscrow.debit keys settlement off the resourceId, not a creator
+ * EOA), so the served card's pay target must be the same id the registry registered
+ * (RESOURCE-DEPLOY-DESIGN.md §5.4b). creator stays a real owner address: the registry
+ * stores creator and resourceId separately, and the ownership gate compares creator
+ * against the SIWE-authenticated account. Never invents a money/identity value.
  */
 function recordToDetail(r: IndexRecord): ResourceDetail {
   const sandbox: SandboxStatus = r.active ? "live" : "down";
@@ -144,7 +149,7 @@ function recordToDetail(r: IndexRecord): ResourceDetail {
     agentId: r.agentId,
     slug: r.slug,
     category: r.category,
-    payout: LOCAL_DEV_CREATOR,
+    payout: r.resourceId as Hex,
     pricing: { ...r.pricing },
     health: { ...r.health },
     bond: r.bond,
@@ -211,14 +216,19 @@ export class LiveAdapter implements StudioDataAdapter {
       throw new Error(`createResource: bundle failed validation (${reason})`);
     }
 
-    // 4. Derive a valid bytes32 LOCAL-DEV resourceId + slug, build the IndexRecord, and
-    //    publish it into the SHARED singleton store. agentId is a clearly-local decimal
-    //    string (not an on-chain agentId). pricing.model reflects the COMPOSE choice
-    //    (what the UI displays); base/max are the base-unit basePrice as strings,
-    //    perKB "0". cardUrl is local-dev-shaped, mirroring the seed. No money/identity
-    //    value is authored beyond the read-through projection.
-    const resourceId = deriveLocalResourceId(spec.prompt);
+    // 4. Derive the slug, then the CANONICAL keccak resourceId via the shared
+    //    resourceIdForLabel over the studio label scheme (utter:resource:<slug>), build
+    //    the IndexRecord, and publish it into the SHARED singleton store. The id is the
+    //    same shared-helper keccak the deployer registers with, so the studio's id agrees
+    //    with the deployer-registered id and the resource's RESOURCE_ID env (§5.5).
+    //    agentId is a clearly-local decimal string (not an on-chain agentId).
+    //    pricing.model reflects the COMPOSE choice (what the UI displays); base/max are
+    //    the base-unit basePrice as strings, perKB "0". cardUrl is built from the injected
+    //    DEPLOY_DOMAIN builder (example.com only as the dev fallback), so the studio card
+    //    origin matches the deployed resource host. No money/identity value is authored
+    //    beyond the read-through projection.
     const slug = deriveSlug(spec.prompt);
+    const resourceId = resourceIdForLabel(labelForSlug(slug));
     const record: IndexRecord = {
       resourceId,
       agentId: "0",
@@ -229,7 +239,7 @@ export class LiveAdapter implements StudioDataAdapter {
       uptime: 1,
       health: { verified: true, score: 1 },
       bond: spec.bond,
-      cardUrl: `https://${slug}.resources.example.com/.well-known/agent-card.json`,
+      cardUrl: deps.buildCardUrl(slug),
       active: true,
     };
     await deps.indexStore.upsert(record);

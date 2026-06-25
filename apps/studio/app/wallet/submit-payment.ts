@@ -173,6 +173,15 @@ function requiresLiveSubmitPayment(): SubmitPayment {
  * (a non-empty resourceUrl AND a getRequestBody), otherwise the fail-loud live submitter
  * (the operator has not wired an endpoint). Anything else keeps the deterministic fixture
  * path. `mode` is read from the injected flag (the screen passes the server-derived value).
+ *
+ * No transport change is needed for the studio-initiated live pay (260625-4q5): the path
+ * already defaults to /call (DEFAULT_RUN_PATH) and the resource serves /call behind its
+ * gate. The remaining piece is upstream: once the detail cardUrl is a REAL DEPLOY_DOMAIN
+ * URL (live-deps.server resolveCardUrl), resourceUrlFromCard(detail.cardUrl) yields a real
+ * resource origin, so this selector picks liveSubmitPayment (the real client-side x402
+ * transport) instead of the fail-loud requiresLiveSubmitPayment stub. The example.com dev
+ * fallback still yields a non-empty origin, so the selector is governed by mode === "live"
+ * being set by the operator, not by the cardUrl being real.
  */
 export function selectSubmitPayment(opts: {
   resourceId: string;

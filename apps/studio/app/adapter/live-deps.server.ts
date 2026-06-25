@@ -14,6 +14,7 @@
 // filters, so live mode renders real-shaped reads against existing backend pieces.
 import type { PublicClient } from "viem";
 import { createArcPublicClient } from "@utter/chain";
+import { resourceIdForLabel, ECHO_RESOURCE_LABEL } from "@utter/x402-arc";
 import { InMemoryIndexStore, type IndexRecord, type IndexStore } from "@utter/marketplace";
 import {
   selectGenerator,
@@ -61,6 +62,34 @@ export interface LiveDeps {
    * summary, but an unreachable one must never be masked as zero/fake data).
    */
   getRevenue: (resourceId: string) => Promise<RevenueSummary>;
+  /**
+   * Build the absolute agent-card URL for a discovery slug from the deploy domain.
+   * Injected here (not read from process.env in live.ts) so the adapter stays env-free:
+   * live.ts calls this for the cardUrl of a createResource record, and the seed uses the
+   * same builder, so the studio's card origin matches the deployed resource's host. The
+   * URL is local-dev-shaped when DEPLOY_DOMAIN is unset (the example.com fallback).
+   */
+  buildCardUrl: (slug: string) => string;
+}
+
+/**
+ * Resolve the agent-card URL for a slug from the deploy domain (server-side). Reads
+ * DEPLOY_DOMAIN, computes the resources apex as `resources.<domain>`, and returns
+ * `https://<slug>.<apex>/.well-known/agent-card.json`. A domain that already starts with
+ * `resources.` is used as-is so a configured `resources.example.com` does not become a
+ * double `resources.resources.` prefix. When DEPLOY_DOMAIN is unset the example.com
+ * literal is the explicit local-dev fallback (never a production value). This is the only
+ * place that reads the deploy domain; live.ts receives the bound buildCardUrl, not the env.
+ */
+export function resolveCardUrl(slug: string, env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.DEPLOY_DOMAIN && env.DEPLOY_DOMAIN.trim().length > 0
+    ? env.DEPLOY_DOMAIN.trim()
+    : "example.com";
+  // Strip a trailing dot and any leading scheme/slashes an operator might paste in, then
+  // guard the double-prefix: a domain already under the resources apex is used verbatim.
+  const domain = raw.replace(/^https?:\/\//, "").replace(/\/+$/, "").replace(/\.+$/, "");
+  const apex = domain.startsWith("resources.") ? domain : `resources.${domain}`;
+  return `https://${slug}.${apex}/.well-known/agent-card.json`;
 }
 
 /**
@@ -71,14 +100,15 @@ export interface LiveDeps {
 let sharedStore: IndexStore | undefined;
 
 /** Return the singleton IndexStore, seeding it with the projected fixture rows on the
- *  first call only (re-seeding on later calls would duplicate the seed). */
-function getSharedIndexStore(): IndexStore {
+ *  first call only (re-seeding on later calls would duplicate the seed). The env is
+ *  threaded through so the seed builds real cardUrls from DEPLOY_DOMAIN. */
+function getSharedIndexStore(env: NodeJS.ProcessEnv): IndexStore {
   if (!sharedStore) {
     const store = new InMemoryIndexStore();
     // Seed the local-dev index once. upsert resolves synchronously (Map.set) so the
     // entries are queryable by the time the adapter awaits list()/get(); we void the
     // promise rather than block, since buildLiveDeps stays synchronous.
-    for (const rec of seedRecords()) {
+    for (const rec of seedRecords(env)) {
       void store.upsert(rec);
     }
     sharedStore = store;
@@ -101,15 +131,41 @@ function getSharedBuildChannel(): BuildEventChannel {
   return sharedBuildChannel;
 }
 
+/** The seeded echo entry's discovery slug (the live-deployed echo resource's slug). */
+const ECHO_SEED_SLUG = "echo";
+
 /**
  * Project a FIXTURE_MARKETPLACE card row into the IndexRecord shape the store holds.
  * Mirrors the inline projection in fixture.ts listMarketplace exactly (resourceId,
  * agentId, slug, category, pricing copy, reputation, uptime, health, bond, cardUrl,
  * active). This is a LOCAL-DEV seed: the values are read-through-shaped fixture data,
  * never live money or identity. No 1e6/decimals literal in any amount path.
+ *
+ * The cardUrl is built from DEPLOY_DOMAIN via resolveCardUrl (example.com only as the
+ * local-dev fallback), so the seeded card origin matches the deployed resource host.
+ *
+ * A seeded ECHO entry is prepended whose resourceId is the canonical keccak of
+ * ECHO_RESOURCE_LABEL (== the deployer-registered id == the resource's RESOURCE_ID env,
+ * RESOURCE-DEPLOY-DESIGN.md §5.5). This is what makes a studio pay reach the SAME live
+ * resource the deployer registered: /resources/<that id> resolves the echo, and the
+ * escrow target (payTo/payout) is that same bytes32.
  */
-function seedRecords(): IndexRecord[] {
-  return FIXTURE_MARKETPLACE.map((c) => ({
+function seedRecords(env: NodeJS.ProcessEnv): IndexRecord[] {
+  const echo: IndexRecord = {
+    resourceId: resourceIdForLabel(ECHO_RESOURCE_LABEL),
+    agentId: "0",
+    slug: ECHO_SEED_SLUG,
+    category: "data",
+    // Metered echo pricing in base units (strings). No decimals literal.
+    pricing: { model: "metered", base: "10000", perKB: "0", max: "10000" },
+    reputation: 0n,
+    uptime: 1,
+    health: { verified: true, score: 1 },
+    bond: 5_000_000n,
+    cardUrl: resolveCardUrl(ECHO_SEED_SLUG, env),
+    active: true,
+  };
+  const fixtures = FIXTURE_MARKETPLACE.map((c) => ({
     resourceId: c.resourceId,
     agentId: c.agentId,
     slug: c.slug,
@@ -119,9 +175,10 @@ function seedRecords(): IndexRecord[] {
     uptime: c.uptime,
     health: { verified: c.uptime > 0, score: c.uptime },
     bond: c.bond,
-    cardUrl: `https://${c.slug}.resources.example.com/.well-known/agent-card.json`,
+    cardUrl: resolveCardUrl(c.slug, env),
     active: c.active,
   }));
+  return [echo, ...fixtures];
 }
 
 /**
@@ -204,7 +261,7 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
 
   return {
     publicClient,
-    indexStore: getSharedIndexStore(),
+    indexStore: getSharedIndexStore(env),
     buildChannel: getSharedBuildChannel(),
     // selectGenerator returns the scaffold backend whenever ANTHROPIC_API_KEY is
     // absent (the autonomous default), so generate stays offline with no model call.
@@ -213,5 +270,8 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     runPlayground: runPlaygroundHarness,
     // Real revenue aggregation: GET FACILITATOR_URL/revenue/:resourceId (fail-loud).
     getRevenue: (resourceId) => fetchRevenue(resourceId, facilitatorUrl),
+    // Bind the cardUrl builder to this env so live.ts stays free of process.env. The
+    // builder reads DEPLOY_DOMAIN (example.com only as the local-dev fallback).
+    buildCardUrl: (slug) => resolveCardUrl(slug, env),
   };
 }
