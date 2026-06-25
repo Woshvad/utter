@@ -25,6 +25,7 @@
 // SECURITY: keys + DNS credentials are read ONLY from .env.local (gitignored) and
 // are NEVER logged.
 import { config as loadEnv } from "dotenv";
+import type Docker from "dockerode";
 import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -509,7 +510,9 @@ export async function liveDeployEcho(
   // probe image can never break the live 402->200 proof.
   let nonAllowlistedUnreachable = false;
   if (process.env.UTTER_RUN_EGRESS_PROBE === "1") {
-    nonAllowlistedUnreachable = await runEgressProbe(docker);
+    // Thread the handler container name: the probe shares the handler's network
+    // namespace so the connect tests the HANDLER's real reachability of a blocked host.
+    nonAllowlistedUnreachable = await runEgressProbe(docker, handlerName);
   } else {
     console.log(
       "[live-deploy] PRX-02 SKIPPED (Phase 1): set UTTER_RUN_EGRESS_PROBE=1 to run the " +
@@ -539,6 +542,55 @@ export async function liveDeployEcho(
 // host (UTTER_SANDBOX_HOST=1) so the deploy can actually build + run the container.
 export type { DockerHandle };
 
+/** The blocked-host probe image the operator builds per the README. */
+export const BLOCKED_HOST_PROBE_IMAGE = "utter/blocked-host-probe:latest";
+
+/** Inputs to {@link buildProbeCreateOptions}. */
+export interface BuildProbeCreateOptionsInput {
+  /** The host the probe attempts to reach (rides in Cmd, NOT the image tag). */
+  targetHost: string;
+  /** The handler container name whose network namespace the probe shares. */
+  handlerName: string;
+  /** The probe image (defaults to {@link BLOCKED_HOST_PROBE_IMAGE}). */
+  image?: string;
+}
+
+/**
+ * Build the dockerode `createContainer` options for one blocked-host probe run.
+ *
+ * The image reference is the plain tag (no `#host` suffix - that is an INVALID
+ * Docker reference that the old code produced and the daemon rejected with
+ * "invalid reference format"). The dynamic target rides in `Cmd` instead, and the
+ * probe shares the HANDLER's network namespace (`NetworkMode: container:<handler>`)
+ * so the connect tests the handler's real reachability. The container is hardened
+ * (read-only root, cap-drop ALL, no-new-privileges, pids/mem caps, auto-remove).
+ *
+ * This is a pure function so the construction is unit-testable without a daemon -
+ * the runtime probe run itself still needs the provisioned gVisor host.
+ */
+export function buildProbeCreateOptions(input: BuildProbeCreateOptionsInput): {
+  Image: string;
+  Cmd: string[];
+  HostConfig: Record<string, unknown>;
+} {
+  return {
+    // A VALID reference: the plain tag. The target is in Cmd, never the tag.
+    Image: input.image ?? BLOCKED_HOST_PROBE_IMAGE,
+    // The target host as the single command arg (the probe.sh entrypoint reads $1).
+    Cmd: [input.targetHost],
+    HostConfig: {
+      // Share the handler's netns so the probe tests the HANDLER's reachability.
+      NetworkMode: `container:${input.handlerName}`,
+      AutoRemove: true,
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges:true"],
+      PidsLimit: 64,
+      Memory: 64 * 1024 * 1024,
+    },
+  };
+}
+
 /**
  * The REAL PRX-02 egress assertion (design §4.3 residual risk 4 regression test).
  *
@@ -549,15 +601,29 @@ export type { DockerHandle };
  * netns. `assertBlocked` throws ContainmentFailureError if ANY is reachable - the
  * containment failure that must fail the deploy.
  *
+ * The probe is a TRUSTED operator tool, so it does NOT go through the locked
+ * untrusted RunSpec (empty env, no cmd, which cannot carry a dynamic target).
+ * Instead this injects a `connectProbe` that launches the blocked-host probe image
+ * DIRECTLY via dockerode ({@link buildProbeCreateOptions}): a VALID image
+ * reference, the target host in `Cmd`, run inside the HANDLER's network namespace
+ * so the connect tests the handler's real reachability. exit 0 == reachable ==
+ * containment failure.
+ *
  * When NO docker handle is available (the autonomous box), it SKIPS with a clear
  * operator-gated log and returns `false` - a skip, NOT a false pass and NOT a false
  * fail. The live PRX-02 acceptance is recorded as a Deferred Item until it runs on
  * the provisioned host (infrastructure/RUNBOOK.md Acceptance 1).
  *
+ * @param docker the host dockerode handle (undefined on the autonomous box -> skip).
+ * @param handlerName the handler container name whose netns the probe shares. Omitted
+ *        only when docker is absent (the skip path never launches a probe).
  * @returns true only when the live probe actually ran and every target was
  *          unreachable; false when the probe was skipped (no host docker handle).
  */
-export async function runEgressProbe(docker?: DockerHandle): Promise<boolean> {
+export async function runEgressProbe(
+  docker?: DockerHandle,
+  handlerName?: string,
+): Promise<boolean> {
   if (!docker) {
     console.log(
       "[live-deploy] PRX-02 SKIPPED: no docker handle (operator-gated). The real " +
@@ -566,14 +632,41 @@ export async function runEgressProbe(docker?: DockerHandle): Promise<boolean> {
     );
     return false;
   }
+  if (!handlerName) {
+    throw new Error(
+      "runEgressProbe: a handlerName is required to run the live probe - the probe shares the " +
+        "handler's network namespace (NetworkMode: container:<handlerName>) to test the handler's " +
+        "real reachability. Thread pairNames(SLUG).handlerName from the launch into this call.",
+    );
+  }
 
   // The trusted boundary runner. createLiveHostProbe REFUSES a non-gvisor runner,
   // so a docker-dev box can never run this live. buildRunSpec yields the hardened
-  // run-spec the probe image launches under.
+  // run-spec the probe interface still takes (the injected connectProbe launches
+  // the probe image directly via dockerode and does not read the spec).
   const runner = new GvisorRunner(docker);
-  const probe = createLiveHostProbe({ runner });
+  const dockerApi = docker as unknown as Docker;
+  const probe = createLiveHostProbe({
+    runner,
+    // Inject the host connectProbe: launch the probe image DIRECTLY via dockerode,
+    // bypassing the locked RunSpec (which cannot carry a dynamic target). The image
+    // reference is valid (target in Cmd), and it runs in the handler's netns.
+    connectProbe: async (_spec, target): Promise<boolean> => {
+      const createOpts = buildProbeCreateOptions({
+        targetHost: target.host,
+        handlerName,
+      });
+      const container = await dockerApi.createContainer(
+        createOpts as unknown as Docker.ContainerCreateOptions,
+      );
+      await container.start();
+      const result = (await container.wait()) as unknown as { StatusCode: number };
+      // exit 0 -> the connect SUCCEEDED -> the host is REACHABLE (containment fail).
+      return result.StatusCode === 0;
+    },
+  });
   const spec = buildRunSpec({
-    image: "utter/blocked-host-probe:latest",
+    image: BLOCKED_HOST_PROBE_IMAGE,
     backend: "gvisor",
     maxTimeoutSeconds: 30,
     limits: { pidsLimit: 128, memoryBytes: 256 * 1024 * 1024, cpus: 0.5 },
