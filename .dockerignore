@@ -1,0 +1,37 @@
+# Docker build-context excludes (build context = repo root, see
+# infrastructure/docker-compose.yml and packages/data-proxy/Dockerfile).
+#
+# Two exclusions are load-bearing:
+#   - **/node_modules: never copy host node_modules into the image. pnpm's store
+#     is symlinked, so a host copy breaks resolution; the image installs fresh via
+#     `pnpm install --frozen-lockfile`.
+#   - .env.local / .env: never bake secrets (the HMAC token secret, relayer keys)
+#     into an image layer.
+
+# Host dependency trees (rebuilt inside the image).
+**/node_modules
+
+# Secrets - NEVER baked into an image.
+.env
+.env.local
+**/.env.local
+.env.*.local
+
+# Git + local-only planning docs.
+.git
+.planning
+
+# Build output / generated dirs.
+**/dist
+**/build
+**/out
+**/.cache
+**/.react-router
+
+# Logs and OS cruft.
+**/*.log
+.DS_Store
+Thumbs.db
+
+# Design assets (not needed at runtime).
+Design

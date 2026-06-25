@@ -7,6 +7,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "start": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/server.ts",
     "test": "vitest run"
   },
   "dependencies": {
