@@ -8,6 +8,9 @@
     "./client": "./src/client.ts",
     "./examples/echo/server": "./examples/echo/server.ts"
   },
+  "scripts": {
+    "test": "vitest run"
+  },
   "dependencies": {
     "@utter/chain": "workspace:*",
     "ajv": "8.20.0",
