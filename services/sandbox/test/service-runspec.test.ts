@@ -8,8 +8,10 @@ import { buildRunSpec, type RunLimits } from "../src/runner/runspec";
 import {
   DEFAULT_SERVICE_RESTART_POLICY,
   buildResourceServiceSpec,
+  buildTrustedServiceSpec,
   type BuildResourceServiceSpecOptions,
 } from "../src/runner/service-runspec";
+import { ServiceEnvViolation } from "../src/runner/service-env";
 import { toServiceDockerodeCreateOptions } from "../src/runner/service-dockerode-spec";
 import type { RunBackend } from "../src/runner/types";
 
@@ -252,6 +254,107 @@ describe("service-dockerode-spec - translation carries the relaxed fields + hard
     expect(toServiceDockerodeCreateOptions(svc).HostConfig?.RestartPolicy).toEqual({
       Name: "unless-stopped",
     });
+  });
+});
+
+describe("service-runspec - buildTrustedServiceSpec (first-party sidecar env relaxation)", () => {
+  // A secret-shaped env the UNTRUSTED builder rejects (SIDECAR_FACILITATOR_TOKEN
+  // trips the *_TOKEN key-name denylist), plus the sidecar's non-secret config.
+  const SIDECAR_ENV = {
+    SIDECAR_FACILITATOR_TOKEN: "abc.def",
+    FACILITATOR_URL: "http://f:8787",
+    HANDLER_URL: "http://h:8080",
+  };
+
+  it("ACCEPTS a secret-shaped env the untrusted builder rejects and carries it verbatim", () => {
+    const svc = buildTrustedServiceSpec(baseOpts("gvisor", { env: SIDECAR_ENV }));
+    // The trusted path admits the raw env unchanged - including the token.
+    expect(svc.env).toEqual(SIDECAR_ENV);
+    expect(svc.env["SIDECAR_FACILITATOR_TOKEN"]).toBe("abc.def");
+  });
+
+  it("returns a copy of env, not the caller's map (no aliasing)", () => {
+    const opts = baseOpts("gvisor", { env: SIDECAR_ENV });
+    const svc = buildTrustedServiceSpec(opts);
+    expect(svc.env).not.toBe(opts.env);
+    expect(svc.env).toEqual(opts.env);
+  });
+
+  it("REGRESSION: buildResourceServiceSpec STILL throws ServiceEnvViolation for the same token env", () => {
+    expect(() => buildResourceServiceSpec(baseOpts("gvisor", { env: SIDECAR_ENV }))).toThrow(
+      ServiceEnvViolation,
+    );
+    // And the violation names the offending key without leaking its value.
+    try {
+      buildResourceServiceSpec(baseOpts("gvisor", { env: SIDECAR_ENV }));
+      throw new Error("expected buildResourceServiceSpec to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ServiceEnvViolation);
+      expect((err as ServiceEnvViolation).key).toBe("SIDECAR_FACILITATOR_TOKEN");
+      expect((err as ServiceEnvViolation).message).not.toContain("abc.def");
+    }
+  });
+
+  it("trusted and untrusted produce byte-identical isolation fields for an allowlisted-only input", () => {
+    // Same allowlisted-only env so BOTH builders accept it; the ONLY admitted
+    // difference is env keys, which are identical here.
+    const trusted = buildTrustedServiceSpec(baseOpts("gvisor", { extraNetworks: ["controlplane"] }));
+    const untrusted = buildResourceServiceSpec(
+      baseOpts("gvisor", { extraNetworks: ["controlplane"] }),
+    );
+
+    // Every isolation/deployment field is identical.
+    expect(trusted.runtime).toBe(untrusted.runtime);
+    expect(trusted.readonlyRootfs).toBe(untrusted.readonlyRootfs);
+    expect(trusted.tmpfs).toEqual(untrusted.tmpfs);
+    expect(trusted.capDrop).toEqual(untrusted.capDrop);
+    expect(trusted.capAdd).toEqual(untrusted.capAdd);
+    expect(trusted.securityOpt).toEqual(untrusted.securityOpt);
+    expect(trusted.pidsLimit).toBe(untrusted.pidsLimit);
+    expect(trusted.memoryBytes).toBe(untrusted.memoryBytes);
+    expect(trusted.cpus).toBe(untrusted.cpus);
+    expect(trusted.storageOptSize).toBe(untrusted.storageOptSize);
+    expect(trusted.restartPolicy).toEqual(untrusted.restartPolicy);
+    expect(trusted.name).toBe(untrusted.name);
+    expect(trusted.port).toBe(untrusted.port);
+    expect(trusted.network).toBe(untrusted.network);
+    expect(trusted.extraNetworks).toEqual(untrusted.extraNetworks);
+    // The two specs are byte-identical when fed the same allowlisted-only env.
+    expect(JSON.stringify(trusted)).toBe(JSON.stringify(untrusted));
+  });
+
+  it("still enforces ALL non-env validations (the trusted path relaxes ONLY the env guard)", () => {
+    // network host/none
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { network: "host" }))).toThrow(/host/);
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { network: "none" }))).toThrow(/none/);
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { network: "" }))).toThrow(/network/);
+    // bad name
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { name: "BAD-name" }))).toThrow(/name/);
+    // non-positive limits/port
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { port: 0 }))).toThrow(/port/);
+    expect(() =>
+      buildTrustedServiceSpec(baseOpts("gvisor", { limits: { ...LIMITS, memoryBytes: 0 } })),
+    ).toThrow(/memoryBytes/);
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { image: "" }))).toThrow(/image/);
+    // host/none extraNetworks + duplicate primary
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { extraNetworks: ["host"] }))).toThrow(
+      /host/,
+    );
+    expect(() => buildTrustedServiceSpec(baseOpts("gvisor", { extraNetworks: ["none"] }))).toThrow(
+      /none/,
+    );
+    expect(() =>
+      buildTrustedServiceSpec(
+        baseOpts("gvisor", { network: "ingress", extraNetworks: ["ingress"] }),
+      ),
+    ).toThrow(/duplicate/);
+  });
+
+  it("keeps the gVisor runsc boundary (runtime is never dropped on the trusted path)", () => {
+    expect(buildTrustedServiceSpec(baseOpts("gvisor")).runtime).toBe("runsc");
+    // And no auto-kill field on the trusted path either.
+    const svc = buildTrustedServiceSpec(baseOpts("gvisor")) as unknown as Record<string, unknown>;
+    expect("timeoutSeconds" in svc).toBe(false);
   });
 });
 
