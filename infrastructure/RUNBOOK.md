@@ -184,6 +184,86 @@ amounts, image tags, container names, and the written path).
 
 ---
 
+## Untrusted (Phase 2) deploy - the sidecar/handler pair
+
+**Goal (Phase 2, arbitrary AI-generated code):** the SAME live 402 -> 200 proof,
+but now served through the trusted sidecar gate in front of an untrusted gate-less
+handler, on the six-network topology, with the handler's direct facilitator / Arc
+RPC route simultaneously DROPPED. This is the C1/C2 containment: the handler holds
+no facilitator route + no caller-auth token (it joins `proxynet` only); the
+sidecar (only) reaches the facilitator (on `controlplane`) and reverse-proxies
+validated calls to the handler (on `proxynet`). Traefik routes to the SIDECAR.
+
+> Prerequisite: Acceptances 1-3 above pass on the provisioned host (gVisor,
+> wildcard TLS, the host nftables `policy drop`). This section adds the six-net
+> topology + the sidecar pair + the live egress probe (PRX-02) on top of them.
+
+The EXACT operator host sequence:
+
+```bash
+# 1. Pull the latest code + install, then set the untrusted-arming env in .env.local
+#    (gitignored - NEVER commit a real key). Beyond the existing Phase-1 keys
+#    (RELAYER_SIGNER_KEYS / DEPLOY_DOMAIN / REGISTRY_ADMIN_PRIVATE_KEY /
+#    PLATFORM_TREASURY / TEST_BUYER_PRIVATE_KEY / DEPLOY_BASE_IMAGE_NODE / DNS-01
+#    creds), set:
+cd /opt/utter && git pull && pnpm install
+#      FACILITATOR_AUTH_SECRET = a fresh random secret, >=32 chars (generate one,
+#                                e.g. `openssl rand -hex 32`). NEVER commit it.
+#      NODE_ENV                = production   (arms the facilitator caller-auth, B9)
+#    Ordering hazard: do NOT set NODE_ENV=production before the sidecar exists - it
+#    would 401 every call. With the Phase 2 sidecar landed, the sidecar mints +
+#    presents the per-resource token, so production + the minted token are correct
+#    together. Set both only for this untrusted pair deploy.
+
+# 2. Full-stack recreate onto the SIX networks (NO single-service filter, or
+#    Traefik / the facilitator end up on the wrong nets and every call 502s):
+docker compose --env-file .env.local -f infrastructure/docker-compose.yml up -d --build
+#    Verify the six nets exist and the memberships are right:
+docker network ls   # expect: edge ingress controlplane proxynet upstreamnet redisnet
+docker network inspect proxynet \
+  --format '{{range .Containers}}{{.Name}}={{.IPv4Address}} {{end}}'
+#    -> the data-proxy MUST be present at 172.30.0.10 (the static nftables target).
+docker network inspect controlplane \
+  --format '{{range .Containers}}{{.Name}} {{end}}'   # facilitator present; NO redis
+docker network inspect redisnet \
+  --format '{{range .Containers}}{{.Name}} {{end}}'   # redis + data-proxy ONLY
+#    Confirm redis is on NEITHER proxynet NOR controlplane (M6); it is on redisnet
+#    only and is unpublished (no host 6379).
+
+# 3. Apply the host nftables default-deny egress. DATA_PROXY_IP is the static
+#    proxynet address; DATA_PROXY_PORT is the data-proxy listen port (8080);
+#    FACILITATOR_IP resolves on controlplane (inspect it above). The ruleset shape
+#    is unchanged from Phase 1 - this is the C2 resolution, now honest because the
+#    handler is off controlplane and never needs the facilitator:
+DATA_PROXY_IP=172.30.0.10 DATA_PROXY_PORT=8080 \
+  ARC_RPC_IP=<resolved-arc-rpc-ip> \
+  FACILITATOR_IP=<facilitator-ip-on-controlplane> \
+  UTTER_SANDBOX_HOST=1 sudo -E bash infrastructure/sandbox-host/nftables.rules.sh
+
+# 4. Run the pair deploy WITH the live egress probe. UTTER_SANDBOX_HOST=1 lets the
+#    orchestrator build + run the containers; UTTER_RUN_EGRESS_PROBE=1 arms PRX-02
+#    (skipped in Phase 1). Run from the repo root (.env.local loads from there):
+UTTER_SANDBOX_HOST=1 UTTER_RUN_EGRESS_PROBE=1 node \
+  --import ./scripts/ts-resolver.mjs --experimental-strip-types \
+  services/deployer/src/live-deploy.ts
+```
+
+The pair deploy then: mints the facilitator caller-auth token, launches the
+HANDLER (on `proxynet` only) + the SIDECAR (on `ingress`+`controlplane`+`proxynet`),
+inspects the handler IP for the sidecar (runsc cannot use Docker DNS), registers +
+deposits, proves **402 -> 200 THROUGH the sidecar** with the on-chain `Debited`
+split, AND asserts **PRX-02**: from inside the handler container netns, the
+metadata IP, an RFC1918 host, the Arc RPC, the facilitator, and host loopback are
+all UNREACHABLE.
+
+**Acceptance (the Phase 2 proof):** 402 -> 200 served through Traefik -> sidecar ->
+handler WHILE the handler's direct facilitator / Arc RPC route is simultaneously
+dropped (the C1/C2 containment). **Fail:** a `ContainmentFailureError` lists any
+reachable host (the topology or nftables is not enforcing the deny), or the
+402 -> 200 / on-chain assertion throws.
+
+---
+
 ## After running
 
 Once all three acceptances pass on the provisioned host, update the three

@@ -99,23 +99,27 @@ The data-proxy still mints its **short-lived scoped token at request time** and 
 
 ## 3. Network topology
 
-Five Docker networks on the provisioned gVisor host. The load-bearing distinction is `internal: true` — a Docker `internal` network has **no default gateway**, so members cannot reach the internet at all, regardless of any in-container route. The current `infrastructure/docker-compose.yml` is a single-network dev stack with no segmentation; this is the layout the provisioned host must implement.
+SIX Docker networks on the provisioned gVisor host. The load-bearing distinction is `internal: true` — a Docker `internal` network has **no default gateway**, so members cannot reach the internet at all, regardless of any in-container route. The current `infrastructure/docker-compose.yml` now implements exactly this layout (Rework 8, wave BD).
+
+> **M6 correction (Rework 8, supersedes the original table below).** The first draft of this table put **redis on `controlplane` shared with every resource**, and routed `resource → facilitator`/`facilitator → redis` over that one net. That is the M6 bug: it placed redis on a resource-reachable network, giving a compromised resource L3 reachability to the cache/store. The corrected topology below moves redis onto a dedicated **`redisnet`** backend net shared **only with the data-proxy** (the one trusted service that needs it), and the facilitator uses **in-memory stores** (no redis), so it is not on `redisnet` either. The resource → facilitator route stays on `controlplane`; redis is on **no** resource-reachable net. The C1 sidecar split also means it is the **sidecar** (not the untrusted handler) that joins `ingress`+`controlplane`+`proxynet`; the handler joins `proxynet` only.
 
 | Network | `internal`? | Members | Purpose |
 |---|---|---|---|
 | `edge` | no (external) | **traefik** only | Only network with outbound internet + published `:443`/`:80`. Wildcard TLS terminates here. |
-| `ingress` | **yes** | traefik, **every resource** | Traefik → resource inbound only. No gateway → resource can't use it for egress. |
-| `controlplane` | **yes** | every resource, **facilitator**, redis | Resource → facilitator `/verify`+`/settle`; facilitator → redis. No internet. |
-| `proxynet` | **yes** | every resource, **data-proxy** | The handler's data-plane egress. Resource → data-proxy only. No internet. |
+| `ingress` | **yes** | traefik, **every sidecar** | Traefik → sidecar inbound only. No gateway → not an egress path. |
+| `controlplane` | **yes** | every **sidecar**, **facilitator** | Sidecar → facilitator `/verify`+`/settle`. No internet. **No redis here** (M6 fix). |
+| `proxynet` | **yes** | every **handler** + every **sidecar**, **data-proxy** (static `172.30.0.10`) | The handler's data-plane egress. Resource → data-proxy only. No internet. |
 | `upstreamnet` | no (external) | **data-proxy**, **facilitator** | The only place the proxy reaches allowlisted upstreams and the facilitator reaches Arc RPC. Resources are **never** attached here. |
+| `redisnet` | **yes** | **redis**, **data-proxy** | redis backend, trusted services ONLY (M6). **No resource (handler or sidecar) is ever on it.** redis is unpublished (no host `6379`). |
 
 Per-service membership (the whole design in one list):
 
 - **traefik** → `edge` + `ingress`. Bridges the one internet-facing net to the internal ingress net.
-- **resource-`<slug>`** → `ingress` + `controlplane` + `proxynet`. **Never** on `edge` or `upstreamnet`. All three are `internal:true`, so the container has **zero route to the internet** at the Docker layer.
-- **facilitator** → `controlplane` + `upstreamnet`.
-- **data-proxy** → `proxynet` + `upstreamnet`.
-- **redis** → `controlplane` only.
+- **handler-`<slug>`** (untrusted, gate-less) → `proxynet` **only**. Its sole reachable peer is the data-proxy; no facilitator route, no internet.
+- **sidecar-`<slug>`** (trusted gate) → `ingress` + `controlplane` + `proxynet`. **Never** on `edge`, `upstreamnet`, or `redisnet`. All three are `internal:true`, so it has **zero route to the internet** at the Docker layer.
+- **facilitator** → `controlplane` + `upstreamnet`. In-memory stores, so **not** on `redisnet`.
+- **data-proxy** → `proxynet` (static `172.30.0.10`) + `upstreamnet` + `redisnet`.
+- **redis** → `redisnet` **only** (M6: never on a resource-reachable net; unpublished).
 
 ### Text diagram
 
@@ -130,26 +134,33 @@ Per-service membership (the whole design in one list):
                              |
                      [ ingress ] (internal: no gateway)
                              |
-   inbound: Host(<slug>.resources.<domain>) -> http://<slug>:8080
+   inbound: Host(<slug>.resources.<domain>) -> http://<slug>-gate:8080
                              |
-                      +--------------+
-              +------>|  RESOURCE    |<------+
-              |       |  <slug>      |       |
-   [ controlplane ]   | (runsc, RO  |   [ proxynet ]
-   (internal)         |  rootfs,    |   (internal)
-              |       |  capdrop)   |       |
-              v       +--------------+       v
-        +-------------+                 +-----------+
-        | FACILITATOR |                 |DATA-PROXY |
-        +-------------+                 +-----------+
-          |        |                      |
-      [controlplane] \                    |
-          |          \                    |
-        +-----+       [ upstreamnet ] (external) -----+
-        |REDIS|            |                          |
-        +-----+        Arc RPC (chain)        allowlisted upstreams
+                      +--------------+        +--------------+
+              +------>|  SIDECAR     |--proxynet-->| HANDLER  |
+              |       |  <slug>-gate |        | <slug>       |
+   [ controlplane ]   | (trusted     |        | (untrusted,  |
+   (internal)         |  gate)       |        | runsc, RO,   |
+              |       +--------------+        | capdrop;     |
+              v             |                 | proxynet ONLY)|
+        +-------------+   [ proxynet ]        +--------------+
+        | FACILITATOR |   (internal)                |
+        +-------------+        |                     | (data plane)
+          |                    v                     v
+          |               +-----------+        +-----------+
+          |               |DATA-PROXY |<--proxynet (172.30.0.10)
+          |               +-----------+
+          |                  |       |
+          |          [ upstreamnet ] [ redisnet ] (internal)
+          |              (external)       |
+        [ upstreamnet ]    |          +-----+
+          |                |          |REDIS|  (trusted backend ONLY;
+          v                |          +-----+   no resource net; unpublished)
+       Arc RPC (chain)  allowlisted upstreams
 
-Resource sits on THREE internal networks and touches the internet through NONE.
+The untrusted HANDLER sits on proxynet ONLY and touches the internet through NONE.
+The trusted SIDECAR bridges ingress+controlplane+proxynet. redis is on redisnet
+ONLY - reachable by the data-proxy, never by any resource (M6).
 ```
 
 ### How each reachability requirement is met
@@ -183,7 +194,7 @@ Everything else (`network:"host"`, `privileged`, `capAdd`, secret env) stays for
 Be explicit: the service profile **is** a weaker isolation posture than the one-shot profile, in two specific ways.
 
 1. **The strongest egress mechanism (`--network=none` + veth, "no route exists") is downgraded to "internal network with no gateway."** For the one-shot profile, `firewall.ts:18-25` prefers `--network=none`+veth precisely because it is stronger than relying on a network having no gateway. The service profile must use internal networks (it needs inbound + control-plane reachability), so it leans on `internal:true` correctness plus nftables, not on the absence of any interface.
-2. **The container is reachable on three networks**, so a compromised resource shares L3 with the facilitator, data-proxy, and (transitively) redis — a lateral-movement surface the one-shot container (on `none`) does not have.
+2. **The sidecar is reachable on three networks**, so a compromised *trusted sidecar* shares L3 with the facilitator and data-proxy — a lateral-movement surface the one-shot container (on `none`) does not have. The *untrusted handler* is now confined to `proxynet` alone (C1 split), so it shares L3 with only the data-proxy, not the facilitator. With the M6 fix, **no resource (handler or sidecar) shares L3 with redis at all** — redis is on `redisnet`, reachable only by the data-proxy.
 
 **For whom this matters:**
 - **The trusted ECHO resource (Phase 1):** the code inside is ours and audited. The weaker posture is acceptable because the threat is not "the handler is adversarial" but "the plumbing must work." This is why Phase 1 can ship the long-lived profile before the full topology and nftables are applied.
@@ -191,7 +202,7 @@ Be explicit: the service profile **is** a weaker isolation posture than the one-
 
 ### 4.3 Residual risks + mitigations
 
-1. **Compromised resource pivots to facilitator/proxy/redis over shared internal nets.** *Mitigation:* facilitator treats all `controlplane` input as untrusted (already authenticates payload sig + nonce + reservation, `Utter-SPEC.md:349,628`); proxy fails closed on token/allowlist/host-mismatch (`proxy.ts:140-219`); redis is `controlplane`-only and auth-required. Per-resource net segmentation (§12) eliminates resource-to-resource reachability in the multi-host future; on the single MVP host, isolation relies on each service trusting only authenticated input.
+1. **Compromised resource pivots to facilitator/proxy over shared internal nets.** *Mitigation:* facilitator treats all `controlplane` input as untrusted (already authenticates payload sig + nonce + reservation, `Utter-SPEC.md:349,628`); proxy fails closed on token/allowlist/host-mismatch (`proxy.ts:140-219`). **redis is off every resource-reachable net (M6):** it is on `redisnet` with the data-proxy only, so a compromised handler (on `proxynet`) or sidecar (on `ingress`+`controlplane`+`proxynet`) has no L3 path to it - it can never reach redis directly, let alone before auth. Per-resource net segmentation (§12) eliminates resource-to-resource reachability in the multi-host future; on the single MVP host, isolation relies on each service trusting only authenticated input.
 2. **gVisor escape → host → bypasses the Docker-network design.** *Mitigation:* host nftables `policy drop` is namespace-independent (filters at the host output hook), so an escaped process still hits the default-drop. Keep runsc updated; nested virt is provisioned for a Firecracker upgrade path (`PROVISION.md`).
 3. **DNS rebinding / SSRF through the proxy to metadata / RFC1918.** *Mitigation already present:* the proxy re-resolves and re-checks every A/AAAA against `EGRESS_BLOCK_SET` (link-local/metadata + RFC1918 + loopback) immediately before connect (CR-02, `proxy.ts:223-255`). *Residual:* the recheck does not yet socket-pin — a production pinning dispatcher closes the TOCTOU window.
 4. **Internal-network gateway leak (Docker quirk).** A forgotten `internal:true` or an `enable_ipv6` v6 default route silently grants egress. *Mitigation:* `createLiveHostProbe` asserts the metadata IP, an RFC1918 host, Arc RPC, the facilitator, and host loopback are all unreachable from inside the container netns (`RUNBOOK.md:25-55`). This probe is the regression test for this exact leak and must run after any compose change.
@@ -337,7 +348,7 @@ Each phase lists concrete code changes (files), operator steps, and host verific
 
 These need a human call before or during implementation:
 
-1. **Containerize the facilitator (and redis) — yes/no.** The topology assumes the facilitator runs as a container on `controlplane`+`upstreamnet`. If the facilitator stays a host process, the resource → facilitator route and the `ip daddr ${facilitator} drop` nftables rule must be re-expressed against the host IP, and the control-plane "internal network" property weakens. Recommendation: containerize for Phase 2 so the internal-network guarantee is uniform.
+1. **Containerize the facilitator (and redis) — yes/no.** The topology assumes the facilitator runs as a container on `controlplane`+`upstreamnet` and redis on `redisnet` (M6: never on a resource-reachable net). If the facilitator stays a host process, the resource → facilitator route and the `ip daddr ${facilitator} drop` nftables rule must be re-expressed against the host IP, and the control-plane "internal network" property weakens. Recommendation: containerize for Phase 2 so the internal-network guarantee is uniform.
 2. **Internal-networks vs nftables-only for egress containment.** This design uses both (defense-in-depth). The operator may decide whether the single MVP host runs both from the start (recommended for untrusted Phase 2) or relies on internal networks alone for Phase 1 (acceptable for trusted echo). Do not run untrusted resources with only one layer.
 3. **Restart policy default.** This design proposes `unless-stopped`. Alternatives: `on-failure` with a max-retry cap (avoids restart-loop resource burn on a crashing handler) — relevant for untrusted code that may crash repeatedly. Operator picks the policy and any backoff.
 4. **Per-resource network segmentation vs shared internal nets on the single host.** The MVP shares `controlplane`/`proxynet` across all resources (resource-to-resource isolation then relies on each service trusting only authenticated input). The multi-host future (§12) gives each resource its own pair. Operator decides whether the single host gets per-resource nets now (stronger, more plumbing) or later.
