@@ -96,23 +96,35 @@ export class GvisorRunner implements SandboxRunner {
       );
     }
 
-    let container: Docker.Container;
+    let container: Docker.Container | undefined;
     try {
       container = await this.docker.createContainer(toServiceDockerodeCreateOptions(spec));
+      // Attach every extra net BEFORE start so the container boots already on each
+      // one (dockerode can attach only the primary at create; extras are a
+      // post-create connect). NetworkMode (the primary) is unchanged.
+      for (const net of spec.extraNetworks ?? []) {
+        await this.docker.getNetwork(net).connect({ Container: container.id });
+      }
       await container.start();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Surface the failed start (WR-06). The id may be absent if create failed;
-      // fall back to the service name (non-secret) for traceability.
-      this.onError({ phase: "start-service", id: spec.name, message });
+      // Surface the failed start (WR-06). Use the created container id when we have
+      // it; otherwise fall back to the service name (non-secret) for traceability.
+      this.onError({ phase: "start-service", id: container?.id ?? spec.name, message });
+      // Best-effort force-remove the half-created container so a failed multi-net
+      // attach (or a failed start) does not leak a created-but-unstarted container.
+      if (container !== undefined) {
+        await this.docker.getContainer(container.id).remove({ force: true }).catch(() => {});
+      }
       throw err instanceof Error ? err : new Error(message);
     }
 
     // No deadline timer: a long-lived service is never auto-killed.
+    const id = container.id;
     return {
-      id: container.id,
+      id,
       backend: this.backend,
-      stop: () => this.stop(container.id),
+      stop: () => this.stop(id),
     };
   }
 
