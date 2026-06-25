@@ -596,3 +596,64 @@ describe("createReconcileLoop - host concurrency cap (H4)", () => {
     expect(errors.filter((e) => e.phase === "capacity")).toHaveLength(1);
   });
 });
+
+describe("createReconcileLoop - orphan-network GC hook (quick 260625-mwb)", () => {
+  it("invokes reapOrphanNetworks once per tick, after the orphan-container reap", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"b1".repeat(32)}`;
+    const orphan: Hex = `0x${"b2".repeat(32)}`;
+    await store.put(record(r1));
+
+    // One desired container + one orphan, so the orphan reap pass runs first.
+    const order: string[] = [];
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1),
+      container(orphan),
+    ]);
+    const reapContainer = vi.fn(async () => {
+      order.push("reapContainer");
+    });
+    const reapOrphanNetworks = vi.fn(async () => {
+      order.push("reapOrphanNetworks");
+    });
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      reapOrphanNetworks,
+    });
+    await loop.tick();
+
+    // Called exactly once, and AFTER the orphan-container reap so the network sweep
+    // runs against a settled container set.
+    expect(reapOrphanNetworks).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["reapContainer", "reapOrphanNetworks"]);
+  });
+
+  it("surfaces a sweep failure via onError (phase 'reap') without propagating", async () => {
+    const store = new InMemoryDeploymentStore();
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => []);
+    const reapOrphanNetworks = vi.fn(async () => {
+      throw new Error("listNetworks failed");
+    });
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapOrphanNetworks,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+
+    // The tick still resolves (a failed sweep does not crash the loop) but the failure
+    // is surfaced, not dropped.
+    await expect(loop.tick()).resolves.toBeDefined();
+    const reap = errors.filter((e) => e.phase === "reap");
+    expect(reap).toHaveLength(1);
+    expect(reap[0]?.message).toContain("orphan-network sweep failed");
+    expect(reap[0]?.message).toContain("listNetworks failed");
+  });
+});

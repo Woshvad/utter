@@ -19,13 +19,16 @@ const LIMITS = {
 
 // Build a real hardened spec (so the runtime matches the backend) with two extra
 // nets. `runtime` is derived by the builder: runsc for gvisor, runc for docker-dev.
+// The extras mirror the new per-resource topology (quick 260625-mwb): a sidecar joins
+// controlplane + its per-slug pairnet `utter_pairnet_<slug>` (NOT the shared proxynet).
+const PAIRNET = "utter_pairnet_sidecar";
 const specFor = (backend: RunBackend) =>
   buildResourceServiceSpec({
     backend,
     image: "resource:abc123",
     limits: LIMITS,
     network: "ingress",
-    extraNetworks: ["controlplane", "proxynet"],
+    extraNetworks: ["controlplane", PAIRNET],
     env: { PORT: "8080" },
     name: "utter_res_sidecar-1",
     port: 8080,
@@ -87,12 +90,12 @@ describe("startService - post-create multi-network attach", () => {
         expect(stub.calls).toEqual([
           "create",
           "connect:controlplane",
-          "connect:proxynet",
+          `connect:${PAIRNET}`,
           "start",
         ]);
         // Each extra net connected exactly once with the created container id.
         expect(stub.getNetwork).toHaveBeenCalledWith("controlplane");
-        expect(stub.getNetwork).toHaveBeenCalledWith("proxynet");
+        expect(stub.getNetwork).toHaveBeenCalledWith(PAIRNET);
         expect(stub.createContainer).toHaveBeenCalledTimes(1);
         expect(stub.start).toHaveBeenCalledTimes(1);
         // The primary network is NOT re-connected (it is the create-time NetworkMode).
@@ -101,11 +104,11 @@ describe("startService - post-create multi-network attach", () => {
       });
 
       it("a failing connect surfaces a start-service RunError, force-removes, and rethrows", async () => {
-        const stub = makeDockerStub({ failConnectOn: "proxynet" });
+        const stub = makeDockerStub({ failConnectOn: PAIRNET });
         const errors: RunError[] = [];
         const runner = runnerFor(backend, stub.docker, (e) => errors.push(e));
 
-        await expect(runner.startService(specFor(backend))).rejects.toThrow(/proxynet/);
+        await expect(runner.startService(specFor(backend))).rejects.toThrow(new RegExp(PAIRNET));
 
         // start was NEVER reached (the connect failed before start).
         expect(stub.start).not.toHaveBeenCalled();
@@ -115,11 +118,11 @@ describe("startService - post-create multi-network attach", () => {
         // The RunError was surfaced with the created container id (not the name).
         expect(errors).toHaveLength(1);
         expect(errors[0]).toMatchObject({ phase: "start-service", id: stub.containerId });
-        // Order: create -> connect:controlplane -> connect:proxynet (fails) -> remove.
+        // Order: create -> connect:controlplane -> connect:<pairnet> (fails) -> remove.
         expect(stub.calls).toEqual([
           "create",
           "connect:controlplane",
-          "connect:proxynet",
+          `connect:${PAIRNET}`,
           "remove",
         ]);
       });
