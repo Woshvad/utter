@@ -51,17 +51,17 @@ export interface BuildRunSpecOptions {
 }
 
 /** Map a backend to its container runtime. gvisor -> runsc; docker-dev -> runc. */
-function runtimeFor(backend: RunBackend): "runsc" | "runc" {
+export function runtimeFor(backend: RunBackend): "runsc" | "runc" {
   return backend === "gvisor" ? "runsc" : "runc";
 }
 
 /** The default tmpfs: a small, non-executable /tmp. */
-const DEFAULT_TMPFS: Record<string, string> = {
+export const DEFAULT_TMPFS: Record<string, string> = {
   "/tmp": "rw,noexec,nosuid,size=16m",
 };
 
 /** Force every tmpfs option string to include noexec,nosuid (defense in depth). */
-function hardenTmpfs(tmpfs: Record<string, string>): Record<string, string> {
+export function hardenTmpfs(tmpfs: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [path, opts] of Object.entries(tmpfs)) {
     const parts = new Set(
