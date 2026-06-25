@@ -19,13 +19,22 @@
 # (SBX-02/06).
 #
 # Mechanism: this is the Mechanism B (DOCKER-USER REJECT, defense-in-depth)
-# expression. The primary prod mechanism is `--network=none` + a veth to the
-# egress gateway (so NO route exists except the proxy); these explicit drops are
-# the belt-and-braces denylist on top of that.
+# expression. The primary prod mechanism is the six-network internal:true topology
+# (infrastructure/docker-compose.yml): the handler joins proxynet ONLY (no
+# gateway), so its sole reachable peer is the data-proxy and no route to the
+# internet / facilitator / Arc RPC exists at the Docker layer. These explicit
+# drops are the belt-and-braces packet-layer denylist on top of that. This IS the
+# C2 resolution now that the handler is off controlplane: the handler never needs
+# the facilitator (the trusted sidecar does), so dropping the facilitator/Arc-RPC
+# routes for resource egress is honest, not a contradiction.
 #
 # Usage (operator, on the provisioned host):
-#   DATA_PROXY_IP=10.200.0.2 DATA_PROXY_PORT=8080 \
-#   ARC_RPC_IP=<resolved> FACILITATOR_IP=<resolved> \
+#   # DATA_PROXY_IP is the data-proxy's STATIC proxynet address (compose pins it to
+#   # 172.30.0.10); DATA_PROXY_PORT is the data-proxy listen port (8080, see
+#   # packages/data-proxy/src/server.ts DEFAULT_PORT + Dockerfile EXPOSE). The
+#   # handler is attached to proxynet, so this single accept is its sole egress.
+#   DATA_PROXY_IP=172.30.0.10 DATA_PROXY_PORT=8080 \
+#   ARC_RPC_IP=<resolved> FACILITATOR_IP=<resolved on controlplane> \
 #     sudo -E bash infrastructure/sandbox-host/nftables.rules.sh
 set -euo pipefail
 
@@ -64,6 +73,8 @@ table inet utter_egress {
     ip daddr 127.0.0.0/8    drop      # host loopback
 
     # --- Per-deploy infra IPs (resolved at deploy; defense-in-depth) ---
+    # The handler is on proxynet only, so it has NO Docker-layer route to either of
+    # these anyway; these drops are the packet-layer backstop (C2 resolution).
     ip daddr ${ARC_RPC_IP}     drop   # Arc RPC (no direct chain access from the sandbox)
     ip daddr ${FACILITATOR_IP} drop   # facilitator (no direct settle access from the sandbox)
 
