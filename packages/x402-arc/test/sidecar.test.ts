@@ -374,6 +374,164 @@ describe("createSidecarGateApp", () => {
     expect(fac.authByPath.verify).toBeUndefined();
     expect(fac.authByPath.settle).toBeUndefined();
   });
+
+  it("10. free paths are EXACT: a route UNDER /.well-known/* is gated (#3)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const app = createSidecarGateApp(cfg(), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec }),
+    });
+    // NOT an exact free path -> the gate runs; unpaid -> 402; handler NEVER reached.
+    const res = await app.request("/.well-known/anything-else", { method: "GET" });
+    expect(res.status).toBe(402);
+    expect(hRec.called).toBe(false);
+    expect(fac.calls).not.toContain("verify");
+  });
+
+  it("11. free paths are EXACT: a route UNDER /health (/health/work) is gated (#3)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const app = createSidecarGateApp(cfg(), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec }),
+    });
+    const res = await app.request("/health/work", { method: "GET" });
+    expect(res.status).toBe(402);
+    expect(hRec.called).toBe(false);
+    expect(fac.calls).not.toContain("verify");
+  });
+
+  it("12. /healthz (an exact default free path) bypasses the gate; handler reached (#3)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const app = createSidecarGateApp(cfg(), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec, status: 200, body: JSON.stringify({ ok: true }) }),
+    });
+    const res = await app.request("/healthz", { method: "GET" });
+    expect(res.status).toBe(200);
+    expect(fac.calls).toHaveLength(0);
+    expect(hRec.called).toBe(true);
+  });
+
+  it("13. a custom FREE_PATHS list is honored as EXACT entries (#3)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const app = createSidecarGateApp(cfg({ freePaths: ["/ping"] }), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec, status: 200, body: JSON.stringify({ ok: true }) }),
+    });
+    // The exact custom free path bypasses; a route under it is gated.
+    const free = await app.request("/ping", { method: "GET" });
+    expect(free.status).toBe(200);
+    expect(fac.calls).toHaveLength(0);
+    const gated = await app.request("/ping/work", { method: "GET" });
+    expect(gated.status).toBe(402);
+    // The previous default agent-card is NOT free under a custom list.
+    const card = await app.request("/.well-known/agent-card.json", { method: "GET" });
+    expect(card.status).toBe(402);
+  });
+
+  it("14. the proxy ABORTS the upstream fetch at the gate deadline (#4)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    let sawAbort = false;
+    // A handler that observes init.signal and never resolves until aborted.
+    const handlerFetch = (async (_input: URL | string, init?: RequestInit) => {
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            sawAbort = true;
+            reject(new Error("aborted"));
+          });
+        }
+      });
+    }) as unknown as typeof fetch;
+    // A tiny gate timeout so withTimeout(next()) and the proxy abort fire together.
+    const app = createSidecarGateApp(cfg({ maxTimeoutSeconds: 0.05 }), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerFetch,
+    });
+    const res = await app.request("/call", {
+      method: "POST",
+      headers: { "X-PAYMENT": paymentHeader(`0x${"ac".repeat(32)}`) },
+    });
+    // The gate's own timeout resolves the outcome (504 + release "timeout").
+    expect(res.status).toBe(504);
+    expect(fac.calls).toContain("release");
+    expect(fac.calls).not.toContain("settle");
+    // The proxy's abort fires at its own deadline (the SAME maxTimeoutSeconds). It may
+    // land just after the gate resolves the response (the two timers race), so wait a
+    // short, bounded window for the upstream socket to be CANCELLED, not leaked (#4).
+    for (let i = 0; i < 50 && !sawAbort; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(sawAbort).toBe(true);
+  });
+
+  it("15. an OVERSIZE handler body -> malfunction: 502 + /release, NO /settle (#5)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    // A body LARGER than the configured cap (1 MiB in PRICING). Use a 200 + valid
+    // JSON so ONLY the size cap can trip the malfunction (not the classifier).
+    const huge = JSON.stringify({ data: "x".repeat(1_048_576 + 1024) });
+    const app = createSidecarGateApp(cfg(), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec, status: 200, body: huge }),
+    });
+    const res = await app.request("/call", {
+      method: "POST",
+      headers: { "X-PAYMENT": paymentHeader(`0x${"ad".repeat(32)}`) },
+    });
+    // Oversize is a malfunction: never settled (no debit), released with a strike, 502.
+    expect(res.status).toBe(502);
+    expect(fac.calls).toContain("release");
+    expect(fac.calls).not.toContain("settle");
+    expect(typeof fac.lastRelease?.strikeReason).toBe("string");
+  });
+
+  it("16. an IN-CAP body -> 200 + /settle; body + receipt preserved (#5)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const inCap = JSON.stringify({ echo: "small", length: 5 });
+    const app = createSidecarGateApp(cfg(), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec, status: 200, body: inCap }),
+    });
+    const res = await app.request("/call", {
+      method: "POST",
+      headers: { "X-PAYMENT": paymentHeader(`0x${"ae".repeat(32)}`) },
+    });
+    expect(res.status).toBe(200);
+    // The bounded read preserves the body byte-identically and the receipt is set.
+    expect(await res.text()).toBe(inCap);
+    expect(res.headers.get("X-PAYMENT-RESPONSE")).toBeTruthy();
+    expect(fac.calls).toContain("settle");
+    expect(fac.calls).not.toContain("release");
+  });
+
+  it("17. a declared-error 400 UNDER the cap -> still 400 + free release, no /settle (#5)", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const classifier = buildClassifier(echoOpenapi as Record<string, unknown>);
+    const errorBody = JSON.stringify({ error: "bad input", code: "E_INPUT" });
+    const app = createSidecarGateApp(cfg({ classifier }), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec, status: 400, body: errorBody }),
+    });
+    const res = await app.request("/call", {
+      method: "POST",
+      headers: { "X-PAYMENT": paymentHeader(`0x${"af".repeat(32)}`) },
+    });
+    // The bounded read preserves the upstream 400 + body so the declared-error branch
+    // still fires: free release, no strike, no settle.
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe(errorBody);
+    expect(fac.calls).toContain("release");
+    expect(fac.calls).not.toContain("settle");
+    expect(fac.lastRelease?.strikeReason).toBeUndefined();
+  });
 });
 
 describe("loadSidecarConfig", () => {
@@ -409,12 +567,13 @@ describe("loadSidecarConfig", () => {
     expect(resolved.handlerUrl).toBe(HANDLER_URL);
   });
 
-  it("defaults pricing terms to '0', port to 8080, maxTimeoutSeconds to 30, and the two free prefixes", () => {
+  it("defaults pricing terms to '0', port to 8080, maxTimeoutSeconds to 30, and the minimal exact free paths", () => {
     const resolved = loadSidecarConfig(env());
     expect(resolved.pricing).toEqual({ model: "metered", base: "0", perKB: "0", computeMultiplier: "0" });
     expect(resolved.port).toBe(8080);
     expect(resolved.maxTimeoutSeconds).toBe(30);
-    expect(resolved.freePaths).toEqual(["/.well-known/", "/health"]);
+    expect(resolved.freePaths).toEqual(["/.well-known/agent-card.json", "/health", "/healthz"]);
+    expect(resolved.pricing.maxResponseBytes).toBeUndefined();
     expect(resolved.facilitatorToken).toBeUndefined();
     expect(resolved.classifier).toBeUndefined();
   });
@@ -432,6 +591,23 @@ describe("loadSidecarConfig", () => {
     expect(typeof resolved.classifier).toBe("function");
     expect(resolved.classifier?.(JSON.stringify({ echo: "hi", length: 2 }))).toBe("success");
     expect(resolved.classifier?.(JSON.stringify({ error: "bad" }))).toBe("declared_error");
+  });
+
+  it("parses MAX_RESPONSE_BYTES into pricing.maxResponseBytes when a positive integer (#2-read)", () => {
+    const resolved = loadSidecarConfig(env({ MAX_RESPONSE_BYTES: "65536" }));
+    expect(resolved.pricing.maxResponseBytes).toBe(65536);
+  });
+
+  it("leaves pricing.maxResponseBytes undefined when MAX_RESPONSE_BYTES is absent (#2-read)", () => {
+    const resolved = loadSidecarConfig(env());
+    expect(resolved.pricing.maxResponseBytes).toBeUndefined();
+  });
+
+  it("ignores a non-positive or non-integer MAX_RESPONSE_BYTES (leaves it undefined) (#2-read)", () => {
+    expect(loadSidecarConfig(env({ MAX_RESPONSE_BYTES: "0" })).pricing.maxResponseBytes).toBeUndefined();
+    expect(loadSidecarConfig(env({ MAX_RESPONSE_BYTES: "-5" })).pricing.maxResponseBytes).toBeUndefined();
+    expect(loadSidecarConfig(env({ MAX_RESPONSE_BYTES: "1.5" })).pricing.maxResponseBytes).toBeUndefined();
+    expect(loadSidecarConfig(env({ MAX_RESPONSE_BYTES: "abc" })).pricing.maxResponseBytes).toBeUndefined();
   });
 
   it("FAILS FAST on a malformed CLASSIFIER_SCHEMA (does not silently go permissive)", () => {
