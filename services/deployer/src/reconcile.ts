@@ -219,8 +219,13 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
     const actual = await opts.listContainers();
 
     // RUNAWAY pass (H4): when a policy is set, flag and quarantine+reap any wedged
-    // or CPU-pegged container. Quarantine happens FIRST (record -> "failed") so the
-    // record cannot relaunch even if the reap itself fails.
+    // or CPU-pegged container. SAFETY PROPERTY: a runaway container is NEVER removed
+    // while its record is still relaunchable - quarantine-first AND reap-only-if-
+    // quarantined. If the quarantine put throws (e.g. a Redis hiccup under host
+    // stress), the container is left running (bounded by its cgroup caps) so the next
+    // tick can re-attempt quarantine before any removal. Reaping a wedged container
+    // whose record is still "running" would let the very next reconcile relaunch it -
+    // the exact reap -> relaunch loop this feature exists to prevent (fail OPEN).
     const reapedIds = new Set<string>();
     if (opts.runawayPolicy) {
       const policy = opts.runawayPolicy;
@@ -229,25 +234,48 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
         consecutiveHighCpu.set(c.id, verdict.consecutiveHighCpu);
         if (!verdict.runaway) continue;
 
-        // Quarantine FIRST: set the record to "failed" so the next reconcile refuses
-        // to relaunch it (no reap -> relaunch loop), even if the reap below fails.
-        try {
-          const rec = await opts.store.get(c.resourceId);
-          if (rec && rec.status !== "failed") {
+        // ALWAYS surface the runaway detection itself (id/resourceId/reason only -
+        // never a secret), distinct from any quarantine-failure message below.
+        onError({
+          phase: "runaway",
+          containerId: c.id,
+          resourceId: c.resourceId,
+          message: verdict.reason ?? "runaway",
+        });
+
+        // Establish whether the container is SAFE to reap: only when its record is
+        // durably quarantined (or there is no record / it was already failed).
+        const rec = await opts.store.get(c.resourceId);
+        let safeToReap: boolean;
+        if (rec === null) {
+          // No desired record => no relaunch risk; it is effectively an orphan.
+          safeToReap = true;
+        } else if (rec.status === "failed") {
+          // Already quarantined => already unrelaunchable.
+          safeToReap = true;
+        } else {
+          // Quarantine FIRST: set the record to "failed" so the next reconcile refuses
+          // to relaunch it. Only mark safeToReap on a DURABLE put - if the put throws,
+          // leave the container running and try again next tick (never reap it now).
+          try {
             await opts.store.put({ ...rec, status: "failed", updatedAt: Date.now() });
+            safeToReap = true;
+          } catch (err) {
+            safeToReap = false;
+            onError({
+              phase: "runaway",
+              containerId: c.id,
+              resourceId: c.resourceId,
+              message: "quarantine failed: " + (err instanceof Error ? err.message : String(err)),
+            });
           }
-        } catch (err) {
-          onError({
-            phase: "runaway",
-            containerId: c.id,
-            resourceId: c.resourceId,
-            message: err instanceof Error ? err.message : String(err),
-          });
         }
 
-        // Reap the runaway container. A failed reap is surfaced, not swallowed; we
-        // still surface the runaway verdict below regardless.
-        if (opts.reapContainer) {
+        // Reap ONLY when durably quarantined. A failed reap is surfaced, not
+        // swallowed, and is NOT added to reapedIds - with the record now "failed" the
+        // container is a toReap orphan, so the existing orphan pass remains its safe
+        // fallback path next tick.
+        if (safeToReap && opts.reapContainer) {
           try {
             await opts.reapContainer(c);
             reapedIds.add(c.id);
@@ -260,14 +288,6 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
             });
           }
         }
-
-        // Surface the runaway itself (id/resourceId/reason only - never a secret).
-        onError({
-          phase: "runaway",
-          containerId: c.id,
-          resourceId: c.resourceId,
-          message: verdict.reason ?? "runaway",
-        });
       }
       // Prune per-container state for containers that no longer exist (no unbounded
       // growth across ticks).
