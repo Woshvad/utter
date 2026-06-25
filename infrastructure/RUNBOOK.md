@@ -115,23 +115,44 @@ docker inspect --format '{{index .RepoDigests 0}}' node:22-bookworm-slim
 #      REGISTRY_ADMIN_PRIVATE_KEY = the registry Ownable owner key
 #      PLATFORM_TREASURY          = the platform split recipient address
 #      DEPLOY_BASE_IMAGE_NODE     = the digest-pinned base from step 2
-#      FACILITATOR_URL            = http://facilitator:8787  (optional; in-network default)
 #      ARC_RPC_URL                = https://rpc.testnet.arc.network  (optional; default)
+#    NO manual FACILITATOR_URL is needed: live-deploy auto-resolves the facilitator's
+#    on-network IP (see step 4 note). Set FACILITATOR_URL only to override the default
+#    for a non-default deploy.
+#    .env.local is loaded from the REPO ROOT regardless of cwd, so you can run the
+#    deploy from the repo root OR from services/deployer (step 5) - both forms work.
 #    Fund the buyer + relayer with testnet USDC at https://faucet.circle.com - the
 #    deposit + settle spend REAL testnet USDC.
 
-# 4. Bring up the platform stack (traefik, redis, data-proxy, facilitator) on appnet:
+# 4. Bring up the platform stack (traefik, redis, data-proxy, facilitator) on appnet.
+#    IMPORTANT: when compose networks change - or on the FIRST bring-up after a pull
+#    that adds a service to utter_appnet - recreate the FULL stack (NO single-service
+#    filter), or Traefik stays off utter_appnet and every paid/unpaid call 502s:
 docker compose --env-file .env.local -f infrastructure/docker-compose.yml up -d --build
+#    Verify Traefik actually joined the app network (it MUST be listed):
+docker network inspect utter_appnet --format '{{range .Containers}}{{.Name}} {{end}}'
+#    A 502 (NOT a TLS error) at the paid/unpaid call means Traefik cannot reach the
+#    backend - it is not on utter_appnet. Recreate the full stack (line above), do
+#    NOT bring up a single service with a filter.
+#
+#    Why no manual FACILITATOR_URL: a deployed resource runs under runsc/gVisor, which
+#    cannot use Docker's embedded DNS at 127.0.0.11, so the name `facilitator` would
+#    EAI_AGAIN inside the resource container. live-deploy inspects utter_appnet and
+#    hands the resource the facilitator's literal IP:port. (Durable production fix: a
+#    static IP / ExtraHosts mapping; the inspect is the no-manual-step bring-up fix.)
 
-# 5. Run the deploy from the deployer package WITH the host gate. UTTER_SANDBOX_HOST=1
-#    is REQUIRED: it tells resolveDockerHandle to construct a real dockerode so the
-#    orchestrator can build + run the container (off-host it refuses, no dead-URL curl):
+# 5. Run the deploy WITH the host gate. UTTER_SANDBOX_HOST=1 is REQUIRED: it tells
+#    resolveDockerHandle to construct a real dockerode so the orchestrator can build +
+#    run the container (off-host it refuses, no dead-URL curl). Run from the repo root
+#    OR from services/deployer - .env.local loads from the repo root either way:
 cd services/deployer && UTTER_SANDBOX_HOST=1 node --import ../../scripts/ts-resolver.mjs \
   --experimental-strip-types src/live-deploy.ts
 ```
 
 `liveDeployEcho` (`services/deployer/src/live-deploy.ts`) then:
 
+- auto-resolves the facilitator's on-network IP and hands it to the resource (no
+  manual FACILITATOR_URL; an explicit env override still wins),
 - registers the resource on-chain (or logs "already active" on a redeploy),
 - ensures `balanceOf(buyer) >= cap` on `PaymentEscrow`: a guarded ERC-20 `approve`
   (only when allowance is short - `deposit()` pulls via `safeTransferFrom`) then a
@@ -142,12 +163,17 @@ cd services/deployer && UTTER_SANDBOX_HOST=1 node --import ../../scripts/ts-reso
 - polls `https://<slug>.resources.<domain>/echo` with **no X-PAYMENT** until **402**
   (tolerating container boot + first-time ACME wildcard-cert issuance latency),
 - signs a real `DebitAuthorization` and re-calls with `X-PAYMENT` -> asserts **200** +
-  the `X-PAYMENT-RESPONSE` receipt over HTTPS.
+  the `X-PAYMENT-RESPONSE` receipt over HTTPS,
+- decodes the receipt, reads the settle tx on-chain, and ASSERTS the `Debited` event
+  (debit <= cap; the creator/treasury split matches the configured `PLATFORM_FEE_BPS`
+  ratio), then PRINTS the settle tx + its ArcScan link (a self-verifying on-chain
+  proof; a failed assertion fails the deploy).
 
-**Expected:** the registration tx (or "already active"), the echo image built, the
-container running under runsc on `utter_appnet`, the Traefik file written, 402 then
-200 + the receipt, and a settle tx. Confirm the `Debited` event with debit <= cap and
-the 70/30 split on `https://testnet.arcscan.app/tx/<tx>`.
+**Expected:** the registration tx (or "already active"), the resolved facilitator
+IP:port, the echo image built, the container running under runsc on `utter_appnet`,
+the Traefik file written, 402 then 200 + the receipt, and the PRINTED settle tx +
+ArcScan link. The run itself asserts the `Debited` event (debit <= cap and the
+configured split); open `https://testnet.arcscan.app/tx/<tx>` to confirm visually.
 
 **Fail:** any assertion throws - the build, the run, the route, the deposit, the live
 paywall, or the wildcard cert is not holding in production.
