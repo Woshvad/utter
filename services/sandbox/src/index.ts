@@ -25,6 +25,7 @@ export {
 // --- Runner: the pluggable SandboxRunner + the hardened run-spec builder (Plan 02 Task 1) ---
 export type {
   ContainerRuntime,
+  ResourceServiceSpec,
   RunBackend,
   RunError,
   RunErrorSink,
@@ -33,6 +34,8 @@ export type {
   RunLogs,
   RunSpec,
   SandboxRunner,
+  ServiceHandle,
+  ServiceRestartPolicy,
 } from "./runner/types";
 export { demuxDockerLogs, type DemuxedLogs } from "./runner/demux";
 export {
@@ -42,6 +45,21 @@ export {
 } from "./runner/runspec";
 export { DockerDevRunner } from "./runner/docker-dev";
 export { GvisorRunner } from "./runner/gvisor";
+
+// --- Long-lived resource-service profile (additive sibling of the one-shot run profile) ---
+export {
+  SERVICE_ENV_ALLOWLIST,
+  ServiceEnvViolation,
+  buildServiceEnv,
+  type ServiceEnvKey,
+} from "./runner/service-env";
+export {
+  DEFAULT_SERVICE_RESTART_POLICY,
+  SERVICE_NAME_PATTERN,
+  buildResourceServiceSpec,
+  type BuildResourceServiceSpecOptions,
+} from "./runner/service-runspec";
+export { toServiceDockerodeCreateOptions } from "./runner/service-dockerode-spec";
 
 // --- HARD request/response size cap (SBX-04 size clause; Plan 02 Task 4) ---
 export {

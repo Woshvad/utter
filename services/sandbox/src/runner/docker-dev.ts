@@ -16,8 +16,18 @@
 // execution timeout by killing the container at `spec.timeoutSeconds`.
 import type Docker from "dockerode";
 import { toDockerodeCreateOptions } from "./dockerode-spec";
+import { toServiceDockerodeCreateOptions } from "./service-dockerode-spec";
 import { demuxDockerLogs } from "./demux";
-import type { RunErrorSink, RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./types";
+import type {
+  ResourceServiceSpec,
+  RunErrorSink,
+  RunHandle,
+  RunInspect,
+  RunLogs,
+  RunSpec,
+  SandboxRunner,
+  ServiceHandle,
+} from "./types";
 
 /**
  * The local, NON-SECURITY-BOUNDARY runner. Wraps dockerode with the hardened
@@ -68,6 +78,35 @@ export class DockerDevRunner implements SandboxRunner {
           clearTimeout(deadline);
         }
       },
+    };
+  }
+
+  /**
+   * Launch a long-lived resource-service container under plain Docker (runc).
+   * NOT A SECURITY BOUNDARY - local wiring only. Detached: creates -> starts ->
+   * returns a `ServiceHandle` with NO deadline timer. A failed start surfaces
+   * through the RunError sink (phase "start-service").
+   */
+  async startService(spec: ResourceServiceSpec): Promise<ServiceHandle> {
+    if (spec.runtime !== "runc") {
+      throw new Error("DockerDevRunner requires a runc service-spec (use the gvisor backend for runsc)");
+    }
+
+    let container: Docker.Container;
+    try {
+      container = await this.docker.createContainer(toServiceDockerodeCreateOptions(spec));
+      await container.start();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.onError({ phase: "start-service", id: spec.name, message });
+      throw err instanceof Error ? err : new Error(message);
+    }
+
+    // No deadline timer: a long-lived service is never auto-killed.
+    return {
+      id: container.id,
+      backend: this.backend,
+      stop: () => this.stop(container.id),
     };
   }
 

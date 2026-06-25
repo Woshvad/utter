@@ -15,8 +15,18 @@
 // timeout by killing the container at `spec.timeoutSeconds`.
 import type Docker from "dockerode";
 import { toDockerodeCreateOptions } from "./dockerode-spec";
+import { toServiceDockerodeCreateOptions } from "./service-dockerode-spec";
 import { demuxDockerLogs } from "./demux";
-import type { RunErrorSink, RunHandle, RunInspect, RunLogs, RunSpec, SandboxRunner } from "./types";
+import type {
+  ResourceServiceSpec,
+  RunErrorSink,
+  RunHandle,
+  RunInspect,
+  RunLogs,
+  RunSpec,
+  SandboxRunner,
+  ServiceHandle,
+} from "./types";
 
 /**
  * The trusted isolation runner (runtime runsc). Operator-gated: requires runsc
@@ -68,6 +78,41 @@ export class GvisorRunner implements SandboxRunner {
           clearTimeout(deadline);
         }
       },
+    };
+  }
+
+  /**
+   * Launch a long-lived resource-service container under gVisor (runsc).
+   * Detached: it creates -> starts -> returns a `ServiceHandle` and installs NO
+   * setTimeout deadline (a service is not auto-killed). The runsc-or-refuse
+   * guard is the same as `run`: a non-runsc spec would silently drop the
+   * boundary, so fail fast. A failed start surfaces through the RunError sink
+   * (phase "start-service"), never swallowed.
+   */
+  async startService(spec: ResourceServiceSpec): Promise<ServiceHandle> {
+    if (spec.runtime !== "runsc") {
+      throw new Error(
+        "GvisorRunner requires a runsc service-spec - refusing to start an untrusted service without gVisor",
+      );
+    }
+
+    let container: Docker.Container;
+    try {
+      container = await this.docker.createContainer(toServiceDockerodeCreateOptions(spec));
+      await container.start();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Surface the failed start (WR-06). The id may be absent if create failed;
+      // fall back to the service name (non-secret) for traceability.
+      this.onError({ phase: "start-service", id: spec.name, message });
+      throw err instanceof Error ? err : new Error(message);
+    }
+
+    // No deadline timer: a long-lived service is never auto-killed.
+    return {
+      id: container.id,
+      backend: this.backend,
+      stop: () => this.stop(container.id),
     };
   }
 
