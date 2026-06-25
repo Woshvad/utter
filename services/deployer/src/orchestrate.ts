@@ -215,22 +215,143 @@ export const ROLE_HANDLER = "handler";
 /** The role label value for the trusted sidecar gate container. */
 export const ROLE_GATE = "gate";
 
-/** The named networks the pair joins (env-overridable; default the BD six-net names).
+/** The named networks the pair joins (env-overridable for dev/back-compat).
  *
- * The handler joins ONLY proxynet (it talks to nothing but the sidecar's proxy hop);
- * the sidecar's primary is ingress (Traefik reaches it there) plus controlplane (the
- * facilitator) and proxynet (the handler). These default names require wave BD's
- * six-network compose on the host before the live path can run. */
+ * Per-resource isolation (quick 260625-mwb): the handler joins ONLY its per-slug
+ * pairnet `utter_pairnet_<slug>` (internal:true), not a shared proxynet, so no sibling
+ * handler can address it at L3 (the cross-tenant free-compute HIGH, RUNBOOK #1). The
+ * sidecar's primary is ingress (Traefik reaches it there) plus controlplane (the
+ * facilitator) and the SAME per-slug pairnet (the handler), and it DROPS the shared
+ * proxynet. It reaches the handler by inspected IP on the shared pairnet (runsc has no
+ * DNS). The pairnet name is derived per launch by {@link pairnetName}.
+ *
+ * These constant fields are the ENV-OVERRIDE knobs (HANDLER_NETWORK /
+ * SIDECAR_NETWORK / SIDECAR_EXTRA_NETWORKS) plus the legacy single-container echo
+ * default. When unset, launchResourcePair defaults the handler network to the per-slug
+ * pairnet and the sidecar extras to `[controlplane, pairnet]` (NOT the shared
+ * proxynet). The bridge driver is internal:true so no pairnet has a route off-host.
+ */
 export const PAIR_NETWORKS = {
-  /** The handler's only network (the sidecar reaches it here by IP). */
+  /** Env-override for the handler network (legacy default proxynet; per-slug pairnet wins when unset). */
   handler: process.env.HANDLER_NETWORK?.trim() || "proxynet",
   /** The sidecar's PRIMARY network (Traefik routes to it here). */
   sidecar: process.env.SIDECAR_NETWORK?.trim() || "ingress",
-  /** The sidecar's EXTRA networks (controlplane for the facilitator, proxynet for the handler). */
+  /** Env-override for the sidecar extras (legacy default controlplane+proxynet; controlplane+pairnet wins when unset). */
   sidecarExtras: (process.env.SIDECAR_EXTRA_NETWORKS?.trim()
     ? process.env.SIDECAR_EXTRA_NETWORKS.split(",").map((n) => n.trim()).filter((n) => n.length > 0)
     : ["controlplane", "proxynet"]),
 } as const;
+
+/** The Docker label value marking a per-resource pairnet (for the orphan-network GC sweep). */
+export const PAIRNET_KIND_LABEL = "io.utter.kind";
+/** The label VALUE for a per-resource pairnet. */
+export const PAIRNET_KIND = "pairnet";
+
+/**
+ * The maximum length of a derived pairnet name. Docker network names are generous,
+ * but we cap defensively so a pathological slug can never mint an unwieldy name. The
+ * prefix `utter_pairnet_` is 14 chars, leaving a comfortable slug budget under 60.
+ */
+const MAX_PAIRNET_NAME_LENGTH = 60;
+
+/**
+ * Derive the per-resource pairnet name from a slug: `utter_pairnet_<slug>`. The slug
+ * is validated `[a-z0-9-]` by validateSlug, so the name stays Docker-safe. A defensive
+ * length cap throws a clear Error if the result would exceed {@link MAX_PAIRNET_NAME_LENGTH}.
+ */
+export function pairnetName(slug: string): string {
+  const name = `utter_pairnet_${validateSlug(slug)}`;
+  if (name.length > MAX_PAIRNET_NAME_LENGTH) {
+    throw new Error(
+      `pairnetName: derived network name '${name}' exceeds ${MAX_PAIRNET_NAME_LENGTH} chars. ` +
+        "Use a shorter slug so the per-resource pairnet name stays Docker-safe.",
+    );
+  }
+  return name;
+}
+
+/**
+ * Idempotently create the per-resource pairnet for a slug: an internal:true bridge
+ * named `utter_pairnet_<slug>`, labeled so the orphan-network GC can find it. Catches
+ * the already-exists case (409 / "already exists") and treats it as success so a
+ * redeploy is idempotent; re-throws any other error. This MUST run BEFORE the handler
+ * container is created (the handler's pairnet is its create-time NetworkMode).
+ */
+async function ensurePairNetwork(docker: DockerHandle, slug: string): Promise<void> {
+  const dockerApi = docker as unknown as Docker;
+  const name = pairnetName(slug);
+  try {
+    await dockerApi.createNetwork({
+      Name: name,
+      Driver: "bridge",
+      Internal: true,
+      CheckDuplicate: true,
+      Labels: {
+        [SLUG_LABEL]: validateSlug(slug),
+        [PAIRNET_KIND_LABEL]: PAIRNET_KIND,
+      },
+    });
+  } catch (err) {
+    const e = err as { statusCode?: number; message?: string };
+    const alreadyExists =
+      e?.statusCode === 409 || (e?.message ?? "").toLowerCase().includes("already exists");
+    if (alreadyExists) {
+      // A prior deploy already created this pairnet: idempotent success.
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Best-effort remove the per-resource pairnet for a slug, but ONLY when no container
+ * is still attached to it. If endpoints remain (a sibling role not yet reaped), leave
+ * it for {@link reapOrphanPairNetworks} to sweep once it is endpoint-less. Never throws
+ * out of a reap (a 404 / already-gone / in-use is swallowed). Logs no secret material.
+ */
+async function removePairNetwork(docker: DockerHandle, slug: string): Promise<void> {
+  const dockerApi = docker as unknown as Docker;
+  const name = pairnetName(slug);
+  try {
+    const net = dockerApi.getNetwork(name);
+    const info = await net.inspect();
+    const attached = Object.keys(info.Containers ?? {}).length;
+    if (attached > 0) {
+      // A sibling endpoint is still attached: leave it for the GC sweep (never force a
+      // remove that would fail in-use; never let "ignore in-use" become a silent leak).
+      return;
+    }
+    await net.remove();
+  } catch {
+    // Already gone (404), a race, or transiently in-use: best-effort, the GC is the
+    // safety net. Swallow without logging any identifier beyond the safe slug above.
+  }
+}
+
+/**
+ * The orphan-network GC sweep: list every labeled per-resource pairnet
+ * (`io.utter.kind=pairnet`), inspect each, and remove any with zero attached
+ * containers. This is the safety net that closes the network leak under crashes /
+ * races where a pairnet outlives its containers (the reconcile loop wires it as a
+ * per-tick hook). Best-effort per network: a remove that races or is in-use is skipped.
+ */
+export async function reapOrphanPairNetworks(docker: DockerHandle): Promise<void> {
+  const dockerApi = docker as unknown as Docker;
+  const nets = await dockerApi.listNetworks({
+    filters: { label: [`${PAIRNET_KIND_LABEL}=${PAIRNET_KIND}`] },
+  });
+  for (const summary of nets) {
+    try {
+      const net = dockerApi.getNetwork(summary.Id);
+      const info = await net.inspect();
+      const attached = Object.keys(info.Containers ?? {}).length;
+      if (attached > 0) continue; // still in use: not an orphan.
+      await net.remove();
+    } catch {
+      // A race (removed between list and remove) or transient in-use: skip it.
+    }
+  }
+}
 
 /** The container listen port both pair containers EXPOSE + serve on (matches the bundles). */
 export const PAIR_PORT = 8080;
@@ -617,12 +738,15 @@ export interface LaunchResourcePairResult {
  * and a trusted SIDECAR gate, derived from one validated slug/resourceId.
  *
  * The handler holds NO facilitator route + NO token (buildResourceServiceSpec, the
- * untrusted secret-guarded path) and joins only the handler network. The sidecar
- * holds FACILITATOR_URL + the inspected HANDLER_URL + the caller-auth token + the
- * classifier schema (buildTrustedServiceSpec, which does NOT secret-guard so the
- * token is allowed) and joins ingress(primary)+controlplane+proxynet. The sidecar
- * reaches the handler by its inspected IP because the runsc sidecar cannot use Docker
- * DNS. Traefik routes to the SIDECAR (sidecarContainerUrl).
+ * untrusted secret-guarded path) and joins ONLY its per-slug internal pairnet
+ * `utter_pairnet_<slug>` (created here first). The sidecar holds FACILITATOR_URL + the
+ * inspected HANDLER_URL + the caller-auth token + the classifier schema
+ * (buildTrustedServiceSpec, which does NOT secret-guard so the token is allowed) and
+ * joins ingress(primary)+controlplane+pairnet (it DROPS the shared proxynet). The
+ * sidecar reaches the handler by its inspected IP on the shared pairnet because the
+ * runsc sidecar cannot use Docker DNS. Cross-tenant handler-to-handler is blocked at
+ * the Docker layer by disjoint internal bridges. Traefik routes to the SIDECAR
+ * (sidecarContainerUrl).
  *
  * It needs a LIVE docker daemon + runsc + wave BD's six-network topology, so it is
  * NEVER called from an autonomous test (the pure pieces are tested with stubs).
@@ -635,9 +759,14 @@ export async function launchResourcePair(
   opts: LaunchResourcePairOpts,
 ): Promise<LaunchResourcePairResult> {
   const { handlerName, sidecarName } = pairNames(opts.slug);
-  const handlerNetwork = opts.handlerNetwork ?? PAIR_NETWORKS.handler;
+  // Per-resource isolation (quick 260625-mwb): the handler joins ONLY its per-slug
+  // internal pairnet (no shared proxynet), and the sidecar's extras are
+  // [controlplane, pairnet] (also dropping proxynet). The env-override knobs still win
+  // for dev/back-compat.
+  const pairnet = pairnetName(opts.slug);
+  const handlerNetwork = opts.handlerNetwork ?? pairnet;
   const sidecarNetwork = opts.sidecarNetwork ?? PAIR_NETWORKS.sidecar;
-  const sidecarExtraNetworks = opts.sidecarExtraNetworks ?? [...PAIR_NETWORKS.sidecarExtras];
+  const sidecarExtraNetworks = opts.sidecarExtraNetworks ?? ["controlplane", pairnet];
 
   const handlerImage = `utter-resource-${validateSlug(opts.slug)}-${ROLE_HANDLER}:latest`;
   const sidecarImage = `utter-resource-${validateSlug(opts.slug)}-${ROLE_GATE}:latest`;
@@ -688,9 +817,17 @@ export async function launchResourcePair(
     }
   }
 
-  // (3) Launch the HANDLER (untrusted) on the handler network. buildResourceServiceSpec
-  // runs the secret guard over the gate-less env; the handler holds NO facilitator
-  // route + NO token, so the env is purely allowlisted discovery config.
+  // (2b) Create the per-resource pairnet BEFORE the handler container (ordering fix:
+  // the handler's pairnet is its create-time NetworkMode, so the network must exist
+  // first). Idempotent on already-exists for a redeploy. When an env-override pins the
+  // handler to a pre-existing shared network (dev/back-compat) we still ensure the
+  // per-slug pairnet so the GC + teardown paths stay consistent.
+  await ensurePairNetwork(docker, opts.slug);
+
+  // (3) Launch the HANDLER (untrusted) on its per-slug internal pairnet.
+  // buildResourceServiceSpec runs the secret guard over the gate-less env; the handler
+  // holds NO facilitator route + NO token, so the env is purely allowlisted discovery
+  // config. The handler is on the pairnet ALONE: no sibling handler can reach it at L3.
   const handlerSpec = buildResourceServiceSpec({
     backend: "gvisor",
     image: handlerImage,
@@ -726,9 +863,10 @@ export async function launchResourcePair(
   }
   const handlerUrl = `http://${ip}:${PAIR_PORT}`;
 
-  // (5) Launch the SIDECAR (trusted) on ingress(primary)+controlplane+proxynet.
-  // buildTrustedServiceSpec carries the env verbatim (NO secret guard), so the
-  // caller-auth token + classifier schema + facilitator route are accepted.
+  // (5) Launch the SIDECAR (trusted) on ingress(primary)+controlplane+pairnet (it does
+  // NOT join the shared proxynet). buildTrustedServiceSpec carries the env verbatim (NO
+  // secret guard), so the caller-auth token + classifier schema + facilitator route are
+  // accepted. The sidecar shares the per-slug pairnet with its handler (reaches it by IP).
   const sidecarSpec = buildTrustedServiceSpec({
     backend: "gvisor",
     image: sidecarImage,
@@ -788,6 +926,10 @@ export async function reapResourcePair(
 
   // Drop the route so Traefik stops advertising a backend that no longer exists.
   await removeTraefikDynamicFile(validated);
+
+  // Remove the per-resource pairnet now that every slug container is gone (quick
+  // 260625-mwb). Best-effort: a missing/in-use network is left for the orphan GC.
+  await removePairNetwork(docker, validated);
 }
 
 /**
@@ -853,6 +995,14 @@ export async function listResourceContainers(
  * dockerode id (a missing container is a no-op), then drop its Traefik dynamic file
  * if the slug is known. Best-effort: the goal is that a reaped container leaves no
  * live container and no dangling route behind.
+ *
+ * Per-resource pairnet teardown (quick 260625-mwb, the FATAL fix): the production
+ * reconcile loop reaps via THIS per-container hook, not reapResourcePair. So after the
+ * container is removed, if its slug is known we list the REMAINING slug containers
+ * (excluding this one's id); if none remain, this was the LAST container of the pair, so
+ * we remove the per-resource pairnet. Removing it while a sibling role still runs would
+ * fail in-use, so we only attempt it on the last container; any straggler is swept by
+ * the orphan-network GC. Best-effort: a removal failure is swallowed (the GC is the net).
  */
 export async function reapResourceContainer(
   docker: DockerHandle,
@@ -866,6 +1016,23 @@ export async function reapResourceContainer(
   }
   if (container.slug) {
     await removeTraefikDynamicFile(container.slug);
+
+    // Remove the per-resource pairnet ONLY when this was the last container of the
+    // slug. Listing the remaining slug containers (minus this id) avoids removing a
+    // network a sibling role is still attached to (that would fail in-use and leak).
+    try {
+      const validated = validateSlug(container.slug);
+      const remaining = await dockerApi.listContainers({
+        all: true,
+        filters: { label: [`${SLUG_LABEL}=${validated}`] },
+      });
+      const stillPresent = remaining.filter((info) => info.Id !== container.id);
+      if (stillPresent.length === 0) {
+        await removePairNetwork(docker, validated);
+      }
+    } catch {
+      // A list/remove failure is best-effort: the orphan-network GC sweeps stragglers.
+    }
   }
 }
 

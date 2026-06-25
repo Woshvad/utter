@@ -137,6 +137,15 @@ export interface ReconcileLoopOpts {
    */
   maxConcurrent?: number;
   /**
+   * GC: sweep endpoint-less per-resource pairnets (quick 260625-mwb). When provided,
+   * the loop calls this once per tick AFTER the orphan-container reap pass — a network
+   * removed only after its last container is gone, so the sweep runs against a settled
+   * container set. It is the safety net that closes the pairnet leak under crashes /
+   * races where a pairnet outlives its containers. Best-effort: a failure is surfaced
+   * via onError (phase "reap"), never propagated out of the tick. Absent = no sweep.
+   */
+  reapOrphanNetworks?: () => Promise<void>;
+  /**
    * The runaway-container policy (H4 / SPEC §9.5). When set together with
    * `reapContainer`, the loop runs a runaway pass each tick: a container that is
    * restart-loop-wedged (or sustained-CPU-pegged) is QUARANTINED (its record set to
@@ -204,6 +213,11 @@ export interface ReconcileLoop {
  * "failed") and reaped - and a host CONCURRENCY CAP at relaunch - over-cap launches
  * are deferred and surfaced, never silently dropped. Both are optional; absent =
  * the prior behavior.
+ *
+ * quick 260625-mwb: when `reapOrphanNetworks` is provided, the tick also sweeps
+ * endpoint-less per-resource pairnets AFTER the orphan-container reap (the safety net
+ * that closes the pairnet leak under crashes / races). A sweep failure is surfaced
+ * (phase "reap"), never propagated.
  */
 export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -325,6 +339,20 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
         onError({
           phase: "reap",
           message: `${orphans.length} orphan container(s) detected but no reapContainer enforcement hook is configured`,
+        });
+      }
+    }
+
+    // GC: sweep endpoint-less per-resource pairnets (quick 260625-mwb). Runs AFTER the
+    // orphan-container reap so a network is only swept once its last container is gone.
+    // A failure is surfaced (phase "reap"), never propagated out of the tick.
+    if (opts.reapOrphanNetworks) {
+      try {
+        await opts.reapOrphanNetworks();
+      } catch (err) {
+        onError({
+          phase: "reap",
+          message: "orphan-network sweep failed: " + (err instanceof Error ? err.message : String(err)),
         });
       }
     }
