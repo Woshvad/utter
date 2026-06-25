@@ -54,6 +54,16 @@ export interface RequirePaymentOpts {
   maxTimeoutSeconds: number;
   /** A `fetch`-like function (default global `fetch`); tests inject the in-process app. */
   fetcher?: FetchLike;
+  /**
+   * OPTIONAL per-resource caller-auth token (C1). When provided (a literal string
+   * or a `() => string` provider resolved per request), the gate presents it on the
+   * /verify, /settle, /release fetches as `Authorization: Bearer <token>` so an
+   * auth-enforcing facilitator can bind the call to this resource. When ABSENT (the
+   * default - dev/in-process), NO auth header is sent, so existing callers and the
+   * unenforced facilitator are unaffected. The deployer/sidecar wiring that mints +
+   * injects the real token is a later increment; this just gives the gate the seam.
+   */
+  facilitatorToken?: string | (() => string | undefined);
 }
 
 /** Base64-encode an arbitrary JSON receipt for the X-PAYMENT-RESPONSE header. */
@@ -61,15 +71,23 @@ function b64(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
 }
 
-/** POST a JSON body to a facilitator route and parse the JSON response. */
+/**
+ * POST a JSON body to a facilitator route and parse the JSON response. When
+ * `authToken` is provided it is sent as `Authorization: Bearer <token>` (C1
+ * per-resource caller auth); when absent NO auth header is added (the existing
+ * behavior). The token is NEVER logged.
+ */
 async function postJson(
   fetcher: FetchLike,
   url: string,
   body: unknown,
+  authToken?: string,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
   const res = await fetcher(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -89,16 +107,19 @@ async function release(
   payment: PaymentPayload,
   resourceId: Hex,
   strikeReason?: string,
+  authToken?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     idemKey: payment.authorization.nonce as Hex,
+    // Always carry the resourceId: the facilitator needs it to attribute a strike
+    // AND (C1) to authorize the caller against this resource even on the free /
+    // declared-error release path. Harmless when auth is unenforced.
+    resourceId,
   };
   if (strikeReason) {
     body.strikeReason = strikeReason;
-    // The facilitator requires the resourceId to attribute the strike.
-    body.resourceId = resourceId;
   }
-  await postJson(fetcher, `${facilitator}/release`, body);
+  await postJson(fetcher, `${facilitator}/release`, body, authToken);
 }
 
 /** Race a promise against a timeout; reject with a sentinel on expiry. */
@@ -131,7 +152,15 @@ export function requirePayment(opts: RequirePaymentOpts) {
   const facilitator = opts.facilitatorUrl.replace(/\/$/, "");
   const errorPolicy: ErrorPolicy = opts.errorPolicy ?? "free";
 
+  // C1: resolve the optional per-resource caller-auth token (a literal or a
+  // provider). Undefined when no token is configured -> no auth header is sent.
+  const resolveToken = (): string | undefined =>
+    typeof opts.facilitatorToken === "function"
+      ? opts.facilitatorToken()
+      : opts.facilitatorToken;
+
   return createMiddleware(async (c, next) => {
+    const authToken = resolveToken();
     // (1) No payment -> 402 challenge advertising the escrow accepts entry.
     const header = c.req.header("X-PAYMENT");
     const accepts = opts.quote(c);
@@ -149,11 +178,16 @@ export function requirePayment(opts: RequirePaymentOpts) {
     }
 
     // (3) RESERVE the cap BEFORE the handler runs (the free-compute hard rule).
-    const verify = await postJson(fetcher, `${facilitator}/verify`, {
-      payment,
-      resourceId: accepts.payTo,
-      maxTimeoutSeconds: opts.maxTimeoutSeconds,
-    });
+    const verify = await postJson(
+      fetcher,
+      `${facilitator}/verify`,
+      {
+        payment,
+        resourceId: accepts.payTo,
+        maxTimeoutSeconds: opts.maxTimeoutSeconds,
+      },
+      authToken,
+    );
     if (verify.status !== 200 || verify.json.valid !== true) {
       return c.json(
         { x402Version: 2, error: String(verify.json.reason ?? "payment_not_verified"), accepts: [accepts] },
@@ -170,11 +204,11 @@ export function requirePayment(opts: RequirePaymentOpts) {
       await withTimeout(next(), opts.maxTimeoutSeconds * 1000);
     } catch (err) {
       if (err === TIMEOUT_SENTINEL) {
-        await release(fetcher, facilitator, payment, accepts.payTo, "timeout");
+        await release(fetcher, facilitator, payment, accepts.payTo, "timeout", authToken);
         return c.json({ error: "endpoint_timeout" }, 504);
       }
       // A genuine handler throw is also a malfunction (never charge a broken handler).
-      await release(fetcher, facilitator, payment, accepts.payTo, "handler_error");
+      await release(fetcher, facilitator, payment, accepts.payTo, "handler_error", authToken);
       return c.json({ error: "handler_error" }, 502);
     }
     const handlerMs = Date.now() - start;
@@ -195,19 +229,24 @@ export function requirePayment(opts: RequirePaymentOpts) {
     const settleOrRelease = async (amount: bigint, responseBody: string): Promise<void> => {
       let settle: { status: number; json: Record<string, unknown> };
       try {
-        settle = await postJson(fetcher, `${facilitator}/settle`, {
-          payment,
-          amount: amount.toString(),
-          idemKey: payment.authorization.nonce as Hex,
-          response: responseBody,
-        });
+        settle = await postJson(
+          fetcher,
+          `${facilitator}/settle`,
+          {
+            payment,
+            amount: amount.toString(),
+            idemKey: payment.authorization.nonce as Hex,
+            response: responseBody,
+          },
+          authToken,
+        );
       } catch {
-        await release(fetcher, facilitator, payment, accepts.payTo, "settle_failed");
+        await release(fetcher, facilitator, payment, accepts.payTo, "settle_failed", authToken);
         c.res = c.json({ error: "settlement_failed" }, 502);
         return;
       }
       if (settle.status !== 200 || settle.json.success !== true || !settle.json.receipt) {
-        await release(fetcher, facilitator, payment, accepts.payTo, "settle_failed");
+        await release(fetcher, facilitator, payment, accepts.payTo, "settle_failed", authToken);
         c.res = c.json({ error: "settlement_failed" }, 502);
         return;
       }
@@ -228,7 +267,7 @@ export function requirePayment(opts: RequirePaymentOpts) {
       // DECLARED ERROR (bad buyer input) under the FREE policy: release the
       // reservation WITHOUT a strikeReason - NO charge, NO strike (the wrongful-
       // strike guard) - and serve the ORIGINAL handler body unchanged.
-      await release(fetcher, facilitator, payment, accepts.payTo);
+      await release(fetcher, facilitator, payment, accepts.payTo, undefined, authToken);
       return;
     }
 
@@ -246,7 +285,7 @@ export function requirePayment(opts: RequirePaymentOpts) {
       }
       if (errorPrice <= 0n) {
         // No error price set: a priced policy with no price is treated as free.
-        await release(fetcher, facilitator, payment, accepts.payTo);
+        await release(fetcher, facilitator, payment, accepts.payTo, undefined, authToken);
         return;
       }
       const amount = errorPrice < cap ? errorPrice : cap;
@@ -257,7 +296,7 @@ export function requirePayment(opts: RequirePaymentOpts) {
     // MALFUNCTION (response matched neither schema): release WITH a strikeReason -
     // the facilitator-side store records the strike (canonical owner) - NEVER debit,
     // and replace the body with a 502 (the buyer is not charged for a broken endpoint).
-    await release(fetcher, facilitator, payment, accepts.payTo, "invalid_output");
+    await release(fetcher, facilitator, payment, accepts.payTo, "invalid_output", authToken);
     c.res = c.json({ error: "response_failed_validation" }, 502);
     return;
   });
