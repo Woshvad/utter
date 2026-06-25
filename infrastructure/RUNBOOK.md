@@ -271,48 +271,55 @@ SINGLE-TENANT deploy of the trusted echo: the handler holds no facilitator route
 no caller-auth token, the escrow gate runs only in the sidecar, runsc + the host
 nftables + the per-container cgroup caps all hold, and the live egress probe (PRX-02)
 confirms the handler cannot reach the facilitator, the Arc RPC, the metadata IP, an
-RFC1918 host, or host loopback. Two gaps remain. Read both before arming an UNTRUSTED
-multi-tenant host. The first is the blocker; do not run adversary-controlled
-multi-tenant code until it lands.
+RFC1918 host, or host loopback. The cross-tenant free-compute blocker (item #1) is now
+RESOLVED by per-resource pairnet isolation (quick 260625-mwb); one LOW lifecycle item
+(#2) remains. Read both before arming an UNTRUSTED multi-tenant host.
 
-### 1. Flat shared proxynet (cross-tenant free compute) - HIGH
+### 1. Flat shared proxynet (cross-tenant free compute) - RESOLVED (quick 260625-mwb)
 
-Every resource's gate-less HANDLER joins the single shared `proxynet`, and Docker
-inter-container communication (ICC) is on for that bridge. So an adversary's handler
-can reach a SIBLING tenant's gate-less handler at L3 and POST its `/call` directly -
-with NO escrow reservation. The sibling handler has NO auth on `/call` (the whole
-point of the C1 split is that the gate lives only in the sidecar), so this is
-free compute charged against another creator's resource, not merely lateral probing.
-An adversary handler can also laterally probe sibling sidecars on the same bridge.
+ORIGINAL GAP: every gate-less HANDLER joined the single shared `proxynet` with Docker
+inter-container communication on, so an adversary's handler could reach a SIBLING
+tenant's gate-less handler at L3 and POST its `/call` directly with NO escrow
+reservation. The sibling handler has no auth on `/call` (the gate lives only in the
+sidecar by the C1 split), so this was free compute charged against another creator's
+resource. An adversary handler could also laterally probe sibling sidecars on the bridge.
 
-Why it is currently UNCAUGHT: the host nftables ruleset filters at the host OUTPUT
-hook, which does not see intra-bridge (handler-to-handler) traffic; and the PRX-02
-probe asserts only that off-bridge targets (facilitator, Arc RPC, metadata, RFC1918,
-loopback) are unreachable - it does not test a sibling peer ON proxynet, so a reachable
-sibling passes today.
+IMPLEMENTED DESIGN (per-resource network isolation at the Docker layer):
 
-SAFE for: single-tenant + the trusted echo. There is no sibling to victimize, and the
-handler code is ours and audited. NOT safe for: untrusted multi-tenant.
+- Each pair gets a DEDICATED internal bridge `utter_pairnet_<slug>` (`Internal: true`),
+  created BEFORE the handler container so it is the handler's create-time NetworkMode
+  (`orchestrate.ts` `ensurePairNetwork` / `pairnetName`). Labeled `io.utter.kind=pairnet`.
+- The HANDLER joins ONLY its `utter_pairnet_<slug>`. It is NOT on the shared `proxynet`,
+  nor controlplane/ingress. No sibling tenant's handler shares its bridge, so a sibling
+  handler IP is not routable from inside it.
+- The SIDECAR joins `ingress` (Traefik in) + `controlplane` (the facilitator) + the same
+  `utter_pairnet_<slug>` (its own handler), and DROPS the shared `proxynet`. It reaches
+  its handler by inspected IP on the shared pairnet (runsc has no Docker DNS).
+- Cross-tenant handler-to-handler is blocked at the DOCKER layer by disjoint internal
+  bridges. The pairnet lifecycle is reaped on the LAST container of a slug
+  (`reapResourceContainer`, the reconcile per-container seam) and via `reapResourcePair`,
+  with an orphan-network GC sweep (`reapOrphanPairNetworks`, a per-tick reconcile hook)
+  as the safety net so a crashed/raced pairnet cannot leak host bridges.
 
-FIX PATH (the per-resource network segmentation deferred in
-`RESOURCE-DEPLOY-DESIGN.md` open-decision 4 / D6, now sharpened from "lateral probing"
-to "cross-tenant free compute"):
+HONEST ENFORCEMENT BOUNDARY (do not over-claim):
 
-- Give each pair a DEDICATED internal handler-to-sidecar network, `pairnet_<slug>`, so
-  no sibling can address another tenant's handler. The sidecar reaches its own handler
-  on the pair net by inspected IP (as today).
-- Move the SIDECAR OFF the shared `proxynet`. The sidecar only needs `ingress`
-  (Traefik in), `controlplane` (the facilitator), and its own `pairnet_<slug>` (the
-  handler). It does not need the shared `proxynet`.
-- Keep the HANDLER on `proxynet` ONLY for its data-plane egress to the data-proxy at
-  the static `172.30.0.10`, plus its own `pairnet_<slug>` for the sidecar hop.
-- Add a host DOCKER-USER / FORWARD-path nftables rule scoped to `proxynet` that ACCEPTs
-  handler-to-data-proxy (`172.30.0.10`) and DROPs all other intra-`proxynet` traffic,
-  so even on the shared egress bridge a handler cannot reach a sibling.
-- Add a PRX-02 probe TARGET asserting a sibling handler/sidecar IP on `proxynet` is
-  UNREACHABLE, so the acceptance actually covers this gap (today it does not).
+- The host nftables ruleset (`nftables.rules.sh`) is `type filter hook output` - it
+  filters HOST egress by destination IP and does NOT see intra-bridge sibling forwarding.
+  So the disjoint per-slug pairnet is the SOLE enforcement of handler-sibling isolation.
+  There is NO nftables FORWARD-path backstop today; do not claim one.
+- ACCEPTED RESIDUAL (LOW): sidecars still share `ingress`, so sidecar A can reach sidecar
+  B at L3. Sidecars are first-party trusted code and the untrusted handler cannot reach
+  `ingress` at all, so this is a trusted-to-trusted surface, not a free-compute vector.
+- DEFERRED (next increment): the handler->data-proxy egress path is not wired yet (the
+  echo makes no upstream calls; there is no `HTTP_PROXY`/`172.30.0.10` injection today).
+  When untrusted egress lands, attach the data-proxy to each `utter_pairnet_<slug>` (or
+  inject `DATA_PROXY_URL`); note this is per-pair re-plumbing, not a shared-proxynet hop.
 
-This is a tracked follow-up. Do NOT enable untrusted multi-tenant until it lands.
+LIVE ACCEPTANCE (PRX-02, operator-gated): from handler A, run `createLiveSiblingProbe`
+asserting a sibling handler IP and a sibling sidecar IP are UNREACHABLE (the own
+data-proxy is the only allowed peer). The autonomous suite proves the probe logic with
+an injected `connectProbe`; the live half is operator-gated on the provisioned gVisor
+host exactly like `createLiveHostProbe`.
 
 ### 2. H4 lifecycle loop not auto-started in the live path - LOW (Phase 3)
 
