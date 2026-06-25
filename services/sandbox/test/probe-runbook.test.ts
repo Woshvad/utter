@@ -167,6 +167,18 @@ describe("probe-runbook - the live probe stays guarded in the autonomous suite",
     const spec = {} as RunSpec;
     await expect(probe.assertBlocked(spec, [...DEFAULT_PROBE_TARGETS])).resolves.toBeUndefined();
   });
+
+  it("the DEFAULT connectProbe THROWS a clear error (cannot pass a dynamic target through the locked RunSpec)", async () => {
+    // No connectProbe injected: the default cannot build a valid reference (the old
+    // `${image}#${host}` is an invalid Docker reference), so it must fail LOUD - never
+    // silently build the bad reference. A connectProbe is required on the host.
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    const probe = createLiveHostProbe({ runner: gvisorRunner });
+    const spec = {} as RunSpec;
+    await expect(probe.assertBlocked(spec, [...DEFAULT_PROBE_TARGETS])).rejects.toThrow(
+      /connectProbe must be injected/i,
+    );
+  });
 });
 
 describe("probe-runbook - the sibling-unreachability probe stays guarded (PRX-02, quick 260625-mwb)", () => {
@@ -257,5 +269,17 @@ describe("probe-runbook - the sibling-unreachability probe stays guarded (PRX-02
     // handler + sidecar are checked.
     expect(probedRoles.sort()).toEqual(["handler", "sidecar"]);
     expect(probedRoles).not.toContain("data-proxy");
+  });
+
+  it("the DEFAULT connectProbe THROWS a clear error (cannot pass a dynamic target through the locked RunSpec)", async () => {
+    // Same as createLiveHostProbe: no injected connectProbe means there is no valid way
+    // to pass the dynamic sibling target, so the default must fail LOUD rather than build
+    // the invalid `${image}#${ip}:${port}` reference.
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    const probe = createLiveSiblingProbe({ runner: gvisorRunner });
+    const spec = {} as RunSpec;
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).rejects.toThrow(
+      /connectProbe must be injected/i,
+    );
   });
 });

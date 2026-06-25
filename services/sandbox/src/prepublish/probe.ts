@@ -150,24 +150,25 @@ export function createLiveHostProbe(options: LiveProbeOptions): DynamicHostProbe
     throw new RequiresProvisionedHostError();
   }
 
-  const probeImage = options.probeImage ?? DEFAULT_PROBE_IMAGE;
-  const runner = options.runner;
-
-  // The default connect probe: launch the probe-tester image under the hardened
-  // run-spec, targeting one host, and read the exit code. A non-zero exit ==
-  // unreachable (the blocked-OK outcome); a zero exit == reachable (failure).
+  // The probe runs against a DYNAMIC target host, but the untrusted RunSpec is
+  // locked (env is Record<string, never>, no cmd field), so the target cannot be
+  // passed through it. The old default tried to encode the target in the image
+  // tag (`${probeImage}#${target.host}`), which Docker rejects with
+  // "invalid reference format". The probe is a TRUSTED operator tool, so the host
+  // caller (deployer runEgressProbe) injects a connectProbe that launches the
+  // probe image directly via dockerode (target in Cmd, handler netns). With no
+  // injected connectProbe there is no valid way to pass the target, so fail loud
+  // rather than build an invalid reference.
   const connectProbe =
     options.connectProbe ??
-    (async (spec: RunSpec, target: ProbeTarget): Promise<boolean> => {
-      // Run the probe image with the target host baked into the image tag /
-      // command. The operator's probe image reads PROBE_TARGET and attempts a
-      // connect; env is empty by invariant, so the host is encoded via the
-      // image tag suffix the operator builds per PROVISION.md.
-      const probeSpec: RunSpec = { ...spec, image: `${probeImage}#${target.host}` };
-      const handle = await runner.run(probeSpec);
-      const exitCode = await handle.wait();
-      // exit 0 -> the connect SUCCEEDED -> the host is REACHABLE (containment fail).
-      return exitCode === 0;
+    (async (): Promise<boolean> => {
+      throw new Error(
+        "createLiveHostProbe: a connectProbe must be injected on the host - the default " +
+          "cannot pass a dynamic target through the locked RunSpec (empty env, no cmd). The " +
+          "host caller (deployer runEgressProbe) injects a connectProbe that launches " +
+          "utter/blocked-host-probe in the handler netns. See " +
+          "infrastructure/sandbox-host/blocked-host-probe/README.",
+      );
     });
 
   return {
@@ -310,22 +311,21 @@ export function createLiveSiblingProbe(options: LiveSiblingProbeOptions): Siblin
     throw new RequiresProvisionedHostError();
   }
 
-  const probeImage = options.probeImage ?? DEFAULT_PROBE_IMAGE;
-  const runner = options.runner;
-
-  // The default connect probe: launch the probe-tester image under the hardened run-
-  // spec, targeting one sibling IP:port, and read the exit code. exit 0 == reachable
-  // (the isolation failure); non-zero == unreachable (the isolated-OK outcome).
+  // Same as createLiveHostProbe: the sibling target is DYNAMIC but the untrusted
+  // RunSpec is locked (empty env, no cmd), so it cannot carry the target. The old
+  // default encoded it in the image tag (`${probeImage}#${ip}:${port}`), which
+  // Docker rejects as an invalid reference. The host caller injects a connectProbe
+  // that launches the probe image directly via dockerode; with none injected there
+  // is no valid construction, so fail loud rather than build an invalid reference.
   const connectProbe =
     options.connectProbe ??
-    (async (spec: RunSpec, sibling: SiblingTarget): Promise<boolean> => {
-      const probeSpec: RunSpec = {
-        ...spec,
-        image: `${probeImage}#${sibling.ip}:${sibling.port}`,
-      };
-      const handle = await runner.run(probeSpec);
-      const exitCode = await handle.wait();
-      return exitCode === 0;
+    (async (): Promise<boolean> => {
+      throw new Error(
+        "createLiveSiblingProbe: a connectProbe must be injected on the host - the default " +
+          "cannot pass a dynamic target through the locked RunSpec (empty env, no cmd). The " +
+          "host caller injects a connectProbe that launches utter/blocked-host-probe in the " +
+          "handler netns. See infrastructure/sandbox-host/blocked-host-probe/README.",
+      );
     });
 
   return {
