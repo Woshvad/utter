@@ -190,9 +190,13 @@ amounts, image tags, container names, and the written path).
 but now served through the trusted sidecar gate in front of an untrusted gate-less
 handler, on the six-network topology, with the handler's direct facilitator / Arc
 RPC route simultaneously DROPPED. This is the C1/C2 containment: the handler holds
-no facilitator route + no caller-auth token (it joins `proxynet` only); the
+no facilitator route + no caller-auth token (it joins ONLY its per-resource
+`utter_pairnet_<slug>`, an internal:true bridge - NOT the shared `proxynet`); the
 sidecar (only) reaches the facilitator (on `controlplane`) and reverse-proxies
-validated calls to the handler (on `proxynet`). Traefik routes to the SIDECAR.
+validated calls to the handler over the SAME per-slug pairnet, by inspected IP
+(runsc has no Docker DNS). Traefik routes to the SIDECAR. The per-resource pairnet
+(quick 260625-mwb) replaces the old shared proxynet for the handler so no sibling
+handler can address it at L3.
 
 > Prerequisite: Acceptances 1-3 above pass on the provisioned host (gVisor,
 > wildcard TLS, the host nftables `policy drop`). This section adds the six-net
@@ -249,7 +253,8 @@ UTTER_SANDBOX_HOST=1 UTTER_RUN_EGRESS_PROBE=1 node \
 ```
 
 The pair deploy then: mints the facilitator caller-auth token, launches the
-HANDLER (on `proxynet` only) + the SIDECAR (on `ingress`+`controlplane`+`proxynet`),
+HANDLER (on its per-resource `utter_pairnet_<slug>` ONLY) + the SIDECAR (on
+`ingress`+`controlplane`+`utter_pairnet_<slug>`, NOT the shared proxynet),
 inspects the handler IP for the sidecar (runsc cannot use Docker DNS), registers +
 deposits, proves **402 -> 200 THROUGH the sidecar** with the on-chain `Debited`
 split, AND asserts **PRX-02**: from inside the handler container netns, the
@@ -299,7 +304,26 @@ IMPLEMENTED DESIGN (per-resource network isolation at the Docker layer):
   bridges. The pairnet lifecycle is reaped on the LAST container of a slug
   (`reapResourceContainer`, the reconcile per-container seam) and via `reapResourcePair`,
   with an orphan-network GC sweep (`reapOrphanPairNetworks`, a per-tick reconcile hook)
-  as the safety net so a crashed/raced pairnet cannot leak host bridges.
+  as the safety net so a crashed/raced pairnet cannot leak host bridges. The per-container
+  reap is self-sufficient: `removePairNetwork` gates off the network's OWN endpoint list
+  (`network.inspect().Containers`) and removes the bridge only when zero endpoints remain,
+  so there is no `listContainers` timing dependency or race; the GC is the backstop.
+
+HARD PREREQUISITE - GLOBAL SLUG UNIQUENESS (M5):
+
+- The isolation guarantee depends on every resource having a GLOBALLY-UNIQUE slug. Two
+  different resourceIds on ONE slug would derive the SAME `utter_pairnet_<slug>` and thus
+  CO-TENANT a single internal bridge - re-opening exactly the cross-tenant free-compute
+  HIGH this section closes. Global slug uniqueness is therefore a hard prerequisite for
+  multi-tenant isolation, not a nicety.
+- NETWORK-LAYER ENFORCEMENT (quick 260625-mwb, FIX C): `ensurePairNetwork` stamps the
+  owning resourceId onto the pairnet (`io.utter.resource-id` label). On a redeploy that
+  hits the already-exists (409) path it inspects the existing pairnet and reads that
+  label: a MATCH is an idempotent same-resource redeploy; a MISMATCH THROWS a loud Error
+  (`already owned by a different resource`) and refuses to launch, converting a slug
+  collision into a fail-loud at the network layer instead of a silent co-tenant. An
+  unlabeled legacy pairnet (created before this guard) is adopted. This is the
+  network-layer backstop; the slug allocator MUST still enforce uniqueness upstream.
 
 HONEST ENFORCEMENT BOUNDARY (do not over-claim):
 
@@ -336,6 +360,14 @@ daemon that constructs the loop with the pair-aware adapters. Note
 `listResourceContainers` returns BOTH the handler and the sidecar under the same
 `io.utter.resource-id` label, so that wiring MUST be pair-aware (reaping one role must
 account for its sibling).
+
+PAIRNET GC BACKSTOP (quick 260625-mwb, FIX E): when the Phase-3 reconcile-loop bootstrap
+lands it should pass `reapOrphanNetworks: () => reapOrphanPairNetworks(docker)` as the
+per-tick backstop hook. The per-container reap (`reapResourceContainer`) is now
+self-sufficient - `removePairNetwork` removes the pairnet exactly when its last endpoint
+detaches, off the network's own endpoint list - so this GC only catches crash/race
+stragglers (a pairnet that outlived its containers because the process died between the
+container remove and the network remove). It is a safety net, not the primary teardown.
 
 ---
 

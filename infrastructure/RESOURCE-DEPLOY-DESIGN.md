@@ -137,31 +137,33 @@ Per-service membership (the whole design in one list):
                              |
    inbound: Host(<slug>.resources.<domain>) -> http://<slug>-gate:8080
                              |
-                      +--------------+        +--------------+
-              +------>|  SIDECAR     |--proxynet-->| HANDLER  |
-              |       |  <slug>-gate |        | <slug>       |
-   [ controlplane ]   | (trusted     |        | (untrusted,  |
-   (internal)         |  gate)       |        | runsc, RO,   |
-              |       +--------------+        | capdrop;     |
-              v             |                 | proxynet ONLY)|
-        +-------------+   [ proxynet ]        +--------------+
-        | FACILITATOR |   (internal)                |
-        +-------------+        |                     | (data plane)
-          |                    v                     v
-          |               +-----------+        +-----------+
-          |               |DATA-PROXY |<--proxynet (172.30.0.10)
-          |               +-----------+
-          |                  |       |
-          |          [ upstreamnet ] [ redisnet ] (internal)
-          |              (external)       |
-        [ upstreamnet ]    |          +-----+
-          |                |          |REDIS|  (trusted backend ONLY;
-          v                |          +-----+   no resource net; unpublished)
-       Arc RPC (chain)  allowlisted upstreams
+                      +--------------+                      +--------------+
+              +------>|  SIDECAR     |--utter_pairnet_<slug>->| HANDLER     |
+              |       |  <slug>-gate |   (per-resource,      | <slug>       |
+   [ controlplane ]   | (trusted     |    internal, by IP)   | (untrusted,  |
+   (internal)         |  gate)       |                       | runsc, RO,   |
+              |       +--------------+                       | capdrop;     |
+              v             |                                | pairnet ONLY)|
+        +-------------+   [ utter_pairnet_<slug> ]           +--------------+
+        | FACILITATOR |   (per-resource, internal:true)
+        +-------------+
+          |
+          |          (the untrusted HANDLER is on NO shared net: no data-proxy hop
+          |           today, and no sibling handler can address it at L3)
+          |
+        [ upstreamnet ]
+          |
+          v
+       Arc RPC (chain)
 
-The untrusted HANDLER sits on proxynet ONLY and touches the internet through NONE.
-The trusted SIDECAR bridges ingress+controlplane+proxynet. redis is on redisnet
-ONLY - reachable by the data-proxy, never by any resource (M6).
+The untrusted HANDLER sits on its OWN per-resource pairnet utter_pairnet_<slug>
+(internal:true) ALONE - NOT on any shared proxynet - so no sibling handler can
+address it at L3 (quick 260625-mwb). The trusted SIDECAR bridges
+ingress+controlplane+utter_pairnet_<slug> and reaches its handler by inspected IP
+on that shared pairnet (runsc has no Docker DNS). redis is on redisnet ONLY -
+reachable by the data-proxy, never by any resource (M6). NOTE: the untrusted-egress
+data-proxy plumbing is a FOLLOW-UP: when it lands the data-proxy attaches per-pairnet
+(or DATA_PROXY_URL is injected), NOT via a shared proxynet hop.
 ```
 
 ### How each reachability requirement is met
