@@ -320,6 +320,85 @@ describe("buildHandlerServiceEnv / buildSidecarServiceEnv", () => {
     expect(env.SIDECAR_FACILITATOR_TOKEN).toBe(FACILITATOR_TOKEN);
     expect(env.CLASSIFIER_SCHEMA).toBe(CLASSIFIER_SCHEMA);
   });
+
+  it("sidecar env emits MAX_RESPONSE_BYTES (fix F2) when pricing carries a positive cap", () => {
+    const env = buildSidecarServiceEnv({
+      facilitatorUrl: "http://172.20.0.5:8787",
+      resourceId: RESOURCE_ID,
+      cap: 10_000n,
+      pricing: PRICING, // PRICING.maxResponseBytes === 1_048_576
+      maxTimeoutSeconds: 30,
+      handlerUrl: "http://172.30.0.9:8080",
+      facilitatorToken: FACILITATOR_TOKEN,
+      classifierSchema: CLASSIFIER_SCHEMA,
+      port: 8080,
+    });
+    // The configured size cap reaches the sidecar gate as a public integer string, so
+    // F1's MAX_RESPONSE_BYTES parsing (metering size term + bounded proxy read) applies.
+    expect(env.MAX_RESPONSE_BYTES).toBe("1048576");
+  });
+
+  it("sidecar env OMITS MAX_RESPONSE_BYTES when the cap is unset, zero, or negative", () => {
+    for (const maxResponseBytes of [undefined, 0, -1] as Array<number | undefined>) {
+      const env = buildSidecarServiceEnv({
+        facilitatorUrl: "http://172.20.0.5:8787",
+        resourceId: RESOURCE_ID,
+        cap: 10_000n,
+        pricing: { model: "metered", base: "5000", perKB: "100", computeMultiplier: "200", maxResponseBytes },
+        maxTimeoutSeconds: 30,
+        handlerUrl: "http://172.30.0.9:8080",
+        facilitatorToken: FACILITATOR_TOKEN,
+        classifierSchema: CLASSIFIER_SCHEMA,
+        port: 8080,
+      });
+      // Omitted (not "0") so loadSidecarConfig keeps its hard DEFAULT_MAX_RESPONSE_BYTES.
+      expect(env.MAX_RESPONSE_BYTES).toBeUndefined();
+    }
+  });
+
+  it("sidecar env emits FREE_PATHS defaulting to the single agent-card route", () => {
+    const env = buildSidecarServiceEnv({
+      facilitatorUrl: "http://172.20.0.5:8787",
+      resourceId: RESOURCE_ID,
+      cap: 10_000n,
+      pricing: PRICING,
+      maxTimeoutSeconds: 30,
+      handlerUrl: "http://172.30.0.9:8080",
+      facilitatorToken: FACILITATOR_TOKEN,
+      classifierSchema: CLASSIFIER_SCHEMA,
+      port: 8080,
+    });
+    // The echo's ONLY free route: an EXACT CSV, not the wider in-sidecar default trio.
+    expect(env.FREE_PATHS).toBe("/.well-known/agent-card.json");
+  });
+
+  it("sidecar env honors an explicit freePaths list (comma-joined, exact)", () => {
+    const env = buildSidecarServiceEnv({
+      facilitatorUrl: "http://172.20.0.5:8787",
+      resourceId: RESOURCE_ID,
+      cap: 10_000n,
+      pricing: PRICING,
+      maxTimeoutSeconds: 30,
+      handlerUrl: "http://172.30.0.9:8080",
+      facilitatorToken: FACILITATOR_TOKEN,
+      classifierSchema: CLASSIFIER_SCHEMA,
+      freePaths: ["/.well-known/agent-card.json", "/healthz"],
+      port: 8080,
+    });
+    expect(env.FREE_PATHS).toBe("/.well-known/agent-card.json,/healthz");
+  });
+
+  it("handler env carries NEITHER MAX_RESPONSE_BYTES NOR FREE_PATHS (only the sidecar gates)", () => {
+    const env = buildHandlerServiceEnv({
+      resourceId: RESOURCE_ID,
+      cap: 10_000n,
+      pricing: PRICING, // even with a positive maxResponseBytes, the handler gets neither
+      maxTimeoutSeconds: 30,
+      port: 8080,
+    });
+    expect(env.MAX_RESPONSE_BYTES).toBeUndefined();
+    expect(env.FREE_PATHS).toBeUndefined();
+  });
 });
 
 /**

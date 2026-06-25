@@ -362,6 +362,11 @@ export async function liveDeployEcho(
     facilitatorUrl,
     facilitatorToken,
     classifierSchema,
+    // The echo's ONLY free route is its A2A discovery card; everything else is gated.
+    // Explicit here to document intent (this is also buildSidecarServiceEnv's default).
+    // PRICING.maxResponseBytes already flows via `pricing` above, so fix F2's
+    // MAX_RESPONSE_BYTES now reaches the sidecar's metering + bounded proxy read.
+    freePaths: ["/.well-known/agent-card.json"],
   });
   console.log(
     `[live-deploy] pair running under runsc: handler ${handlerName} (image ` +

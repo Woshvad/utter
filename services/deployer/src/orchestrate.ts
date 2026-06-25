@@ -311,21 +311,43 @@ export interface BuildSidecarServiceEnvOpts {
   facilitatorToken: string;
   /** The JSON response schema the gate classifies against (declared-errors stay free). */
   classifierSchema: string;
+  /**
+   * The EXACT discovery routes that BYPASS the gate (sidecar FREE_PATHS, an exact CSV).
+   * Optional: defaults to the single agent-card route ({@link DEFAULT_SIDECAR_FREE_PATHS}),
+   * the echo's only free route. Each entry is matched exactly, never by prefix (#3).
+   */
+  freePaths?: string[];
   /** The container listen port. */
   port: number;
 }
 
 /**
+ * The deployer's per-resource default for the sidecar FREE_PATHS env: ONLY the A2A
+ * agent card. The echo's sole free route is its discovery card; health is served
+ * behind the gate for a deployed resource (the in-sidecar DEFAULT_FREE_PATHS trio is
+ * the wider in-process default, but a live deploy narrows it to exactly the declared
+ * discovery route so no extra path is bypassed). Each entry is an EXACT match (#3).
+ */
+export const DEFAULT_SIDECAR_FREE_PATHS = ["/.well-known/agent-card.json"] as const;
+
+/**
  * Assemble the TRUSTED sidecar container env (sidecar.ts loadSidecarConfig:
- * FACILITATOR_URL, RESOURCE_ID, CAP, MAX_TIMEOUT_SECONDS, PRICE_*, HANDLER_URL,
- * SIDECAR_FACILITATOR_TOKEN, CLASSIFIER_SCHEMA, PORT).
+ * FACILITATOR_URL, RESOURCE_ID, CAP, MAX_TIMEOUT_SECONDS, PRICE_*, MAX_RESPONSE_BYTES,
+ * HANDLER_URL, SIDECAR_FACILITATOR_TOKEN, CLASSIFIER_SCHEMA, FREE_PATHS, PORT).
  *
  * This env carries the facilitator route + the caller-auth token + the classifier
  * schema, so it MUST go through buildTrustedServiceSpec (which does NOT run the secret
  * guard); buildResourceServiceSpec would reject the token. NEVER logs the token.
+ *
+ * MAX_RESPONSE_BYTES is emitted ONLY when pricing.maxResponseBytes is a positive
+ * number (fix F2 - it caps the metering size term AND bounds the sidecar's proxy read;
+ * loadSidecarConfig falls back to its hard default when it is absent). It is a public
+ * integer. FREE_PATHS is the comma-joined exact discovery routes, defaulting to the
+ * single agent-card route so a live deploy bypasses the gate on EXACTLY that route,
+ * not the wider in-sidecar default trio.
  */
 export function buildSidecarServiceEnv(opts: BuildSidecarServiceEnvOpts): Record<string, string> {
-  return {
+  const env: Record<string, string> = {
     FACILITATOR_URL: opts.facilitatorUrl,
     RESOURCE_ID: opts.resourceId,
     PORT: String(opts.port),
@@ -338,6 +360,22 @@ export function buildSidecarServiceEnv(opts: BuildSidecarServiceEnvOpts): Record
     SIDECAR_FACILITATOR_TOKEN: opts.facilitatorToken,
     CLASSIFIER_SCHEMA: opts.classifierSchema,
   };
+
+  // Emit MAX_RESPONSE_BYTES ONLY when the pricing carries a positive cap (fix F2). A
+  // missing/zero/negative value is omitted so loadSidecarConfig keeps its hard
+  // default; emitting "0" would be parsed away by F1 but is misleading, so we omit.
+  const maxResponseBytes = opts.pricing.maxResponseBytes;
+  if (typeof maxResponseBytes === "number" && maxResponseBytes > 0) {
+    env.MAX_RESPONSE_BYTES = String(maxResponseBytes);
+  }
+
+  // Emit FREE_PATHS as the comma-joined EXACT discovery routes; default to the single
+  // agent-card route (the echo's only free route). loadSidecarConfig splits it back on
+  // commas and matches each entry exactly, never by prefix (#3).
+  const freePaths = opts.freePaths ?? [...DEFAULT_SIDECAR_FREE_PATHS];
+  env.FREE_PATHS = freePaths.join(",");
+
+  return env;
 }
 
 /**
@@ -548,6 +586,12 @@ export interface LaunchResourcePairOpts {
   facilitatorToken: string;
   /** The JSON response schema the sidecar classifies against (declared-errors stay free). */
   classifierSchema: string;
+  /**
+   * The EXACT discovery routes the sidecar bypasses the gate on (FREE_PATHS). Optional:
+   * defaults to {@link DEFAULT_SIDECAR_FREE_PATHS} (the single agent-card route). Each
+   * entry is matched exactly, never by prefix (#3).
+   */
+  freePaths?: string[];
   /** Override the handler's network (default PAIR_NETWORKS.handler). */
   handlerNetwork?: string;
   /** Override the sidecar's PRIMARY network (default PAIR_NETWORKS.sidecar). */
@@ -700,6 +744,7 @@ export async function launchResourcePair(
       handlerUrl,
       facilitatorToken: opts.facilitatorToken,
       classifierSchema: opts.classifierSchema,
+      ...(opts.freePaths ? { freePaths: opts.freePaths } : {}),
       port: PAIR_PORT,
     }),
     name: sidecarName,
