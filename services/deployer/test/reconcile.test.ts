@@ -355,6 +355,182 @@ describe("createReconcileLoop - runaway pass (H4 quarantine + reap)", () => {
     expect(reapContainer).not.toHaveBeenCalled();
     expect((await store.get(r1))?.status).toBe("running");
   });
+
+  it("quarantine HOLDS even when the reap itself throws (DEFECT 2)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"e3".repeat(32)}`;
+    await store.put(record(r1)); // status "running"
+
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1, { restartCount: 5 }), // >= policy.maxRestartCount
+    ]);
+    const reapContainer = vi.fn(async () => {
+      throw new Error("docker remove failed");
+    });
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: POLICY,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    await loop.tick();
+
+    // Quarantine held DESPITE the reap throwing (no fail-open relaunch path).
+    expect((await store.get(r1))!.status).toBe("failed");
+    // The reap failure was surfaced as a runaway event, not swallowed.
+    const runaway = errors.filter((e) => e.phase === "runaway");
+    expect(runaway.some((e) => e.message.includes("docker remove failed"))).toBe(true);
+  });
+
+  it("does NOT reap when the quarantine store.put throws (DEFECT 1 fail-closed)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"e4".repeat(32)}`;
+    await store.put(record(r1)); // status "running"
+    // The quarantine put throws (a Redis hiccup under host stress).
+    vi.spyOn(store, "put").mockRejectedValueOnce(new Error("store down"));
+
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1, { restartCount: 5 }),
+    ]);
+    const reapContainer = vi.fn(async () => undefined);
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: POLICY,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    await loop.tick();
+
+    // The container was NOT removed (safeToReap was false): it stays running,
+    // relaunchable, so it is not left removed-but-relaunchable.
+    expect(reapContainer).not.toHaveBeenCalled();
+    // A "quarantine failed" runaway event was surfaced.
+    const runaway = errors.filter((e) => e.phase === "runaway");
+    expect(runaway.some((e) => e.message.includes("quarantine failed"))).toBe(true);
+  });
+
+  it("reaps a record-less runaway directly (safeToReap via the null branch)", async () => {
+    const store = new InMemoryDeploymentStore();
+    // No store.put: the container's resourceId has NO desired record.
+    const r1: Hex = `0x${"e5".repeat(32)}`;
+    const orphanRunaway = container(r1, { restartCount: 5 });
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [orphanRunaway]);
+    const reaped: string[] = [];
+    const reapContainer = vi.fn(async (c: ActualContainer) => {
+      reaped.push(c.id);
+    });
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: POLICY,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    // No crash on the missing record.
+    await loop.tick();
+
+    // Reaped directly (null branch -> safeToReap true) and surfaced.
+    expect(reaped).toEqual([orphanRunaway.id]);
+    expect(errors.some((e) => e.phase === "runaway")).toBe(true);
+  });
+});
+
+describe("createReconcileLoop - runaway sustained-CPU loop state (H4, DEFECT 3)", () => {
+  const CPU_POLICY: RunawayPolicy = { maxRestartCount: 5, cpuFraction: 0.95, sustainedSamples: 3 };
+
+  it("(a) accumulates the high-CPU streak across ticks and trips on sustainedSamples", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"a5".repeat(32)}`;
+    await store.put(record(r1));
+
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1, { cpuFraction: 0.96 }),
+    ]);
+    const reapContainer = vi.fn(async () => undefined);
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: CPU_POLICY,
+    });
+
+    await loop.tick(); // streak 1
+    expect(reapContainer).not.toHaveBeenCalled();
+    await loop.tick(); // streak 2
+    expect(reapContainer).not.toHaveBeenCalled();
+    await loop.tick(); // streak 3 -> trips
+    expect(reapContainer).toHaveBeenCalledTimes(1);
+    expect((await store.get(r1))!.status).toBe("failed");
+  });
+
+  it("(b) a below-threshold sample RESETS the streak (persisted across ticks)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"a6".repeat(32)}`;
+    await store.put(record(r1));
+
+    let cpu = 0.96;
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1, { cpuFraction: cpu }),
+    ]);
+    const reapContainer = vi.fn(async () => undefined);
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: CPU_POLICY,
+    });
+
+    cpu = 0.96;
+    await loop.tick(); // streak 1
+    cpu = 0.5;
+    await loop.tick(); // RESET to 0
+    cpu = 0.96;
+    await loop.tick(); // streak 1 again - never reaches 3 consecutively
+    expect(reapContainer).not.toHaveBeenCalled();
+    expect((await store.get(r1))!.status).toBe("running");
+  });
+
+  it("(c) a disappeared container PRUNES its streak, restarting from 0 on re-appear", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"a7".repeat(32)}`;
+    await store.put(record(r1));
+
+    let present = true;
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> =>
+      present ? [container(r1, { cpuFraction: 0.96 })] : [],
+    );
+    const reapContainer = vi.fn(async () => undefined);
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: CPU_POLICY,
+    });
+
+    present = true;
+    await loop.tick(); // streak 1
+    await loop.tick(); // streak 2
+    present = false;
+    await loop.tick(); // container gone -> Map entry pruned
+    present = true;
+    await loop.tick(); // re-appears -> streak restarts at 1, NOT 3
+    expect(reapContainer).not.toHaveBeenCalled();
+    expect((await store.get(r1))!.status).toBe("running");
+  });
 });
 
 describe("createReconcileLoop - host concurrency cap (H4)", () => {
