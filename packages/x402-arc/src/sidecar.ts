@@ -18,15 +18,21 @@
 //
 // SECURITY invariants enforced here:
 //   - FREE paths (agent-card, health) BYPASS the gate so discovery is never paywalled.
+//     They are matched EXACTLY, not by prefix: a route under a free path is gated, so
+//     an adversary handler cannot mint a free-compute route under a free prefix (#3).
 //   - the proxy STRIPS x-payment (consumed by the gate) and authorization (never
 //     forward a bearer to the untrusted handler) before reaching HANDLER_URL.
-//   - the proxy returns the upstream Response UNCHANGED (status + headers + body) so
-//     the gate's clone-read, classification, and byte-length metering are identical to
-//     the in-process path, AND it NEVER imposes its own timeout or swallows a
-//     handler throw: the gate's `withTimeout(next())` owns the deadline (a slow
-//     handler -> gate timeout -> release "timeout" -> 504) and a fetch rejection
-//     propagates so the gate maps it to "handler_error" -> 502. Swallowing either
-//     would regress the strike/release semantics.
+//   - the proxy ABORTS the upstream fetch at the gate deadline so a hung handler
+//     request is cancelled, not leaked (#4); the abort rejection still propagates so
+//     the gate's own `withTimeout(next())` releases "timeout" -> 504, no debit.
+//   - the proxy reads the upstream body with a BOUNDED reader (MAX_RESPONSE_BYTES or
+//     a hard default) so an adversary handler cannot OOM the sidecar; an oversize body
+//     THROWS -> the gate maps it to a malfunction (release + strike -> 502, NEVER a
+//     debit) (#5). A body within the cap is returned with the upstream status +
+//     headers preserved so the gate's clone-read, classification, and byte-length
+//     metering are identical to the in-process path (a declared-error 400 survives).
+//     A fetch rejection (handler down) still propagates so the gate maps it to
+//     "handler_error" -> 502. Swallowing any of these would regress strike/release.
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Hex } from "viem";
@@ -37,10 +43,25 @@ import type { AcceptsEntry, Pricing } from "./accepts";
 import type { FetchLike } from "./idempotency";
 
 /**
- * The default path PREFIXES that BYPASS the gate. Discovery (the A2A agent card) and
- * health must never be paywalled or agents cannot find / probe the resource.
+ * The default EXACT paths that BYPASS the gate. Discovery (the A2A agent card) and
+ * health must never be paywalled or agents cannot find / probe the resource. These
+ * are matched EXACTLY (not by prefix): a route UNDER one of these (e.g.
+ * `/.well-known/run`, `/health/work`) is gated, so an adversary handler cannot mint a
+ * free-compute route by living under a free prefix (review #3). A deployer narrows
+ * this further per resource via the FREE_PATHS env (still exact entries).
  */
-export const DEFAULT_FREE_PATHS = ["/.well-known/", "/health"] as const;
+export const DEFAULT_FREE_PATHS = [
+  "/.well-known/agent-card.json",
+  "/health",
+  "/healthz",
+] as const;
+
+/**
+ * The hard default cap on a proxied handler response body (bytes). Used by the
+ * bounded proxy read when `pricing.maxResponseBytes` is not configured, so an
+ * adversary handler can never OOM the sidecar with an unbounded body (review #5).
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 
 /**
  * The permissive default classifier for a resource with NO declared openapi schema:
@@ -88,7 +109,7 @@ export interface SidecarConfig {
   classifier?: ClassifyResponse;
   /** Declared-error policy (default `free` - no charge, no strike). */
   errorPolicy?: ErrorPolicy;
-  /** Path PREFIXES that bypass the gate; default {@link DEFAULT_FREE_PATHS}. */
+  /** EXACT paths that bypass the gate; default {@link DEFAULT_FREE_PATHS}. */
   freePaths?: string[];
   /** The port the entrypoint server listens on (default 8080). */
   port: number;
@@ -120,9 +141,13 @@ function buildSidecarQuote(cfg: SidecarConfig): AcceptsEntry {
   };
 }
 
-/** True when `path` starts with any configured free prefix (bypass the gate). */
+/**
+ * True when `path` EXACTLY matches a configured free path (bypass the gate). Only the
+ * listed exact paths bypass: a route under a free path (e.g. `/health/work` under
+ * `/health`) is NOT free and runs the gate (review #3 - no prefix free-compute).
+ */
 export function isFreePath(path: string, freePaths: readonly string[]): boolean {
-  return freePaths.some((prefix) => path.startsWith(prefix));
+  return freePaths.includes(path);
 }
 
 /**
@@ -131,20 +156,30 @@ export function isFreePath(path: string, freePaths: readonly string[]): boolean 
  * in-process `gated.route("/", resourceApp)`: the downstream is a separate container
  * reached over HTTP instead of an in-process Hono route.
  *
- * Returning the upstream Response directly makes Hono set `c.res` to it, so the
- * status + headers + body are preserved byte-for-byte. That keeps the gate's
+ * Buffering the upstream body into a fresh Response with the SAME status + headers
+ * preserves it byte-for-byte for the client. That keeps the gate's
  * `c.res.clone().text()`, classification, and `Buffer.byteLength` metering identical
  * to the in-process path (a declared-error HTTP 400 + body survives intact).
  *
- * It deliberately does NOT impose a timeout and does NOT catch/swallow: the gate's
- * `withTimeout(next())` owns the deadline (slow handler -> gate timeout -> release
- * "timeout" -> 504) and a fetch rejection PROPAGATES so the gate maps it to
- * "handler_error" -> 502. Swallowing either regresses the strike/release semantics.
+ * Two safety bounds are added versus a naive pass-through (reviews #4, #5), neither
+ * of which changes the gate's outcome:
+ *   - An AbortController aborts the in-flight upstream fetch at the gate deadline
+ *     (`maxTimeoutSeconds`) so a hung handler request is CANCELLED, not leaked. The
+ *     abort rejects the fetch, which PROPAGATES (never swallowed) exactly like a hung
+ *     handler - the gate's own `withTimeout(next())` fires at the same deadline and
+ *     releases "timeout" -> 504, no debit. The point is to free the upstream socket.
+ *   - The upstream body is read with a BOUNDED reader capped at `maxBytes`. An
+ *     oversize body THROWS, which the gate maps to a malfunction (release WITH a
+ *     strikeReason -> 502, NEVER a debit) - the same path a non-conforming body takes
+ *     - so an adversary handler cannot OOM the sidecar with a huge body. A body
+ *     within the cap is returned with the upstream status + headers intact.
  */
 async function proxyToHandler(
   c: Context,
   handlerUrl: string,
   handlerFetch: typeof fetch,
+  maxTimeoutSeconds: number,
+  maxBytes: number,
 ): Promise<Response> {
   // Preserve the path + query string against the handler base URL.
   const inbound = new URL(c.req.url);
@@ -165,10 +200,68 @@ async function proxyToHandler(
   const hasBody = method !== "GET" && method !== "HEAD";
   const body = hasBody ? await c.req.arrayBuffer() : undefined;
 
-  // No timeout, no try/catch here on purpose (see the doc comment): a rejection
-  // propagates to the gate so it releases + strikes "handler_error" -> 502.
-  const upstream = await handlerFetch(target, { method, headers, body });
-  return upstream;
+  // Abort the upstream fetch at the gate deadline so a hung handler request is
+  // cancelled rather than left holding a socket. The rejection is NOT swallowed: it
+  // propagates to the gate like any hung-handler failure (#4).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), maxTimeoutSeconds * 1000);
+  try {
+    const upstream = await handlerFetch(target, {
+      method,
+      headers,
+      body,
+      signal: controller.signal,
+    });
+
+    // Read the upstream body with a BOUNDED reader so an adversary handler cannot OOM
+    // the sidecar with a huge body. An oversize body THROWS -> the gate classifies it
+    // a malfunction (release + strike -> 502, never debit) (#5).
+    const buffered = await readBounded(upstream, maxBytes);
+
+    // Preserve the upstream status + headers so a declared-error 400 still surfaces
+    // and the gate's clone-read + byte-length metering see the bounded body intact.
+    return new Response(buffered, {
+      status: upstream.status,
+      headers: upstream.headers,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Read a Response body into a Buffer, aborting + THROWING if it exceeds `maxBytes`.
+ * The throw flows to the gate's malfunction path (release + 502, never a debit), so
+ * an oversize handler response is treated as a broken endpoint, not an OOM. Reads via
+ * the Web Streams reader (a built-in - no new dependency); when there is no body
+ * stream (e.g. an empty response) it returns an empty Buffer.
+ */
+async function readBounded(res: Response, maxBytes: number): Promise<Buffer> {
+  if (!res.body) {
+    return Buffer.alloc(0);
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          // Oversize: stop reading, release the upstream stream, and throw so the
+          // gate maps it to a malfunction. Never the body or a byte count is logged.
+          throw new Error("handler response exceeds MAX_RESPONSE_BYTES");
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    // Cancel any remaining upstream stream (frees the socket on the oversize throw).
+    await reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks, total);
 }
 
 /**
@@ -186,6 +279,10 @@ export function createSidecarGateApp(cfg: SidecarConfig, deps: SidecarDeps = {})
   const classifier = cfg.classifier ?? permissiveClassifier;
   const freePaths = cfg.freePaths ?? [...DEFAULT_FREE_PATHS];
   const handlerFetch = deps.handlerFetcher ?? fetch;
+  // The bounded proxy read cap: the configured MAX_RESPONSE_BYTES (which also caps the
+  // metering size term) or the hard default. Once fix F2 emits MAX_RESPONSE_BYTES from
+  // the deployer, the same value reaches the gate's computeMeteredAmount.
+  const maxResponseBytes = cfg.pricing.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
 
   const gate = requirePayment({
     facilitatorUrl: cfg.facilitatorUrl,
@@ -212,8 +309,11 @@ export function createSidecarGateApp(cfg: SidecarConfig, deps: SidecarDeps = {})
     return gate(c, next);
   });
 
-  // Catch-all reverse proxy to the gate-less handler container.
-  app.all("*", async (c) => proxyToHandler(c, cfg.handlerUrl, handlerFetch));
+  // Catch-all reverse proxy to the gate-less handler container. The proxy aborts the
+  // upstream fetch at the gate deadline and reads the body bounded by maxResponseBytes.
+  app.all("*", async (c) =>
+    proxyToHandler(c, cfg.handlerUrl, handlerFetch, cfg.maxTimeoutSeconds, maxResponseBytes),
+  );
 
   return app;
 }
@@ -271,12 +371,26 @@ export function loadSidecarConfig(env: NodeJS.ProcessEnv = process.env): Sidecar
     computeMultiplier: optionalBaseUnitsEnv(env, "PRICE_MAX"),
   };
 
+  // Optional MAX_RESPONSE_BYTES: caps the metering size term AND bounds the proxy
+  // read (#5). Only a positive integer is honored; anything else (absent, zero,
+  // negative, non-numeric) leaves it undefined so the size term stays uncapped and
+  // the proxy read falls back to DEFAULT_MAX_RESPONSE_BYTES. Fix F2 makes the
+  // deployer always emit it so the configured cap reaches the gate's metering.
+  const maxBytesRaw = env.MAX_RESPONSE_BYTES;
+  if (maxBytesRaw && maxBytesRaw.trim().length > 0) {
+    const parsed = Number(maxBytesRaw.trim());
+    if (Number.isInteger(parsed) && parsed > 0) {
+      pricing.maxResponseBytes = parsed;
+    }
+  }
+
   // Optional per-resource caller-auth token (present in production, absent in dev).
   const tokenRaw = env.SIDECAR_FACILITATOR_TOKEN;
   const facilitatorToken =
     tokenRaw && tokenRaw.trim().length > 0 ? tokenRaw.trim() : undefined;
 
-  // Optional CSV of free path prefixes; default the two discovery/health prefixes.
+  // Optional CSV of EXACT free paths (a per-resource override); default the minimal
+  // discovery/health set. Each entry is matched exactly, never by prefix (#3).
   const freePathsRaw = env.FREE_PATHS;
   const freePaths =
     freePathsRaw && freePathsRaw.trim().length > 0
