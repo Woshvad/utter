@@ -225,21 +225,20 @@ export const ROLE_GATE = "gate";
  * proxynet. It reaches the handler by inspected IP on the shared pairnet (runsc has no
  * DNS). The pairnet name is derived per launch by {@link pairnetName}.
  *
- * These constant fields are the ENV-OVERRIDE knobs (HANDLER_NETWORK /
- * SIDECAR_NETWORK / SIDECAR_EXTRA_NETWORKS) plus the legacy single-container echo
- * default. When unset, launchResourcePair defaults the handler network to the per-slug
- * pairnet and the sidecar extras to `[controlplane, pairnet]` (NOT the shared
- * proxynet). The bridge driver is internal:true so no pairnet has a route off-host.
+ * The handler network and the sidecar extras are NOT in this constant: they are
+ * derived per launch from the slug in launchResourcePair. The handler is pinned to its
+ * per-slug pairnet `utter_pairnet_<slug>` and the sidecar extras are
+ * `[controlplane, pairnet]` (NOT the shared proxynet). A dev-only override for each is
+ * available via the LaunchResourcePairOpts `handlerNetwork` / `sidecarExtraNetworks`
+ * fields (used by local back-compat runs); there is no env-var knob for them anymore
+ * (the former HANDLER_NETWORK / SIDECAR_EXTRA_NETWORKS env vars were dead - never read -
+ * and removed). This constant now holds ONLY the sidecar PRIMARY network (ingress,
+ * where Traefik routes). The pairnet bridge driver is internal:true so no pairnet has a
+ * route off-host.
  */
 export const PAIR_NETWORKS = {
-  /** Env-override for the handler network (legacy default proxynet; per-slug pairnet wins when unset). */
-  handler: process.env.HANDLER_NETWORK?.trim() || "proxynet",
-  /** The sidecar's PRIMARY network (Traefik routes to it here). */
+  /** The sidecar's PRIMARY network (Traefik routes to it here). Always ingress. */
   sidecar: process.env.SIDECAR_NETWORK?.trim() || "ingress",
-  /** Env-override for the sidecar extras (legacy default controlplane+proxynet; controlplane+pairnet wins when unset). */
-  sidecarExtras: (process.env.SIDECAR_EXTRA_NETWORKS?.trim()
-    ? process.env.SIDECAR_EXTRA_NETWORKS.split(",").map((n) => n.trim()).filter((n) => n.length > 0)
-    : ["controlplane", "proxynet"]),
 } as const;
 
 /** The Docker label value marking a per-resource pairnet (for the orphan-network GC sweep). */
@@ -272,12 +271,25 @@ export function pairnetName(slug: string): string {
 
 /**
  * Idempotently create the per-resource pairnet for a slug: an internal:true bridge
- * named `utter_pairnet_<slug>`, labeled so the orphan-network GC can find it. Catches
- * the already-exists case (409 / "already exists") and treats it as success so a
- * redeploy is idempotent; re-throws any other error. This MUST run BEFORE the handler
- * container is created (the handler's pairnet is its create-time NetworkMode).
+ * named `utter_pairnet_<slug>`, labeled with the slug, the GC kind, AND the owning
+ * resourceId so the orphan-network GC can find it and a slug-collision can be caught.
+ * This MUST run BEFORE the handler container is created (the handler's pairnet is its
+ * create-time NetworkMode).
+ *
+ * Slug-collision fail-loud guard (quick 260625-mwb, FIX C): the isolation guarantee
+ * relies on globally-unique slugs (M5 prerequisite) - two resourceIds on one slug would
+ * SHARE the pairnet and co-tenant, re-opening the cross-tenant free-compute HIGH. So on
+ * the already-exists (409) path we inspect the existing pairnet and read its
+ * RESOURCE_ID_LABEL: if it is present and does NOT equal this resourceId we THROW (refuse
+ * to co-tenant); if it equals this resourceId it is a redeploy -> idempotent success; if
+ * the label is absent (an older network created before this guard) we adopt it and
+ * proceed. Any non-already-exists error is re-thrown.
  */
-async function ensurePairNetwork(docker: DockerHandle, slug: string): Promise<void> {
+async function ensurePairNetwork(
+  docker: DockerHandle,
+  slug: string,
+  resourceId: Hex,
+): Promise<void> {
   const dockerApi = docker as unknown as Docker;
   const name = pairnetName(slug);
   try {
@@ -289,17 +301,29 @@ async function ensurePairNetwork(docker: DockerHandle, slug: string): Promise<vo
       Labels: {
         [SLUG_LABEL]: validateSlug(slug),
         [PAIRNET_KIND_LABEL]: PAIRNET_KIND,
+        [RESOURCE_ID_LABEL]: resourceId,
       },
     });
   } catch (err) {
     const e = err as { statusCode?: number; message?: string };
     const alreadyExists =
       e?.statusCode === 409 || (e?.message ?? "").toLowerCase().includes("already exists");
-    if (alreadyExists) {
-      // A prior deploy already created this pairnet: idempotent success.
-      return;
+    if (!alreadyExists) throw err;
+
+    // A pairnet for this slug already exists. Inspect it and enforce single-ownership:
+    // refuse to co-tenant a slug across two different resourceIds (slugs MUST be globally
+    // unique for isolation - M5). A matching owner is a redeploy (idempotent success); an
+    // unlabeled older network is adopted.
+    const info = await dockerApi.getNetwork(name).inspect();
+    const owner = (info.Labels ?? {})[RESOURCE_ID_LABEL];
+    if (owner && owner !== resourceId) {
+      throw new Error(
+        `ensurePairNetwork: the pairnet '${name}' is already owned by a different resource. ` +
+          "Refusing to co-tenant: resource slugs must be globally unique for per-resource " +
+          "isolation (M5 prerequisite). Mint a unique slug for this resource.",
+      );
     }
-    throw err;
+    // Same owner (redeploy) or unlabeled legacy net (adopt): idempotent success.
   }
 }
 
@@ -713,11 +737,11 @@ export interface LaunchResourcePairOpts {
    * entry is matched exactly, never by prefix (#3).
    */
   freePaths?: string[];
-  /** Override the handler's network (default PAIR_NETWORKS.handler). */
+  /** Dev-only override for the handler's network (default: the per-slug pairnet). */
   handlerNetwork?: string;
-  /** Override the sidecar's PRIMARY network (default PAIR_NETWORKS.sidecar). */
+  /** Override the sidecar's PRIMARY network (default PAIR_NETWORKS.sidecar = ingress). */
   sidecarNetwork?: string;
-  /** Override the sidecar's EXTRA networks (default PAIR_NETWORKS.sidecarExtras). */
+  /** Dev-only override for the sidecar's EXTRA networks (default: [controlplane, pairnet]). */
   sidecarExtraNetworks?: string[];
 }
 
@@ -819,10 +843,12 @@ export async function launchResourcePair(
 
   // (2b) Create the per-resource pairnet BEFORE the handler container (ordering fix:
   // the handler's pairnet is its create-time NetworkMode, so the network must exist
-  // first). Idempotent on already-exists for a redeploy. When an env-override pins the
-  // handler to a pre-existing shared network (dev/back-compat) we still ensure the
-  // per-slug pairnet so the GC + teardown paths stay consistent.
-  await ensurePairNetwork(docker, opts.slug);
+  // first). Idempotent on already-exists for a same-owner redeploy; THROWS on a
+  // slug-collision where a different resourceId already owns this pairnet (FIX C, the
+  // network-layer fail-loud guard for global slug uniqueness). When a dev override pins
+  // the handler to a pre-existing shared network we still ensure the per-slug pairnet so
+  // the GC + teardown paths stay consistent.
+  await ensurePairNetwork(docker, opts.slug, opts.resourceId);
 
   // (3) Launch the HANDLER (untrusted) on its per-slug internal pairnet.
   // buildResourceServiceSpec runs the secret guard over the gate-less env; the handler
@@ -998,11 +1024,16 @@ export async function listResourceContainers(
  *
  * Per-resource pairnet teardown (quick 260625-mwb, the FATAL fix): the production
  * reconcile loop reaps via THIS per-container hook, not reapResourcePair. So after the
- * container is removed, if its slug is known we list the REMAINING slug containers
- * (excluding this one's id); if none remain, this was the LAST container of the pair, so
- * we remove the per-resource pairnet. Removing it while a sibling role still runs would
- * fail in-use, so we only attempt it on the last container; any straggler is swept by
- * the orphan-network GC. Best-effort: a removal failure is swallowed (the GC is the net).
+ * container is removed, if its slug is known we attempt to remove the per-resource
+ * pairnet via removePairNetwork, which is AUTHORITATIVE: it gates off the network's OWN
+ * endpoint list (network.inspect().Containers) and removes the bridge only when zero
+ * endpoints remain. When a container is force-removed it detaches from the pairnet, so
+ * the network's Containers map is the source of truth for "is this the last role". There
+ * is therefore no listContainers timing dependency and no race here - if a sibling role
+ * is still attached, removePairNetwork sees its endpoint and declines; if this was the
+ * last role, its endpoint is already gone and the bridge is removed. The orphan-network
+ * GC remains the backstop for any crash/race straggler. Best-effort: a removal failure
+ * is swallowed inside removePairNetwork (the GC is the net).
  */
 export async function reapResourceContainer(
   docker: DockerHandle,
@@ -1017,22 +1048,12 @@ export async function reapResourceContainer(
   if (container.slug) {
     await removeTraefikDynamicFile(container.slug);
 
-    // Remove the per-resource pairnet ONLY when this was the last container of the
-    // slug. Listing the remaining slug containers (minus this id) avoids removing a
-    // network a sibling role is still attached to (that would fail in-use and leak).
-    try {
-      const validated = validateSlug(container.slug);
-      const remaining = await dockerApi.listContainers({
-        all: true,
-        filters: { label: [`${SLUG_LABEL}=${validated}`] },
-      });
-      const stillPresent = remaining.filter((info) => info.Id !== container.id);
-      if (stillPresent.length === 0) {
-        await removePairNetwork(docker, validated);
-      }
-    } catch {
-      // A list/remove failure is best-effort: the orphan-network GC sweeps stragglers.
-    }
+    // Remove the per-resource pairnet. removePairNetwork is authoritative: it inspects
+    // the network's OWN endpoint list and removes the bridge only when zero endpoints
+    // remain. The just-removed container has already detached, so if a sibling role is
+    // still attached the network keeps its endpoint and the remove is declined; if this
+    // was the last role the bridge is gone. No listContainers timing dependency, no race.
+    await removePairNetwork(docker, container.slug);
   }
 }
 
