@@ -199,6 +199,10 @@ export {
 export {
   launchResourcePair,
   reapResourcePair,
+  reapOrphanPairNetworks,
+  pairnetName,
+  PAIRNET_KIND_LABEL,
+  PAIRNET_KIND,
   pairNames,
   sidecarContainerUrl,
   buildHandlerServiceEnv,
