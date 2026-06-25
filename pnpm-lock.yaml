@@ -358,6 +358,9 @@ importers:
       '@utter/facilitator':
         specifier: workspace:*
         version: link:../facilitator
+      '@utter/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@utter/x402-arc':
         specifier: workspace:*
         version: link:../../packages/x402-arc

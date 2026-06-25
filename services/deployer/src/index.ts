@@ -47,12 +47,26 @@ export {
   buildTraefikDynamicConfig,
   serializeTraefikDynamicConfig,
   parseTraefikDynamicConfig,
+  validateSlug,
+  SLUG_PATTERN,
   DEFAULT_RESOURCE_PORT,
   type TraefikDynamicConfig,
   type TraefikRouter,
   type TraefikService,
   type BuildTraefikDynamicConfigOpts,
 } from "./traefik-config";
+
+// On-chain ResourceRegistry registration (design §5.2): inject an admin writer +
+// reader, register the keccak resourceId idempotently before any debit can fire
+// (else PaymentEscrow.debit reverts ResourceInactive). No key/env read here.
+export {
+  registerResourceIfNeeded,
+  type RegistryAdminWriter,
+  type RegistryReader,
+  type RegisterResourceDeps,
+  type RegisterResourceParams,
+  type RegisterResourceResult,
+} from "./register-resource";
 
 // Response cache (DEP-03): normalized + deployVersion-namespaced key; a HIT skips
 // the handler, sets X-Cache: HIT, and STILL fires recordBillableCall (the disclosed
@@ -100,7 +114,7 @@ export {
 // HTTPS + assert non-allowlisted unreachability. WRITTEN + type-checks, NEVER run
 // in the autonomous suite (needs the provisioned host + *.resources.<domain> cert);
 // recorded as a Deferred Item in STATE.md (Plan 06).
-export { liveDeployEcho, type LiveDeployResult } from "./live-deploy";
+export { liveDeployEcho, runEgressProbe, type LiveDeployResult, type DockerHandle } from "./live-deploy";
 
 // Echo bundler (deploy plane B): esbuild the echo into a single self-contained
 // server.js + a prebundled Dockerfile (FROM the resolved digest, CMD node

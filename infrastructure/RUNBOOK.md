@@ -95,8 +95,11 @@ paid call**, and a non-allowlisted host is unreachable from the container.
 #      TEST_BUYER_PRIVATE_KEY = the funded buyer EOA key
 #      ARC_RPC_URL            = https://rpc.testnet.arc.network  (optional; default)
 # 2. Run the operator-gated live deploy (deploys the echo bundle behind the wildcard
-#    edge, then curls 402-unpaid -> 200-paid over HTTPS + asserts PRX-02):
-node services/deployer/src/live-deploy.ts
+#    edge, then curls 402-unpaid -> 200-paid over HTTPS + asserts PRX-02). Run it from
+#    the deployer package dir, after `pnpm install`, with the native-Node TS resolver
+#    the package's own start script uses (TS is strip-types, not a bare .ts run):
+cd services/deployer
+node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/live-deploy.ts
 ```
 
 `liveDeployEcho` (`services/deployer/src/live-deploy.ts`) generates the per-resource
