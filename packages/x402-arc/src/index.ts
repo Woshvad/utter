@@ -88,3 +88,17 @@ export {
 // Shared resourceId helper: the single source of truth that maps a canonical
 // label to its on-chain resourceId so the deployer, resource env, and studio agree.
 export { resourceIdForLabel, ECHO_RESOURCE_LABEL } from "./resource-id";
+
+// The standalone SIDECAR gate-server (Security review C1): the UNCHANGED
+// `requirePayment` gate mounted in a trusted proxy that reverse-proxies paid routes
+// to a separate gate-less handler container, so the untrusted handler never shares a
+// process/netns with the gate or reaches the facilitator.
+export {
+  createSidecarGateApp,
+  loadSidecarConfig,
+  permissiveClassifier,
+  isFreePath,
+  DEFAULT_FREE_PATHS,
+  type SidecarConfig,
+  type SidecarDeps,
+} from "./sidecar";
