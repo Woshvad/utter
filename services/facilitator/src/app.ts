@@ -42,6 +42,7 @@ import { spendCapPreReserveGate } from "./spend-cap-gate";
 import { routeDebit } from "./batch-route";
 import type { BatchSettler } from "./batch-settler";
 import type { SpendCapStore } from "@utter/data-proxy";
+import { verifyResourceAuthToken } from "./resource-auth";
 
 /** Everything the app's routes need injected (stores + chain + relayer + knobs). */
 export interface AppDeps {
@@ -100,6 +101,40 @@ export interface AppDeps {
   batchSettler?: (resourceId: Hex) => BatchSettler;
   /** The min-economical threshold (USDC base-unit bigint): below it a debit batches. */
   minEconomicalAmount?: bigint;
+
+  // ---- C1: per-resource caller auth on /verify, /settle, /release ----
+  /**
+   * The HMAC secret that verifies a caller's per-resource auth token. UNSET (the
+   * default - and every existing in-process caller, which passes none) leaves the
+   * routes OPEN exactly as before, so the in-process money path and the existing
+   * tests are unchanged. server.ts reads FACILITATOR_AUTH_SECRET into this and arms
+   * `authEnforced`; production fail-fasts when the secret is missing.
+   */
+  authSecret?: string;
+  /**
+   * Whether per-resource caller auth is ENFORCED. When true (with `authSecret`),
+   * /verify, /settle, /release require a valid token bound to the operation's
+   * resourceId: missing/invalid -> 401, resourceId mismatch -> 403. When false (the
+   * default), the routes pass through unchanged (the current behavior).
+   */
+  authEnforced?: boolean;
+}
+
+/**
+ * Read a caller's per-resource auth token from the request. Accepts either an
+ * `Authorization: Bearer <token>` header or an `X-Resource-Auth: <token>` header.
+ * Returns the raw token string, or null when neither header is present. NEVER logs
+ * the token.
+ */
+function readAuthToken(c: { req: { header(name: string): string | undefined } }): string | null {
+  const bearer = c.req.header("Authorization");
+  if (typeof bearer === "string") {
+    const match = /^Bearer\s+(.+)$/i.exec(bearer.trim());
+    if (match && match[1]) return match[1].trim();
+  }
+  const direct = c.req.header("X-Resource-Auth");
+  if (typeof direct === "string" && direct.trim().length > 0) return direct.trim();
+  return null;
 }
 
 /** Decode a request body into a typed PaymentPayload, or null if malformed. */
@@ -127,6 +162,32 @@ function decodePaymentBody(value: unknown): PaymentPayload | null {
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
+  // C1 per-resource caller-auth guard. Enforced ONLY when armed (authEnforced +
+  // authSecret); otherwise it is a no-op so the in-process money path and the
+  // existing tests pass through unchanged. When enforced it requires a token bound
+  // to the operation's resourceId: a missing/invalid token is a 401, a token bound
+  // to a DIFFERENT resourceId is a 403. Returns null when the caller may proceed,
+  // or a typed denial the route turns into the JSON error response. NEVER logs the
+  // token or the secret.
+  type AuthDenial = { status: 401 | 403; reason: "unauthorized" | "forbidden_resource" };
+  const authEnforced = deps.authEnforced === true && !!deps.authSecret;
+  function checkResourceAuth(
+    c: { req: { header(name: string): string | undefined } },
+    resourceId: Hex,
+  ): AuthDenial | null {
+    if (!authEnforced) return null;
+    const token = readAuthToken(c);
+    if (!token) return { status: 401, reason: "unauthorized" };
+    const claim = verifyResourceAuthToken(token, deps.authSecret as string);
+    if (!claim) return { status: 401, reason: "unauthorized" };
+    // Compare the bound resourceId to the operation's resourceId (case-insensitive
+    // hex). A token for resource X presented on an op for resource Y is a 403.
+    if (claim.resourceId.toLowerCase() !== resourceId.toLowerCase()) {
+      return { status: 403, reason: "forbidden_resource" };
+    }
+    return null;
+  }
+
   // POST /verify - the FREE-COMPUTE GUARD. Body: { payment, resourceId, maxTimeoutSeconds? }.
   app.post("/verify", async (c) => {
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
@@ -139,6 +200,10 @@ export function createApp(deps: AppDeps): Hono {
       typeof body.resourceId === "string" && isHex(body.resourceId)
         ? (body.resourceId as Hex)
         : (payment.authorization.resourceId as Hex);
+
+    // C1: a caller may only verify against the resourceId its token is bound to.
+    const denied = checkResourceAuth(c, resourceId);
+    if (denied) return c.json({ valid: false, reason: denied.reason }, denied.status);
 
     const requirements: VerifyRequirements = {
       resourceId,
@@ -199,6 +264,19 @@ export function createApp(deps: AppDeps): Hono {
       return c.json({ released: false, reason: "bad_idemKey" }, 400);
     }
 
+    // C1: authorize the caller against the release's resourceId BEFORE freeing the
+    // reservation or recording a strike (so a peer cannot forge a strike / replay a
+    // release on a resource it does not own). When enforced the body MUST carry the
+    // resourceId to authorize against; a missing one is a 400 (we cannot bind auth).
+    if (authEnforced) {
+      const rid = body.resourceId;
+      if (typeof rid !== "string" || !isHex(rid)) {
+        return c.json({ released: false, reason: "bad_resourceId" }, 400);
+      }
+      const denied = checkResourceAuth(c, rid as Hex);
+      if (denied) return c.json({ released: false, reason: denied.reason }, denied.status);
+    }
+
     await deps.store.release(idemKey as Hex);
 
     // A strikeReason makes this the malfunction path: record a strike against the
@@ -249,6 +327,18 @@ export function createApp(deps: AppDeps): Hono {
       if (typeof idemKey !== "string" || !isHex(idemKey)) {
         return c.json({ success: false, reason: "bad_idemKey" }, 400);
       }
+      // C1: authorize the caller against the exact transfer's resourceId. The exact
+      // (EIP-3009) authorization carries NO resourceId (it is FLAT-only), so the
+      // settle envelope MUST carry it at the top level (body.resourceId) when auth
+      // is enforced; a missing one is a 400 (we cannot bind auth).
+      if (authEnforced) {
+        const exactResourceId = body.resourceId;
+        if (typeof exactResourceId !== "string" || !isHex(exactResourceId)) {
+          return c.json({ success: false, reason: "bad_resourceId" }, 400);
+        }
+        const denied = checkResourceAuth(c, exactResourceId as Hex);
+        if (denied) return c.json({ success: false, reason: denied.reason }, denied.status);
+      }
       const receipt = await settle(exact, 0n, idemKey as Hex, settleDeps, responseBody);
       return c.json({ success: true, receipt }, 200);
     }
@@ -267,6 +357,12 @@ export function createApp(deps: AppDeps): Hono {
 
     const idemKey = payment.authorization.nonce as Hex;
     const settleResourceId = payment.authorization.resourceId as Hex;
+
+    // C1: a caller may only settle against the resourceId its token is bound to.
+    const settleDenied = checkResourceAuth(c, settleResourceId);
+    if (settleDenied) {
+      return c.json({ success: false, reason: settleDenied.reason }, settleDenied.status);
+    }
 
     // CR-04: RESERVE-PRECEDES-SETTLE. Reject a settle for a nonce that holds no live
     // reservation AND has no cached result - so an unreserved (replayed) authorization
