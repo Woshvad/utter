@@ -19,6 +19,7 @@ services:
   traefik:
     image: traefik:v3
     restart: unless-stopped
+    networks: [appnet]
     ports:
       - "443:443"
       - "80:80"
@@ -37,6 +38,7 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
+    networks: [appnet]
     ports:
       - "6379:6379"
 
@@ -48,12 +50,37 @@ services:
       context: ..
       dockerfile: packages/data-proxy/Dockerfile
     restart: unless-stopped
+    networks: [appnet]
     depends_on:
       - redis
     environment:
       # HMAC secret for the scoped JWT. EMPTY here; real value in .env.local only.
       - DATA_PROXY_TOKEN_SECRET=${DATA_PROXY_TOKEN_SECRET:-}
       - REDIS_URL=redis://redis:6379
+
+  # The trusted settlement gate (PAY-09/PAY-10): the echo's in-process gate POSTs
+  # to http://facilitator:8787/verify /settle /release over appnet. Internal-only
+  # (no published host port); operators read health from `docker compose logs
+  # facilitator`. In-memory stores are selected because DATABASE_URL+REDIS_URL are
+  # deliberately unset (single-instance first light keeps redis off the facilitator).
+  facilitator:
+    build:
+      context: ..
+      dockerfile: services/facilitator/Dockerfile
+    restart: unless-stopped
+    networks: [appnet]
+    environment:
+      # Settlement relayer key(s). EMPTY here; real value in .env.local only, passed via --env-file.
+      - RELAYER_SIGNER_KEYS=${RELAYER_SIGNER_KEYS:-}
+      # Per-resource caller auth (C1). Phase 1 leaves NODE_ENV unset so auth is UNENFORCED for the
+      # trusted in-process echo gate (the gate presents no token yet; token minting lands with the
+      # Phase 2 sidecar). Setting NODE_ENV=production REQUIRES FACILITATOR_AUTH_SECRET (>=32 chars)
+      # AND a token-presenting caller, so do NOT set it until the sidecar lands.
+      - FACILITATOR_AUTH_SECRET=${FACILITATOR_AUTH_SECRET:-}
+      - NODE_ENV=${NODE_ENV:-}
+      # Optional Arc RPC override; falls back to the chain default when blank.
+      - ARC_RPC_URL=${ARC_RPC_URL:-}
+      - PORT=8787
 
   # Internal pull-through npm registry mirror (SBX-05). DEV-ONLY tooling here; the
   # prod no-network-at-build property holds ONLY on the operator-provisioned
@@ -65,6 +92,15 @@ services:
     restart: unless-stopped
     ports:
       - "4873:4873"
+
+# The shared internal app network. The fixed `name:` is load-bearing: the deploy
+# orchestrator (H2) launches the echo container via dockerode onto `utter_appnet`
+# by that exact name, so it MUST be deterministic, not the compose project-prefixed
+# default. This single network is the Phase 1 shortcut; the five-network split +
+# redis-off-resource-net (security review M6, Rework 8) is a LATER increment.
+networks:
+  appnet:
+    name: utter_appnet
 
 volumes:
   traefik-letsencrypt:
