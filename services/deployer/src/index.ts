@@ -188,3 +188,28 @@ export {
   type LaunchEchoContainerResult,
   type WaitForUnpaid402Opts,
 } from "./orchestrate";
+
+// Sidecar topology (Security review C1, wave BC2b): the two-container PAIR launch +
+// reap. launchResourcePair builds + runs a gate-less untrusted HANDLER (no facilitator
+// route/token) then a trusted SIDECAR gate (holding the token + classifier schema),
+// reaching the handler by its inspected IP; Traefik routes to the sidecar
+// (sidecarContainerUrl). reapResourcePair tears down both + the route. The handler env
+// (buildHandlerServiceEnv) carries NO facilitator/token; the sidecar env
+// (buildSidecarServiceEnv) carries them via the trusted spec.
+export {
+  launchResourcePair,
+  reapResourcePair,
+  pairNames,
+  sidecarContainerUrl,
+  buildHandlerServiceEnv,
+  buildSidecarServiceEnv,
+  PAIR_NETWORKS,
+  PAIR_PORT,
+  ROLE_LABEL,
+  ROLE_HANDLER,
+  ROLE_GATE,
+  type LaunchResourcePairOpts,
+  type LaunchResourcePairResult,
+  type BuildHandlerServiceEnvOpts,
+  type BuildSidecarServiceEnvOpts,
+} from "./orchestrate";

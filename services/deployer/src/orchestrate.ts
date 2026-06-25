@@ -23,10 +23,11 @@ import type { Pricing } from "@utter/x402-arc";
 import {
   GvisorRunner,
   buildResourceServiceSpec,
+  buildTrustedServiceSpec,
   type ServiceHandle,
   type RunLimits,
 } from "@utter/sandbox";
-import { bundleEcho } from "./bundle-echo";
+import { bundleEcho, bundleEchoHandler, bundleSidecar } from "./bundle-echo";
 import { buildResourceImage } from "./build";
 import {
   buildTraefikDynamicConfig,
@@ -46,6 +47,14 @@ export const RESOURCE_ID_LABEL = "io.utter.resource-id";
  * reads it to drop the matching Traefik dynamic file. Non-secret operator metadata.
  */
 export const SLUG_LABEL = "io.utter.slug";
+
+/**
+ * The Docker label key carrying a managed container's ROLE in the sidecar topology:
+ * "handler" (the untrusted gate-less container) or "gate" (the trusted sidecar). The
+ * reaper lists by slug and removes every role; this label lets an operator tell the
+ * two apart. Non-secret operator metadata.
+ */
+export const ROLE_LABEL = "io.utter.role";
 
 /**
  * A minimal docker handle the orchestrator needs (the GvisorRunner constructor and
@@ -187,6 +196,147 @@ export function buildEchoServiceEnv(opts: BuildEchoServiceEnvOpts): Record<strin
     PRICE_BASE: opts.pricing.base,
     PRICE_PER_KB: opts.pricing.perKB,
     PRICE_MAX: opts.pricing.computeMultiplier,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar topology (Security review C1, wave BC2b): the two-container PAIR.
+//
+// A deployed resource is now an UNTRUSTED gate-less HANDLER container plus a
+// TRUSTED SIDECAR gate container. The handler holds NO facilitator route and NO
+// caller-auth token (it can never reach the facilitator, forge a strike, or
+// self-settle); the sidecar (only) reaches the facilitator and reverse-proxies
+// validated calls to the handler by the handler's inspected IP. Traefik routes to
+// the SIDECAR. The legacy single-container ECHO_SERVICE path above is kept intact.
+// ---------------------------------------------------------------------------
+
+/** The role label value for the untrusted gate-less handler container. */
+export const ROLE_HANDLER = "handler";
+/** The role label value for the trusted sidecar gate container. */
+export const ROLE_GATE = "gate";
+
+/** The named networks the pair joins (env-overridable; default the BD six-net names).
+ *
+ * The handler joins ONLY proxynet (it talks to nothing but the sidecar's proxy hop);
+ * the sidecar's primary is ingress (Traefik reaches it there) plus controlplane (the
+ * facilitator) and proxynet (the handler). These default names require wave BD's
+ * six-network compose on the host before the live path can run. */
+export const PAIR_NETWORKS = {
+  /** The handler's only network (the sidecar reaches it here by IP). */
+  handler: process.env.HANDLER_NETWORK?.trim() || "proxynet",
+  /** The sidecar's PRIMARY network (Traefik routes to it here). */
+  sidecar: process.env.SIDECAR_NETWORK?.trim() || "ingress",
+  /** The sidecar's EXTRA networks (controlplane for the facilitator, proxynet for the handler). */
+  sidecarExtras: (process.env.SIDECAR_EXTRA_NETWORKS?.trim()
+    ? process.env.SIDECAR_EXTRA_NETWORKS.split(",").map((n) => n.trim()).filter((n) => n.length > 0)
+    : ["controlplane", "proxynet"]),
+} as const;
+
+/** The container listen port both pair containers EXPOSE + serve on (matches the bundles). */
+export const PAIR_PORT = 8080;
+
+/**
+ * Derive the pair's container names from a slug: `utter_res_<slug>-handler` and
+ * `utter_res_<slug>-gate`. Both match SERVICE_NAME_PATTERN (`^utter_res_[a-z0-9-]+$`)
+ * because the slug is validated `[a-z0-9-]` and the suffixes keep it dns-safe.
+ */
+export function pairNames(slug: string): { handlerName: string; sidecarName: string } {
+  const validated = validateSlug(slug);
+  return {
+    handlerName: `utter_res_${validated}-${ROLE_HANDLER}`,
+    sidecarName: `utter_res_${validated}-${ROLE_GATE}`,
+  };
+}
+
+/**
+ * The Traefik loadBalancer target for the pair: the SIDECAR container name on the
+ * sidecar network, port 8080. Traefik runs under runc so Docker DNS resolves the
+ * sidecar by name (only the runsc resource/sidecar containers cannot use DNS). The
+ * route points at the gate, NOT the handler.
+ */
+export function sidecarContainerUrl(slug: string): string {
+  return `http://${pairNames(slug).sidecarName}:${PAIR_PORT}`;
+}
+
+/** Inputs to {@link buildHandlerServiceEnv}. */
+export interface BuildHandlerServiceEnvOpts {
+  /** The resource being served (bytes32 Hex) - the card's payTo. */
+  resourceId: Hex;
+  /** The signed spend cap advertised in the card (USDC base units). */
+  cap: bigint;
+  /** The per-resource metered pricing advertised in the card. */
+  pricing: Pricing;
+  /** Max handler runtime the card advertises (seconds). */
+  maxTimeoutSeconds: number;
+  /** The container listen port. */
+  port: number;
+}
+
+/**
+ * Assemble the GATE-LESS handler container env (handler-main.ts loadHandlerConfig:
+ * RESOURCE_ID, CAP, MAX_TIMEOUT_SECONDS, PRICE_BASE/PRICE_PER_KB/PRICE_MAX, PORT).
+ *
+ * It carries NO FACILITATOR_URL and NO caller-auth token - the untrusted handler must
+ * never see facilitator config or a secret (the sidecar owns the whole payment dance).
+ * Every key here is a SERVICE_ENV_ALLOWLIST member, so the env round-trips cleanly
+ * through buildResourceServiceSpec's secret guard.
+ */
+export function buildHandlerServiceEnv(opts: BuildHandlerServiceEnvOpts): Record<string, string> {
+  return {
+    RESOURCE_ID: opts.resourceId,
+    PORT: String(opts.port),
+    CAP: opts.cap.toString(),
+    MAX_TIMEOUT_SECONDS: String(opts.maxTimeoutSeconds),
+    PRICE_BASE: opts.pricing.base,
+    PRICE_PER_KB: opts.pricing.perKB,
+    PRICE_MAX: opts.pricing.computeMultiplier,
+  };
+}
+
+/** Inputs to {@link buildSidecarServiceEnv}. */
+export interface BuildSidecarServiceEnvOpts {
+  /** The facilitator base URL the sidecar gate POSTs verify/settle/release to. */
+  facilitatorUrl: string;
+  /** The resource being charged (bytes32 Hex) - the escrow payTo. */
+  resourceId: Hex;
+  /** The signed spend cap advertised in the 402 quote (USDC base units). */
+  cap: bigint;
+  /** The per-resource metered pricing (the escrow charge formula terms). */
+  pricing: Pricing;
+  /** Max handler runtime before the gate times out (seconds). */
+  maxTimeoutSeconds: number;
+  /** Where the gate-less handler container listens (the inspected IP:port). */
+  handlerUrl: string;
+  /** The per-resource caller-auth token the gate presents to the facilitator. NEVER logged. */
+  facilitatorToken: string;
+  /** The JSON response schema the gate classifies against (declared-errors stay free). */
+  classifierSchema: string;
+  /** The container listen port. */
+  port: number;
+}
+
+/**
+ * Assemble the TRUSTED sidecar container env (sidecar.ts loadSidecarConfig:
+ * FACILITATOR_URL, RESOURCE_ID, CAP, MAX_TIMEOUT_SECONDS, PRICE_*, HANDLER_URL,
+ * SIDECAR_FACILITATOR_TOKEN, CLASSIFIER_SCHEMA, PORT).
+ *
+ * This env carries the facilitator route + the caller-auth token + the classifier
+ * schema, so it MUST go through buildTrustedServiceSpec (which does NOT run the secret
+ * guard); buildResourceServiceSpec would reject the token. NEVER logs the token.
+ */
+export function buildSidecarServiceEnv(opts: BuildSidecarServiceEnvOpts): Record<string, string> {
+  return {
+    FACILITATOR_URL: opts.facilitatorUrl,
+    RESOURCE_ID: opts.resourceId,
+    PORT: String(opts.port),
+    CAP: opts.cap.toString(),
+    MAX_TIMEOUT_SECONDS: String(opts.maxTimeoutSeconds),
+    PRICE_BASE: opts.pricing.base,
+    PRICE_PER_KB: opts.pricing.perKB,
+    PRICE_MAX: opts.pricing.computeMultiplier,
+    HANDLER_URL: opts.handlerUrl,
+    SIDECAR_FACILITATOR_TOKEN: opts.facilitatorToken,
+    CLASSIFIER_SCHEMA: opts.classifierSchema,
   };
 }
 
@@ -378,6 +528,221 @@ export async function reapEchoContainer(
   }
   // Drop the route so Traefik stops advertising a backend that no longer exists.
   await removeTraefikDynamicFile("echo");
+}
+
+/** Inputs to {@link launchResourcePair}. */
+export interface LaunchResourcePairOpts {
+  /** The resource being charged (bytes32 Hex) - the escrow payTo + the card payTo. */
+  resourceId: Hex;
+  /** The resource slug; derives both container names + the Traefik route key. */
+  slug: string;
+  /** The signed spend cap (USDC base units). */
+  cap: bigint;
+  /** The per-resource metered pricing terms. */
+  pricing: Pricing;
+  /** Max handler runtime before the gate times out (seconds). */
+  maxTimeoutSeconds: number;
+  /** The facilitator base URL the SIDECAR (only) POSTs verify/settle/release to. */
+  facilitatorUrl: string;
+  /** The per-resource caller-auth token the SIDECAR presents to the facilitator. NEVER logged. */
+  facilitatorToken: string;
+  /** The JSON response schema the sidecar classifies against (declared-errors stay free). */
+  classifierSchema: string;
+  /** Override the handler's network (default PAIR_NETWORKS.handler). */
+  handlerNetwork?: string;
+  /** Override the sidecar's PRIMARY network (default PAIR_NETWORKS.sidecar). */
+  sidecarNetwork?: string;
+  /** Override the sidecar's EXTRA networks (default PAIR_NETWORKS.sidecarExtras). */
+  sidecarExtraNetworks?: string[];
+}
+
+/** The result of a pair launch: both handles + both image tags. */
+export interface LaunchResourcePairResult {
+  /** The untrusted gate-less handler handle (stop() to tear down). */
+  handler: ServiceHandle;
+  /** The trusted sidecar gate handle (stop() to tear down). */
+  sidecar: ServiceHandle;
+  /** The image tag the handler runs. */
+  handlerImage: string;
+  /** The image tag the sidecar runs. */
+  sidecarImage: string;
+}
+
+/**
+ * Launch the two-container PAIR (Security review C1): an untrusted gate-less HANDLER
+ * and a trusted SIDECAR gate, derived from one validated slug/resourceId.
+ *
+ * The handler holds NO facilitator route + NO token (buildResourceServiceSpec, the
+ * untrusted secret-guarded path) and joins only the handler network. The sidecar
+ * holds FACILITATOR_URL + the inspected HANDLER_URL + the caller-auth token + the
+ * classifier schema (buildTrustedServiceSpec, which does NOT secret-guard so the
+ * token is allowed) and joins ingress(primary)+controlplane+proxynet. The sidecar
+ * reaches the handler by its inspected IP because the runsc sidecar cannot use Docker
+ * DNS. Traefik routes to the SIDECAR (sidecarContainerUrl).
+ *
+ * It needs a LIVE docker daemon + runsc + wave BD's six-network topology, so it is
+ * NEVER called from an autonomous test (the pure pieces are tested with stubs).
+ *
+ * @throws if either image is not built (a docker handle was provided, so both MUST
+ *         build), the handler's IP cannot be inspected, or a spec is rejected.
+ */
+export async function launchResourcePair(
+  docker: DockerHandle,
+  opts: LaunchResourcePairOpts,
+): Promise<LaunchResourcePairResult> {
+  const { handlerName, sidecarName } = pairNames(opts.slug);
+  const handlerNetwork = opts.handlerNetwork ?? PAIR_NETWORKS.handler;
+  const sidecarNetwork = opts.sidecarNetwork ?? PAIR_NETWORKS.sidecar;
+  const sidecarExtraNetworks = opts.sidecarExtraNetworks ?? [...PAIR_NETWORKS.sidecarExtras];
+
+  const handlerImage = `utter-resource-${validateSlug(opts.slug)}-${ROLE_HANDLER}:latest`;
+  const sidecarImage = `utter-resource-${validateSlug(opts.slug)}-${ROLE_GATE}:latest`;
+  const dockerApi = docker as unknown as Docker;
+
+  // (1) Bundle + build BOTH images. A docker handle was provided, so each build MUST
+  // run; if it does not we cannot serve the pair, so fail loud rather than curling a
+  // dead URL (same guard as launchEchoContainer).
+  const handlerBundle = await bundleEchoHandler({
+    outDir: join(tmpdir(), "utter-handler-bundle"),
+    port: PAIR_PORT,
+  });
+  const handlerBuild = await buildResourceImage(handlerBundle.bundleDir, {
+    runtime: "node",
+    tag: handlerImage,
+    docker: docker as unknown as Docker,
+  });
+  if (!handlerBuild.built) {
+    throw new Error(
+      `launchResourcePair: handler image '${handlerImage}' was not built (a docker handle ` +
+        "was provided, so it must build). Confirm DEPLOY_BASE_IMAGE_NODE is a real digest-pinned base.",
+    );
+  }
+
+  const sidecarBundle = await bundleSidecar({
+    outDir: join(tmpdir(), "utter-sidecar-bundle"),
+    port: PAIR_PORT,
+  });
+  const sidecarBuild = await buildResourceImage(sidecarBundle.bundleDir, {
+    runtime: "node",
+    tag: sidecarImage,
+    docker: docker as unknown as Docker,
+  });
+  if (!sidecarBuild.built) {
+    throw new Error(
+      `launchResourcePair: sidecar image '${sidecarImage}' was not built (a docker handle ` +
+        "was provided, so it must build). Confirm DEPLOY_BASE_IMAGE_NODE is a real digest-pinned base.",
+    );
+  }
+
+  // (2) Idempotency: best-effort force-remove any prior handler AND sidecar so a
+  // redeploy does not collide on the stable names. not-found is swallowed.
+  for (const name of [handlerName, sidecarName]) {
+    try {
+      await dockerApi.getContainer(name).remove({ force: true });
+    } catch {
+      // No prior container (or already gone): nothing to clean up.
+    }
+  }
+
+  // (3) Launch the HANDLER (untrusted) on the handler network. buildResourceServiceSpec
+  // runs the secret guard over the gate-less env; the handler holds NO facilitator
+  // route + NO token, so the env is purely allowlisted discovery config.
+  const handlerSpec = buildResourceServiceSpec({
+    backend: "gvisor",
+    image: handlerImage,
+    limits: ECHO_SERVICE.limits,
+    network: handlerNetwork,
+    env: buildHandlerServiceEnv({
+      resourceId: opts.resourceId,
+      cap: opts.cap,
+      pricing: opts.pricing,
+      maxTimeoutSeconds: opts.maxTimeoutSeconds,
+      port: PAIR_PORT,
+    }),
+    name: handlerName,
+    port: PAIR_PORT,
+    labels: {
+      [RESOURCE_ID_LABEL]: opts.resourceId,
+      [SLUG_LABEL]: opts.slug,
+      [ROLE_LABEL]: ROLE_HANDLER,
+    },
+  });
+  const handler = await new GvisorRunner(docker).startService(handlerSpec);
+
+  // (4) Inspect the handler's IP on its network. The runsc sidecar cannot use Docker
+  // DNS (127.0.0.11), so it must reach the handler by literal IP - the name
+  // `<slug>-handler` would EAI_AGAIN inside the sidecar's sandboxed netns.
+  const inspected = await dockerApi.getContainer(handler.id).inspect();
+  const ip = inspected.NetworkSettings?.Networks?.[handlerNetwork]?.IPAddress?.trim();
+  if (!ip) {
+    throw new Error(
+      `launchResourcePair: could not resolve the handler's IP on network '${handlerNetwork}' ` +
+        `(container ${handlerName}). The sidecar needs the IP because runsc cannot use Docker DNS.`,
+    );
+  }
+  const handlerUrl = `http://${ip}:${PAIR_PORT}`;
+
+  // (5) Launch the SIDECAR (trusted) on ingress(primary)+controlplane+proxynet.
+  // buildTrustedServiceSpec carries the env verbatim (NO secret guard), so the
+  // caller-auth token + classifier schema + facilitator route are accepted.
+  const sidecarSpec = buildTrustedServiceSpec({
+    backend: "gvisor",
+    image: sidecarImage,
+    limits: ECHO_SERVICE.limits,
+    network: sidecarNetwork,
+    extraNetworks: sidecarExtraNetworks,
+    env: buildSidecarServiceEnv({
+      facilitatorUrl: opts.facilitatorUrl,
+      resourceId: opts.resourceId,
+      cap: opts.cap,
+      pricing: opts.pricing,
+      maxTimeoutSeconds: opts.maxTimeoutSeconds,
+      handlerUrl,
+      facilitatorToken: opts.facilitatorToken,
+      classifierSchema: opts.classifierSchema,
+      port: PAIR_PORT,
+    }),
+    name: sidecarName,
+    port: PAIR_PORT,
+    labels: {
+      [RESOURCE_ID_LABEL]: opts.resourceId,
+      [SLUG_LABEL]: opts.slug,
+      [ROLE_LABEL]: ROLE_GATE,
+    },
+  });
+  const sidecar = await new GvisorRunner(docker).startService(sidecarSpec);
+
+  return { handler, sidecar, handlerImage, sidecarImage };
+}
+
+/**
+ * Tear down the two-container PAIR for a slug: list every container labeled with the
+ * slug (both the handler + the gate), force-remove each (a missing container is a
+ * no-op), then drop the Traefik route file. Best-effort: the goal is no live
+ * container and no dangling route. Generalizes reapEchoContainer for the pair; the
+ * legacy reapEchoContainer stays for the single-container path.
+ */
+export async function reapResourcePair(
+  docker: DockerHandle,
+  slug: string,
+): Promise<void> {
+  const validated = validateSlug(slug);
+  const dockerApi = docker as unknown as Docker;
+
+  const infos = await dockerApi.listContainers({
+    all: true,
+    filters: { label: [`${SLUG_LABEL}=${validated}`] },
+  });
+  for (const info of infos) {
+    try {
+      await dockerApi.getContainer(info.Id).remove({ force: true });
+    } catch {
+      // Already gone: nothing to remove.
+    }
+  }
+
+  // Drop the route so Traefik stops advertising a backend that no longer exists.
+  await removeTraefikDynamicFile(validated);
 }
 
 /**
