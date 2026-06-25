@@ -194,3 +194,155 @@ export function createLiveHostProbe(options: LiveProbeOptions): DynamicHostProbe
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Sibling-unreachability probe (quick 260625-mwb, PRX-02): the cross-tenant
+// counterpart to the blocked-host probe. Per-resource pairnet isolation puts each
+// handler on its own internal bridge `utter_pairnet_<slug>`, so a handler must NOT be
+// able to reach a SIBLING handler or a sibling sidecar at L3. This probe runs from a
+// handler and asserts every DISALLOWED sibling IP is unreachable. The only allowed
+// peer is the resource's own data-proxy (the future untrusted-egress path); a sibling
+// handler or sidecar that is reachable is an isolation failure that MUST be surfaced.
+// ---------------------------------------------------------------------------
+
+/** A sibling endpoint the probe classifies as allowed (own data-proxy) or disallowed. */
+export interface SiblingTarget {
+  /** The sibling's role: another tenant's handler/sidecar, or the resource's own data-proxy. */
+  role: "handler" | "sidecar" | "data-proxy";
+  /** The sibling's IP that must (handler/sidecar) or may (data-proxy) be reachable. */
+  ip: string;
+  /** The port to probe. */
+  port: number;
+  /** An optional human label for the reachability report. */
+  reason?: string;
+}
+
+/**
+ * The error thrown when a DISALLOWED sibling (another tenant's handler or sidecar) is
+ * reachable from inside the handler netns - a per-resource isolation failure that MUST
+ * fail the acceptance (PRX-02). Carries the reachable disallowed siblings.
+ */
+export class SiblingUnreachabilityError extends Error {
+  readonly code = "siblingReachable" as const;
+  public readonly reachable: SiblingTarget[];
+
+  constructor(reachable: SiblingTarget[]) {
+    super(
+      "Per-resource isolation FAILED: the following DISALLOWED siblings were reachable " +
+        `from inside the handler netns: ${reachable
+          .map((t) => `${t.role} ${t.ip}:${t.port}`)
+          .join(", ")}. ` +
+        "The per-slug internal pairnet is the SOLE enforcement of handler-sibling isolation; " +
+        "a reachable sibling means the disjoint-bridge segmentation is not holding.",
+    );
+    this.reachable = reachable;
+    this.name = "SiblingUnreachabilityError";
+  }
+}
+
+/**
+ * The sibling-unreachability probe. `assertUnreachable` runs from a handler and
+ * resolves ONLY if every DISALLOWED sibling (handler/sidecar) is unreachable; it
+ * rejects with {@link SiblingUnreachabilityError} if any disallowed sibling is
+ * reachable, or with {@link RequiresProvisionedHostError} if invoked without the host.
+ */
+export interface SiblingProbe {
+  /** True only on the provisioned gVisor host; the stub is always false. */
+  readonly available: boolean;
+  /**
+   * Probe each sibling and assert every DISALLOWED one (role handler/sidecar) is
+   * unreachable. The allowed peer (role "data-proxy") is never required to be blocked.
+   * Operator-gated: requires the provisioned isolation host.
+   */
+  assertUnreachable(spec: RunSpec, siblings: SiblingTarget[]): Promise<void>;
+}
+
+/**
+ * Build the operator-gated sibling-probe stub. It is NEVER available autonomously:
+ * `available` is false and `assertUnreachable` throws `RequiresProvisionedHostError`
+ * so the autonomous suite cannot mistake it for a live isolation pass. The real
+ * implementation is wired against the gVisor backend on the provisioned host.
+ */
+export function createOperatorGatedSiblingProbe(): SiblingProbe {
+  return {
+    available: false,
+    async assertUnreachable(): Promise<void> {
+      throw new RequiresProvisionedHostError();
+    },
+  };
+}
+
+/** Options for {@link createLiveSiblingProbe} (mirrors {@link LiveProbeOptions}). */
+export interface LiveSiblingProbeOptions {
+  /**
+   * The runner to launch the probe container with. MUST be the `gvisor` backend on
+   * the provisioned host - the live probe is meaningless against `docker-dev` (not a
+   * security boundary), so this throws if handed a non-gvisor runner.
+   */
+  runner: SandboxRunner;
+  /** The probe image (defaults to the same convention tag as the blocked-host probe). */
+  probeImage?: string;
+  /**
+   * Connect-attempt seam: returns `true` if the sibling was REACHABLE from inside the
+   * handler container, `false` if the connect was refused/timed out (the isolated-OK
+   * path). The default drives the runner; tests inject a deterministic stub.
+   */
+  connectProbe?: (spec: RunSpec, sibling: SiblingTarget) => Promise<boolean>;
+}
+
+/**
+ * Build the LIVE sibling-unreachability probe (operator-runnable, PRX-02).
+ *
+ * Mirrors {@link createLiveHostProbe}: it is GUARDED so it can never run in the
+ * autonomous suite (the factory throws `RequiresProvisionedHostError` unless handed a
+ * `gvisor` runner). On the provisioned host it launches the probe-tester container
+ * under the supplied gVisor runner and attempts to reach each sibling from inside the
+ * handler netns. `assertUnreachable` probes ONLY the DISALLOWED siblings (role
+ * handler/sidecar); the allowed peer (role "data-proxy") is skipped. If any disallowed
+ * sibling is reachable it throws {@link SiblingUnreachabilityError}; otherwise it
+ * resolves (every cross-tenant sibling is blocked).
+ */
+export function createLiveSiblingProbe(options: LiveSiblingProbeOptions): SiblingProbe {
+  if (options.runner.backend !== "gvisor") {
+    // The live probe is operator-gated: only the gVisor backend on the provisioned
+    // host is a trusted boundary. Refuse anything else so the autonomous suite
+    // (docker-dev / in-memory) can never run it live.
+    throw new RequiresProvisionedHostError();
+  }
+
+  const probeImage = options.probeImage ?? DEFAULT_PROBE_IMAGE;
+  const runner = options.runner;
+
+  // The default connect probe: launch the probe-tester image under the hardened run-
+  // spec, targeting one sibling IP:port, and read the exit code. exit 0 == reachable
+  // (the isolation failure); non-zero == unreachable (the isolated-OK outcome).
+  const connectProbe =
+    options.connectProbe ??
+    (async (spec: RunSpec, sibling: SiblingTarget): Promise<boolean> => {
+      const probeSpec: RunSpec = {
+        ...spec,
+        image: `${probeImage}#${sibling.ip}:${sibling.port}`,
+      };
+      const handle = await runner.run(probeSpec);
+      const exitCode = await handle.wait();
+      return exitCode === 0;
+    });
+
+  return {
+    available: true,
+    async assertUnreachable(spec: RunSpec, siblings: SiblingTarget[]): Promise<void> {
+      // Only DISALLOWED siblings (cross-tenant handler/sidecar) must be unreachable;
+      // the resource's own data-proxy is the explicitly allowed peer and is skipped.
+      const disallowed = siblings.filter((s) => s.role !== "data-proxy");
+
+      const reachable: SiblingTarget[] = [];
+      for (const sibling of disallowed) {
+        const isReachable = await connectProbe(spec, sibling);
+        if (isReachable) reachable.push(sibling);
+      }
+      if (reachable.length > 0) {
+        throw new SiblingUnreachabilityError(reachable);
+      }
+    },
+  };
+}
