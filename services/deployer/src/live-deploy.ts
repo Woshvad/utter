@@ -339,8 +339,16 @@ export async function liveDeployEcho(
   // embedded DNS at 127.0.0.11 (the name `facilitator` would EAI_AGAIN inside the
   // container). The resolved value is a non-secret IP:port, safe to log. The handler
   // never sees this value.
+  //
+  // The six-net topology puts the facilitator on the `controlplane` network (the same
+  // network the sidecar joins as an extra to reach it), so that is the default network
+  // we inspect. `utter_appnet` was the legacy single-container default and is no longer
+  // where the facilitator lives. FACILITATOR_NETWORK overrides the network we inspect;
+  // FACILITATOR_URL overrides the whole resolution.
+  const facilitatorNetwork = process.env.FACILITATOR_NETWORK?.trim() || "controlplane";
   const facilitatorUrl =
-    process.env.FACILITATOR_URL?.trim() || (await resolveFacilitatorUrl(docker));
+    process.env.FACILITATOR_URL?.trim() ||
+    (await resolveFacilitatorUrl(docker, { network: facilitatorNetwork }));
   console.log(`[live-deploy] facilitator resolved to ${facilitatorUrl}`);
 
   // Mint the per-resource caller-auth token the SIDECAR presents to the facilitator
