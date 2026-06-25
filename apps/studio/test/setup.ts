@@ -7,6 +7,36 @@ import { cleanup } from "@testing-library/react";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TextEncoder as NodeTextEncoder, TextDecoder as NodeTextDecoder } from "node:util";
+
+// esbuild asserts at import time (main.js:201) that
+// `new TextEncoder().encode("") instanceof Uint8Array`. Under jsdom this is false,
+// which crashes every test file that transitively imports a route loader. The cause
+// is a realm split between two global constructors: jsdom's TextEncoder produces a
+// Uint8Array from its own realm, and the test-global Uint8Array is from a third
+// realm, so the instanceof check fails. We align both ends to Node's
+// implementations: install Node's TextEncoder and TextDecoder, then point
+// globalThis.Uint8Array at the exact constructor Node's encoder emits (read off a
+// real encode() result rather than assumed) so the invariant holds. This runs at
+// setup-module evaluation, before any test module (and thus esbuild) is imported.
+// configurable and writable mirror the localStorage polyfill below so the swap
+// holds even if jsdom defined these as non-writable.
+const nodeUint8Array = new NodeTextEncoder().encode("").constructor;
+Object.defineProperty(globalThis, "Uint8Array", {
+  configurable: true,
+  writable: true,
+  value: nodeUint8Array,
+});
+Object.defineProperty(globalThis, "TextEncoder", {
+  configurable: true,
+  writable: true,
+  value: NodeTextEncoder,
+});
+Object.defineProperty(globalThis, "TextDecoder", {
+  configurable: true,
+  writable: true,
+  value: NodeTextDecoder,
+});
 
 // Hermetic file-backed API-key store: point STUDIO_API_KEYS_PATH at a UNIQUE path
 // under the OS temp dir so the FileApiKeyStore never writes into the repo (no .data
