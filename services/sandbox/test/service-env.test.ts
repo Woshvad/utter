@@ -22,6 +22,23 @@ describe("buildServiceEnv - allowlist (Layer A)", () => {
     expect(buildServiceEnv(input)).toEqual(input);
   });
 
+  it("accepts the echo's real metered env keys (CAP, MAX_TIMEOUT_SECONDS, PRICE_BASE, PRICE_PER_KB)", () => {
+    // These four are the echo container's required pricing/identity config (main.ts
+    // reads CAP, MAX_TIMEOUT_SECONDS, PRICE_BASE, PRICE_PER_KB). They are short
+    // integer strings: no secret-key-name match, no secret-value shape, under the
+    // entropy min-length - so they pass Layers A + B with no public-constant exemption.
+    const input = {
+      CAP: "10000",
+      MAX_TIMEOUT_SECONDS: "30",
+      PRICE_BASE: "5000",
+      PRICE_PER_KB: "100",
+    };
+    expect(buildServiceEnv(input)).toEqual(input);
+    for (const key of ["CAP", "MAX_TIMEOUT_SECONDS", "PRICE_BASE", "PRICE_PER_KB"]) {
+      expect(SERVICE_ENV_ALLOWLIST).toContain(key);
+    }
+  });
+
   it("rejects a non-allowlisted key", () => {
     expect(() => buildServiceEnv({ DATABASE_URL: "postgres://x" })).toThrow(ServiceEnvViolation);
     try {

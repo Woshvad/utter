@@ -38,6 +38,10 @@ export const SERVICE_ENV_ALLOWLIST = [
   "FACILITATOR_URL", // non-secret control-plane base URL
   "RESOURCE_ID", // on-chain keccak identity (public)
   "PORT", // the service listen port
+  "CAP", // the signed spend cap advertised in the 402 quote (USDC base units, public)
+  "MAX_TIMEOUT_SECONDS", // public handler-runtime deadline (small integer, non-secret)
+  "PRICE_BASE", // public metered pricing term: flat base charge per call (base units)
+  "PRICE_PER_KB", // public metered pricing term: per-KiB size charge (base units)
   "PRICE_AMOUNT", // public pricing term
   "PRICE_ASSET", // public pricing asset (USDC address)
   "PRICE_SCHEME", // public pricing scheme
