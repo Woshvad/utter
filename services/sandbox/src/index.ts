@@ -109,7 +109,13 @@ export {
   ContainmentFailureError,
   createOperatorGatedProbe,
   createLiveHostProbe,
+  SiblingUnreachabilityError,
+  createOperatorGatedSiblingProbe,
+  createLiveSiblingProbe,
   type DynamicHostProbe,
   type ProbeTarget,
   type LiveProbeOptions,
+  type SiblingTarget,
+  type SiblingProbe,
+  type LiveSiblingProbeOptions,
 } from "./prepublish/probe";
