@@ -196,6 +196,22 @@ describe("resolveFacilitatorUrl", () => {
     expect(url).toBe("http://10.0.0.9:9999");
   });
 
+  it("inspects the network passed in opts.network (locks the live-deploy six-net contract)", async () => {
+    let inspected: string | undefined;
+    const docker = stubDocker(
+      {
+        c1: { Name: "utter_facilitator_1", IPv4Address: "172.30.0.7/16" },
+      },
+      (n) => {
+        inspected = n;
+      },
+    );
+
+    const url = await resolveFacilitatorUrl(docker, { network: "controlplane" });
+    expect(url).toBe("http://172.30.0.7:8787");
+    expect(inspected).toBe("controlplane");
+  });
+
   it("throws when no facilitator container is attached to the network", async () => {
     const docker = stubDocker({
       c1: { Name: "utter_traefik_1", IPv4Address: "172.20.0.2/16" },
