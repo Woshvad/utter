@@ -152,6 +152,16 @@ export {
   type BundleEchoResult,
 } from "./bundle-echo";
 
+// Deployer-side per-resource caller-auth token mint (C1): reuse the facilitator's
+// mintResourceAuthToken to mint ONE rid-bound token per deploy for the SIDECAR
+// (never the untrusted handler). Validates the secret (>=32 chars) and defaults to a
+// non-expiring token; never reads process.env, never logs the secret/token.
+export {
+  mintFacilitatorToken,
+  MIN_FACILITATOR_AUTH_SECRET_LENGTH,
+  type MintFacilitatorTokenOpts,
+} from "./facilitator-token";
+
 // Deploy orchestrator (host phase H2): build the echo image, run it as a hardened
 // runsc service on utter_appnet, atomically write the Traefik route, and resolve a
 // real dockerode handle on the provisioned host. launchEchoContainer /

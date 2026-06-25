@@ -51,3 +51,14 @@ export {
   type RouteDebitResult,
   type RouteSettleArgs,
 } from "./batch-route";
+
+// C1 per-resource caller-auth token: mint/verify a small HMAC token bound to a single
+// resourceId so a caller may only act on the resource its token authorizes. The
+// deployer reuses mintResourceAuthToken at deploy time to mint one token per resource
+// and inject it into the SIDECAR (never the untrusted handler). The HMAC lives here;
+// callers never reimplement it.
+export {
+  mintResourceAuthToken,
+  verifyResourceAuthToken,
+  type MintOpts,
+} from "./resource-auth";
