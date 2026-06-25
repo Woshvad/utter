@@ -27,13 +27,7 @@
 import { config as loadEnv } from "dotenv";
 import { webcrypto } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import {
-  keccak256,
-  toHex,
-  type Address,
-  type Hex,
-  type PublicClient,
-} from "viem";
+import { type Address, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   arcTestnet,
@@ -46,6 +40,8 @@ import {
   signDebitAuthorization,
   encodePayment,
   computeValidBefore,
+  ECHO_RESOURCE_LABEL,
+  resourceIdForLabel,
   type Pricing,
   type PaymentPayload,
 } from "@utter/x402-arc";
@@ -58,9 +54,10 @@ import { buildTraefikDynamicConfig } from "./traefik-config";
 // still loaded identically; only the banner is suppressed.
 loadEnv({ path: ".env.local", quiet: true });
 
-/** The deterministic resource id + slug for the live echo deploy. */
-const RESOURCE_LABEL = "utter:echo:live-deploy";
-const RESOURCE_ID: Hex = keccak256(toHex(RESOURCE_LABEL));
+/** The deterministic resource id + slug for the live echo deploy. The id derives
+ * from the shared @utter/x402-arc helper so the register/payTo id, the resource
+ * RESOURCE_ID env, and the studio all agree (single source of truth). */
+const RESOURCE_ID: Hex = resourceIdForLabel(ECHO_RESOURCE_LABEL);
 const SLUG = process.env.DEPLOY_SLUG?.trim() || "echo";
 const MAX_TIMEOUT_SECONDS = Number(process.env.RESOURCE_TIMEOUT_SECONDS ?? "30");
 const SETTLE_BUFFER_SECONDS = Number(process.env.SETTLE_BUFFER_SECONDS ?? "90");

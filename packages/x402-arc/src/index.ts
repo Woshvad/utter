@@ -84,3 +84,7 @@ export {
   type FetchLike,
   type RetrievedResult,
 } from "./idempotency";
+
+// Shared resourceId helper: the single source of truth that maps a canonical
+// label to its on-chain resourceId so the deployer, resource env, and studio agree.
+export { resourceIdForLabel, ECHO_RESOURCE_LABEL } from "./resource-id";
