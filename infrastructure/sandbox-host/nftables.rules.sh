@@ -10,17 +10,38 @@
 # infrastructure/RUNBOOK.md; it is NOT run in the autonomous suite and NOT run on
 # the builder's Docker Desktop box (which is not a security boundary).
 #
-# The ruleset mirrors services/sandbox/src/egress/firewall.ts (buildEgressRuleset
-# + EGRESS_BLOCK_SET): default policy DROP; the ONLY accept is the data-proxy
-# ip:port; every block-set destination (link-local/metadata, RFC1918, host
-# loopback, the Arc RPC, the facilitator) is dropped explicitly AND by the
-# catch-all default policy. The dynamic blocked-host probe (createLiveHostProbe)
-# asserts every one of these is unreachable from inside the container netns
-# (SBX-02/06).
+# SCOPE - WHAT THIS CHAIN ACTUALLY FILTERS (be honest, do not over-claim):
+# The chain below is `type filter hook output`, so it filters the HOST's OWN
+# egress (packets originating from the host network namespace). The untrusted
+# handler container's egress is FORWARDED traffic (it crosses the host as
+# forward-path packets, NOT host-output), so this chain does NOT constrain the
+# handler container. The PRIMARY and SOLE enforcement of handler containment is
+# the six-network internal:true topology (infrastructure/docker-compose.yml +
+# the per-resource pairnet): the handler joins ONLY its internal pairnet, which
+# has no gateway, so it has no route off-host at the Docker layer. These
+# host-output drops are belt-and-braces for the HOST itself, not the container.
+#
+# PROPER FIX / TODO (needs host validation): to make this packet-layer denylist
+# actually filter the CONTAINER's egress, re-scope it to the forward path - the
+# `DOCKER-USER` chain (iptables-nft) or an nftables `type filter hook forward`
+# chain that matches the handler's bridge interface. That rewrite MUST be
+# validated on the provisioned gVisor host against Docker's own nftables
+# integration (Docker installs its own forward/DOCKER-USER rules, and ordering +
+# the bridge `iifname`/`oifname` matchers have to be confirmed live). Do NOT
+# assume the forward-path rewrite works from inspection; it is host-gated.
+#
+# The block-set the chain carries mirrors services/sandbox/src/egress/firewall.ts
+# (buildEgressRuleset + EGRESS_BLOCK_SET): default policy DROP; the ONLY new-flow
+# accept is the data-proxy ip:port; every block-set destination (link-local/
+# metadata, RFC1918, host loopback, the Arc RPC, the facilitator) is dropped
+# explicitly AND by the catch-all default policy. The dynamic blocked-host probe
+# (createLiveHostProbe) asserts every one of these is unreachable from inside the
+# container netns (SBX-02/06) - that probe, not this host-output chain, is the
+# container-side containment assertion.
 #
 # Mechanism: this is the Mechanism B (DOCKER-USER REJECT, defense-in-depth)
 # expression. The primary prod mechanism is the six-network internal:true topology
-# (infrastructure/docker-compose.yml): the handler joins proxynet ONLY (no
+# (infrastructure/docker-compose.yml): the handler joins its pairnet ONLY (no
 # gateway), so its sole reachable peer is the data-proxy and no route to the
 # internet / facilitator / Arc RPC exists at the Docker layer. These explicit
 # drops are the belt-and-braces packet-layer denylist on top of that. This IS the
@@ -62,7 +83,20 @@ table inet utter_egress {
   chain egress {
     type filter hook output priority 0; policy drop;
 
-    # The ONLY allowed egress: the data-proxy ip:port (the single permitted route).
+    # --- HOST SELF-PRESERVATION (MUST come first) ---
+    # ct state established,related accept: keep already-established connections
+    # alive. The operator's inbound SSH session's reply packets are established-
+    # state, so without this the very act of applying this chain on the host would
+    # drop the SSH reply traffic mid-session and LOCK THE OPERATOR OUT (recovered
+    # only via the provider's serial console + `nft delete table inet utter_egress`).
+    ct state established,related accept
+    # oifname "lo" accept: keep host loopback services working - systemd-resolved
+    # DNS at 127.0.0.53, the Docker API socket, and other host-local daemons. New
+    # host-initiated egress to anything but the data-proxy is still dropped: those
+    # are ct state new and fall through to the explicit block-set drops / policy drop.
+    oifname "lo" accept
+
+    # The ONLY allowed NEW egress: the data-proxy ip:port (the single permitted route).
     ip daddr ${DATA_PROXY_IP} tcp dport ${DATA_PROXY_PORT} accept
 
     # --- EGRESS_BLOCK_SET (mirrors services/sandbox/src/egress/firewall.ts) ---
