@@ -35,6 +35,43 @@ function parseRelayerKeys(raw: string | undefined): Hex[] {
     .filter((k) => k.length > 0) as Hex[];
 }
 
+/** The minimum byte length we require of a real FACILITATOR_AUTH_SECRET in production. */
+const MIN_AUTH_SECRET_LENGTH = 32;
+
+/**
+ * Resolve the per-resource caller-auth config from the environment (C1).
+ *
+ * FACILITATOR_AUTH_SECRET lives in .env.local only; it is never hardcoded, never
+ * logged. Fail-closed in production (mirrors the RELAYER_SIGNER_KEYS fail-fast and
+ * the studio SESSION_SECRET fix): when NODE_ENV is "production" the secret MUST be
+ * set, non-blank after trim, AND at least 32 chars, else we THROW at boot - an
+ * open money/control plane in production is the C1 vulnerability. In dev/test an
+ * unset secret leaves auth UNENFORCED (the in-process money path passes through),
+ * so the autonomous suite runs without provisioning a secret.
+ */
+export function resolveAuthConfig(): { authSecret?: string; authEnforced: boolean } {
+  const fromEnv = process.env.FACILITATOR_AUTH_SECRET;
+  const trimmed = (fromEnv ?? "").trim();
+
+  if (process.env.NODE_ENV === "production") {
+    if (trimmed.length < MIN_AUTH_SECRET_LENGTH) {
+      // Fail loud. Do not echo the (missing/short) secret; just tell the operator.
+      throw new Error(
+        "FACILITATOR_AUTH_SECRET must be set to a non-empty value of at least " +
+          `${MIN_AUTH_SECRET_LENGTH} characters in production. Set FACILITATOR_AUTH_SECRET ` +
+          "in the deployment environment (.env.local / secrets manager); per-resource " +
+          "caller auth is never disabled in production.",
+      );
+    }
+    return { authSecret: fromEnv as string, authEnforced: true };
+  }
+
+  // Dev/test: an unset/blank secret leaves auth UNENFORCED (pass-through). When a
+  // secret IS provided locally, enforce it so the enforced path can be exercised.
+  if (trimmed.length === 0) return { authEnforced: false };
+  return { authSecret: fromEnv as string, authEnforced: true };
+}
+
 /** Build the route deps from the environment (fail-fast on missing required env). */
 export function buildDepsFromEnv(): AppDeps {
   const relayerKeys = parseRelayerKeys(process.env.RELAYER_SIGNER_KEYS);
@@ -92,6 +129,10 @@ export function buildDepsFromEnv(): AppDeps {
       ? BigInt(minEconomicalRaw.trim())
       : undefined;
 
+  // C1: per-resource caller auth. Fail-closed in production; pass-through in
+  // dev/test when unset (keeps the in-process money path + suite green).
+  const { authSecret, authEnforced } = resolveAuthConfig();
+
   // Per-resource revenue ledger for the studio dashboard (STU-04). DELIBERATELY the
   // in-memory adapter: revenue aggregation is process-local for this increment, so it
   // resets on restart. A durable pg/redis-backed RevenueLedger (surviving restarts) is
@@ -114,6 +155,8 @@ export function buildDepsFromEnv(): AppDeps {
     perPayerDayCap,
     minEconomicalAmount,
     revenueLedger,
+    authSecret,
+    authEnforced,
   };
 }
 
