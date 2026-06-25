@@ -26,6 +26,7 @@
 // are NEVER logged.
 import { config as loadEnv } from "dotenv";
 import { webcrypto } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { decodeEventLog, type Address, type Hex, type PublicClient } from "viem";
@@ -62,12 +63,14 @@ import {
 import {
   resolveDockerHandle,
   resolveFacilitatorUrl,
-  launchEchoContainer,
+  launchResourcePair,
+  pairNames,
+  sidecarContainerUrl,
   writeTraefikDynamicFile,
   waitForUnpaid402,
-  ECHO_SERVICE,
   type DockerHandle,
 } from "./orchestrate";
+import { mintFacilitatorToken } from "./facilitator-token";
 
 // `quiet: true` keeps dotenv's stdout "injected env" banner off stdout. This module's
 // top-level load fires at IMPORT time, and @utter/deployer is reachable transitively from
@@ -100,6 +103,19 @@ const PRICING: Pricing = {
   computeMultiplier: "200",
   maxResponseBytes: Number(process.env.MAX_RESPONSE_BYTES ?? "1048576"),
 };
+
+/**
+ * The echo response schema the sidecar's classifier compiles (declared-errors stay
+ * free through the gate). Read module-relative (NOT cwd, mirroring orchestrate's
+ * defaultDynamicDir): src/live-deploy.ts -> ../../../packages/x402-arc/examples/echo.
+ * It is non-secret (the public success/declared-error shape), safe to pass into the
+ * sidecar env. Read lazily inside liveDeployEcho so a missing file fails at deploy
+ * time, not at import (the autonomous suite imports this module).
+ */
+const ECHO_OPENAPI_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/x402-arc/examples/echo/openapi.json",
+);
 
 /** The result of the live HTTPS acceptance (returned for the runbook to record). */
 export interface LiveDeployResult {
@@ -176,6 +192,12 @@ export async function liveDeployEcho(
   const domain = requireEnv("DEPLOY_DOMAIN");
   const buyerKey = requireEnv("TEST_BUYER_PRIVATE_KEY") as Hex;
   const rpcUrl = process.env.ARC_RPC_URL; // optional override; chain-default fallback
+
+  // The facilitator caller-auth secret (C1) the sidecar's token is minted from. NEW
+  // required input for the sidecar topology: the trusted sidecar presents a per-
+  // resource Bearer token to the facilitator. A short/blank secret fails fast in
+  // mintFacilitatorToken (>=32 chars). Read here, passed into the mint; NEVER logged.
+  const facilitatorAuthSecret = requireEnv("FACILITATOR_AUTH_SECRET");
 
   // Registration inputs from .env.local ONLY. REGISTRY_ADMIN_PRIVATE_KEY is the
   // registry Ownable owner (register is onlyOwner); PLATFORM_TREASURY is the
@@ -294,48 +316,69 @@ export async function liveDeployEcho(
     );
   }
 
-  // (0c) BUILD + RUN the echo as a hardened runsc service on utter_appnet. This is
-  // the genuine launch the curl needs: without a built + running container the URL
-  // serves nothing. It is HOST-GATED (UTTER_SANDBOX_HOST=1): resolveDockerHandle
-  // returns undefined off-host, so refuse loudly rather than curling a dead URL.
+  // (0c) BUILD + RUN the sidecar+handler PAIR as hardened runsc services. This is
+  // the genuine launch the curl needs: without the running containers the URL serves
+  // nothing. It is HOST-GATED (UTTER_SANDBOX_HOST=1): resolveDockerHandle returns
+  // undefined off-host, so refuse loudly rather than curling a dead URL.
+  //
+  // NOTE: the pair's live path now REQUIRES wave BD's six-network compose to be
+  // applied on the host first - the default proxynet/ingress/controlplane networks
+  // must exist or the launch (and the post-create extra-net attach) fail. Apply BD,
+  // then run this; see infrastructure/RUNBOOK.md.
   const docker: DockerHandle | undefined = resolveDockerHandle();
   if (!docker) {
     throw new Error(
       "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
-        "(it builds + runs the echo container under runsc). See infrastructure/RUNBOOK.md.",
+        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
     );
   }
-  // Resolve the facilitator URL the echo container will POST verify/settle/release
+  // Resolve the facilitator URL the SIDECAR (only) will POST verify/settle/release
   // to. An explicit FACILITATOR_URL env override still wins (a non-default deploy);
   // otherwise we auto-resolve the facilitator's on-network IP. The IP (not the name)
-  // is mandatory because the resource runs under runsc, which cannot use Docker's
+  // is mandatory because the sidecar runs under runsc, which cannot use Docker's
   // embedded DNS at 127.0.0.11 (the name `facilitator` would EAI_AGAIN inside the
-  // container). The resolved value is a non-secret IP:port, safe to log.
+  // container). The resolved value is a non-secret IP:port, safe to log. The handler
+  // never sees this value.
   const facilitatorUrl =
     process.env.FACILITATOR_URL?.trim() || (await resolveFacilitatorUrl(docker));
   console.log(`[live-deploy] facilitator resolved to ${facilitatorUrl}`);
 
-  const launched = await launchEchoContainer(docker, {
-    facilitatorUrl,
+  // Mint the per-resource caller-auth token the SIDECAR presents to the facilitator
+  // (C1). It is bound to RESOURCE_ID; the untrusted handler NEVER receives it. NEVER
+  // logged. The classifier schema is the public echo openapi (declared-errors free).
+  const facilitatorToken = mintFacilitatorToken({
     resourceId: RESOURCE_ID,
+    secret: facilitatorAuthSecret,
+  });
+  const classifierSchema = readFileSync(ECHO_OPENAPI_PATH, "utf8");
+
+  const { handlerName, sidecarName } = pairNames(SLUG);
+  const launched = await launchResourcePair(docker, {
+    resourceId: RESOURCE_ID,
+    slug: SLUG,
     cap,
     pricing: PRICING,
     maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    facilitatorUrl,
+    facilitatorToken,
+    classifierSchema,
   });
   console.log(
-    `[live-deploy] echo container ${ECHO_SERVICE.name} running under runsc on ` +
-      `${ECHO_SERVICE.network} (image ${launched.imageTag})`,
+    `[live-deploy] pair running under runsc: handler ${handlerName} (image ` +
+      `${launched.handlerImage}), sidecar ${sidecarName} (image ${launched.sidecarImage})`,
   );
 
   // (1) WRITE the live Traefik route to disk (atomically) so the file provider
-  // hot-loads a router for Host(<slug>.resources.<domain>) -> the container on
-  // appnet. The wildcard cert is DNS-01-provisioned. The slug.apex host is the URL.
+  // hot-loads a router for Host(<slug>.resources.<domain>) -> the SIDECAR container.
+  // The wildcard cert is DNS-01-provisioned. The slug.apex host is the URL. Traefik
+  // points at the sidecar (not the handler): the 402->200 flows Traefik -> sidecar
+  // -> handler, and the sidecar serves /echo and proxies it to the gate-less handler.
   const apex = `resources.${domain}`;
   const url = `https://${SLUG}.${apex}/echo`;
   const routePath = await writeTraefikDynamicFile({
     slug: SLUG,
     domain,
-    containerUrl: ECHO_SERVICE.containerUrl,
+    containerUrl: sidecarContainerUrl(SLUG),
   });
   console.log(`[live-deploy] deploying echo at ${url} (Traefik route written to ${routePath})`);
 
