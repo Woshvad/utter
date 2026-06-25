@@ -264,6 +264,74 @@ reachable host (the topology or nftables is not enforcing the deny), or the
 
 ---
 
+## Phase 2 known limitations - NOT yet safe for untrusted MULTI-TENANT
+
+The sidecar/handler pair above contains the untrusted handler well enough for a
+SINGLE-TENANT deploy of the trusted echo: the handler holds no facilitator route and
+no caller-auth token, the escrow gate runs only in the sidecar, runsc + the host
+nftables + the per-container cgroup caps all hold, and the live egress probe (PRX-02)
+confirms the handler cannot reach the facilitator, the Arc RPC, the metadata IP, an
+RFC1918 host, or host loopback. Two gaps remain. Read both before arming an UNTRUSTED
+multi-tenant host. The first is the blocker; do not run adversary-controlled
+multi-tenant code until it lands.
+
+### 1. Flat shared proxynet (cross-tenant free compute) - HIGH
+
+Every resource's gate-less HANDLER joins the single shared `proxynet`, and Docker
+inter-container communication (ICC) is on for that bridge. So an adversary's handler
+can reach a SIBLING tenant's gate-less handler at L3 and POST its `/call` directly -
+with NO escrow reservation. The sibling handler has NO auth on `/call` (the whole
+point of the C1 split is that the gate lives only in the sidecar), so this is
+free compute charged against another creator's resource, not merely lateral probing.
+An adversary handler can also laterally probe sibling sidecars on the same bridge.
+
+Why it is currently UNCAUGHT: the host nftables ruleset filters at the host OUTPUT
+hook, which does not see intra-bridge (handler-to-handler) traffic; and the PRX-02
+probe asserts only that off-bridge targets (facilitator, Arc RPC, metadata, RFC1918,
+loopback) are unreachable - it does not test a sibling peer ON proxynet, so a reachable
+sibling passes today.
+
+SAFE for: single-tenant + the trusted echo. There is no sibling to victimize, and the
+handler code is ours and audited. NOT safe for: untrusted multi-tenant.
+
+FIX PATH (the per-resource network segmentation deferred in
+`RESOURCE-DEPLOY-DESIGN.md` open-decision 4 / D6, now sharpened from "lateral probing"
+to "cross-tenant free compute"):
+
+- Give each pair a DEDICATED internal handler-to-sidecar network, `pairnet_<slug>`, so
+  no sibling can address another tenant's handler. The sidecar reaches its own handler
+  on the pair net by inspected IP (as today).
+- Move the SIDECAR OFF the shared `proxynet`. The sidecar only needs `ingress`
+  (Traefik in), `controlplane` (the facilitator), and its own `pairnet_<slug>` (the
+  handler). It does not need the shared `proxynet`.
+- Keep the HANDLER on `proxynet` ONLY for its data-plane egress to the data-proxy at
+  the static `172.30.0.10`, plus its own `pairnet_<slug>` for the sidecar hop.
+- Add a host DOCKER-USER / FORWARD-path nftables rule scoped to `proxynet` that ACCEPTs
+  handler-to-data-proxy (`172.30.0.10`) and DROPs all other intra-`proxynet` traffic,
+  so even on the shared egress bridge a handler cannot reach a sibling.
+- Add a PRX-02 probe TARGET asserting a sibling handler/sidecar IP on `proxynet` is
+  UNREACHABLE, so the acceptance actually covers this gap (today it does not).
+
+This is a tracked follow-up. Do NOT enable untrusted multi-tenant until it lands.
+
+### 2. H4 lifecycle loop not auto-started in the live path - LOW (Phase 3)
+
+`createReconcileLoop`, the runaway reaper, the host concurrency cap, and
+`listResourceContainers` / `reapResourceContainer` are implemented and exported, but
+NO host bootstrap starts them - `services/deployer/src/server.ts` deliberately starts
+no loop. So on the live host today, orphan-reap (T-03-19), runaway quarantine, and the
+global host concurrency cap do NOT run against live pairs.
+
+This is NOT a containment escape: the network topology, the host nftables, the
+per-container cgroup caps (pids/mem/cpu), and the escrow gate all still hold. The
+lifecycle defenses are simply inert until the Phase 3 wiring lands - a small deployer
+daemon that constructs the loop with the pair-aware adapters. Note
+`listResourceContainers` returns BOTH the handler and the sidecar under the same
+`io.utter.resource-id` label, so that wiring MUST be pair-aware (reaping one role must
+account for its sibling).
+
+---
+
 ## After running
 
 Once all three acceptances pass on the provisioned host, update the three
