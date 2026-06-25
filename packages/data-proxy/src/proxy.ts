@@ -31,16 +31,31 @@
 //
 // CR-02 (rebinding): before forwarding we resolve the upstream host and re-check
 // EVERY resolved address against the same block set, then re-validate immediately
-// before connect. Full IP-pinning (connecting to the exact validated socket) needs
-// a custom dispatcher; with the injectable `fetch` seam here we re-validate the
-// resolved address in the tightest possible window before the connect and surface
-// the validated addresses for a production pinning dispatcher (see `validatedIps`).
+// before connect. M7 closes the residual recheck->connect window by PINNING the
+// forward to a validated IP via an undici dispatcher whose connect.lookup returns
+// only that checked address (TLS SNI/Host preserved, so HTTPS still validates).
+// The pin is additive: validation ordering is unchanged; when no pinning transport
+// is available the forward proceeds unpinned (the rechecks still apply).
+//
+// H3 (per-resource allowlist): the egress allowlist is resolved PER-RESOURCE from
+// the token-verified resourceId (mirroring the credential resolver), never from a
+// container-supplied value, so one tenant's allowlist is not every tenant's on a
+// shared proxy. The single global `allowlist` opt is kept (wrapped as a resolver)
+// for dev/back-compat + the trusted echo path.
 import { Hono } from "hono";
 import { normalizeAndCheckHost, resolveAndCheckHost, type DnsLookupAll } from "./allowlist";
 import {
   resolveUpstreamCredential,
   type CredentialResolver,
 } from "./credentials";
+import {
+  globalAllowlistResolver,
+  type AllowlistResolver,
+} from "./allowlist-resolver";
+import {
+  defaultPinningDispatcherFactory,
+  type PinningDispatcherFactory,
+} from "./pin-dispatcher";
 import { verifyResourceToken } from "./token";
 import type { QuotaStore, QuotaBudget } from "./quota";
 
@@ -72,8 +87,23 @@ function envInt(name: string, fallback: number): number {
 export interface DataProxyOpts {
   /** The HS256 secret (DATA_PROXY_TOKEN_SECRET). Stays on the proxy; verifies tokens. */
   tokenSecret: string;
-  /** The per-deployment upstream host allowlist (default-deny). */
+  /**
+   * A SINGLE global upstream host allowlist (default-deny), applied to every
+   * resource. Kept for dev/back-compat + the trusted echo path; internally wrapped
+   * as a resolver that returns this list for all resources. For a multi-tenant
+   * proxy use {@link DataProxyOpts.allowlistResolver} so each resource is checked
+   * against ITS OWN allowlist (H3). When both are given, the resolver wins.
+   */
   allowlist?: readonly string[];
+  /**
+   * H3 per-resource allowlist resolver: given the VERIFIED resourceId (the token
+   * `aud`, never a container-supplied value), return that resource's egress
+   * allowlist. This closes the cross-tenant leak where one tenant's allowlist was
+   * every tenant's. When omitted, the proxy wraps {@link DataProxyOpts.allowlist}
+   * as a resolver (or default-deny when that is also omitted). Resolution mirrors
+   * the per-resource {@link DataProxyOpts.resolveCredential} seam.
+   */
+  allowlistResolver?: AllowlistResolver;
   /** The injectable upstream fetch (default global `fetch`; tests inject a spy). */
   upstreamFetch?: FetchLike;
   /** The server-side credential resolver (default {@link resolveUpstreamCredential}). */
@@ -83,6 +113,17 @@ export interface DataProxyOpts {
    * Node `dns.lookup({all:true})`; tests stub it to simulate a rebinding record.
    */
   dnsLookup?: DnsLookupAll;
+  /**
+   * M7 socket-pinning dispatcher factory. After the resolved-IP SSRF recheck
+   * produces the validated addresses, the proxy asks this factory for a dispatcher
+   * that pins the forward connect to one of those already-validated IPs (closing
+   * the recheck->connect DNS-rebind window). The returned dispatcher is passed as
+   * the `dispatcher` on the forward `fetch`. Defaults to
+   * {@link defaultPinningDispatcherFactory}, which builds a real undici Agent when
+   * undici is available and otherwise returns `undefined` (no pin, today's
+   * behavior). Tests inject a fake factory to assert the pin holds.
+   */
+  pinningDispatcherFactory?: PinningDispatcherFactory;
   /** Max inbound request body bytes (default MAX_REQUEST_BYTES env or 1 MiB). */
   maxRequestBytes?: number;
   /** Max upstream response body bytes (default MAX_RESPONSE_BYTES env or 1 MiB). */
@@ -113,8 +154,16 @@ export function createDataProxy(opts: DataProxyOpts) {
   const upstreamFetch: FetchLike = opts.upstreamFetch ?? (globalThis.fetch as FetchLike);
   const resolveCredential: CredentialResolver =
     opts.resolveCredential ?? resolveUpstreamCredential;
-  const allowlist = opts.allowlist;
+  // H3: resolve the allowlist PER-RESOURCE from the verified resourceId. The
+  // explicit resolver wins; otherwise the single global `allowlist` is wrapped as
+  // a resolver returning it for every resource (dev/back-compat), or default-deny
+  // when neither is supplied. The container NEVER influences which list applies -
+  // the key is the token-verified resourceId.
+  const resolveAllowlist: AllowlistResolver =
+    opts.allowlistResolver ?? globalAllowlistResolver(opts.allowlist);
   const dnsLookup = opts.dnsLookup;
+  const pinningDispatcherFactory: PinningDispatcherFactory =
+    opts.pinningDispatcherFactory ?? defaultPinningDispatcherFactory;
   const maxRequestBytes =
     opts.maxRequestBytes ?? envInt("MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES);
   const maxResponseBytes =
@@ -143,6 +192,14 @@ export function createDataProxy(opts: DataProxyOpts) {
     if (!verifyResourceToken(token, resourceId, opts.tokenSecret)) {
       return c.json({ error: "invalid_resource_token" }, 401);
     }
+
+    // (2.5) H3: resolve THIS resource's egress allowlist from the VERIFIED
+    // resourceId. `verifyResourceToken` already proved the token `aud` equals
+    // `resourceId`, so a token minted for A presenting `x-resource-id: B` was
+    // rejected at step 2 with a 401 and never reaches here - a resource can only
+    // ever obtain its OWN allowlist, never a sibling tenant's (the cross-tenant
+    // leak H3 closes). An empty resolved list is default-deny (no host passes).
+    const allowlist = resolveAllowlist(resourceId);
 
     // (3) Allowlist + SSRF-normalize the requested upstream. ONLY after the token
     // is verified. A non-allowlisted / private / metadata target -> 403, no forward.
@@ -246,27 +303,51 @@ export function createDataProxy(opts: DataProxyOpts) {
     }
 
     // CR-02 (TOCTOU tighten): re-validate the resolved host immediately before the
-    // connect. Full socket-pinning to `resolved.addresses[0]` needs a custom fetch
-    // dispatcher; with the injectable fetch seam we re-check in the tightest window
-    // and surface the validated addresses for a production pinning dispatcher.
+    // connect, then PIN (M7) the forward to one of these validated addresses.
     const recheck = await resolveAndCheckHost(upstreamUrl.hostname, allowlist, dnsLookup);
     if (!recheck.ok) {
       return c.json({ error: "upstream_resolves_to_blocked" }, 403);
     }
+
+    // M7: close the recheck->connect DNS-rebind window by pinning the forward
+    // connection to an already-validated IP. The dispatcher's connect.lookup
+    // returns ONLY a checked address for this host, so the connect cannot be
+    // redirected to a freshly-rebound (blocked) IP. TLS SNI/Host are preserved
+    // (the dispatcher connects by IP but the request URL keeps the hostname), so
+    // HTTPS certificate validation is unchanged. Additive: the validation ordering
+    // above is untouched; the pin only constrains the connect target. When no
+    // pinning transport is available the factory returns undefined and the forward
+    // proceeds unpinned (today's behavior, with the rechecks still in force).
+    const pinDispatcher = await pinningDispatcherFactory(
+      upstreamUrl.hostname,
+      recheck.addresses ?? [],
+    );
 
     // WR-01: bound the egress with a timeout so a slow upstream cannot hold the
     // proxy connection open indefinitely (DoS from inside the sandbox).
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), egressTimeoutSeconds * 1000);
 
+    // The forward init. `dispatcher` is an undici extension Node's global `fetch`
+    // honors; it is omitted entirely when no pin is available so a plain fetch
+    // (or an injected test spy) sees an unchanged init shape. Typed as a loose
+    // record for the optional `dispatcher` key (the lib's RequestInit.dispatcher is
+    // the concrete undici Dispatcher, which this module deliberately does not type
+    // against) and passed through to the fetch seam.
+    const forwardInit: Record<string, unknown> = {
+      method,
+      headers: outHeaders,
+      body,
+      signal: ac.signal,
+    };
+    if (pinDispatcher !== undefined) forwardInit.dispatcher = pinDispatcher;
+
     let upstreamRes: Response;
     try {
-      upstreamRes = await upstreamFetch(upstreamUrl.toString(), {
-        method,
-        headers: outHeaders,
-        body,
-        signal: ac.signal,
-      });
+      upstreamRes = await upstreamFetch(
+        upstreamUrl.toString(),
+        forwardInit as RequestInit,
+      );
     } catch (err) {
       clearTimeout(timer);
       if (err instanceof Error && err.name === "AbortError") {

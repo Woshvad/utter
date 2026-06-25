@@ -38,7 +38,26 @@ export {
   type DnsLookupAll,
 } from "./allowlist";
 
-// The Hono proxy: verify token -> allowlist -> quota -> inject real key server-side -> forward.
+// H3 per-resource egress allowlist resolution (resolved from the verified
+// resourceId, mirroring the credential resolver; the global allowlist is wrapped
+// as a resolver for dev/back-compat).
+export {
+  resolveResourceAllowlist,
+  globalAllowlistResolver,
+  type AllowlistResolver,
+} from "./allowlist-resolver";
+
+// M7 socket-pinning dispatcher seam (pins the forward connect to a validated IP to
+// close the DNS-rebind TOCTOU; TLS SNI/Host preserved). The default factory builds
+// a real undici Agent when undici is available and otherwise returns undefined.
+export {
+  defaultPinningDispatcherFactory,
+  type PinningDispatcherFactory,
+  type PinnedAddress,
+} from "./pin-dispatcher";
+
+// The Hono proxy: verify token -> per-resource allowlist -> quota -> inject real
+// key server-side -> resolved-IP recheck -> socket-pin -> forward.
 export {
   createDataProxy,
   type DataProxyOpts,
