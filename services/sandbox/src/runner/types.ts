@@ -132,6 +132,17 @@ export interface ResourceServiceSpec {
    * default gateway, so reachability is named-peer, NOT internet egress.
    */
   network: string;
+  /**
+   * OPTIONAL ADDITIONAL named internal networks the container joins AFTER the
+   * primary `network`, via a post-create connect (create -> connect each ->
+   * start). Each must be a NAMED internal network - never "host"/"none" - and
+   * never equal to the primary `network` (a duplicate). dockerode can attach only
+   * one network at create, so extras are attached with getNetwork().connect()
+   * BEFORE start so the container boots already on every net. Used for the
+   * sidecar's ingress+controlplane+proxynet membership. Absent leaves the
+   * single-network behavior identical (the primary `network` is unchanged).
+   */
+  extraNetworks?: readonly string[];
   /** Read-only root filesystem. Always true (identical to RunSpec). */
   readonlyRootfs: true;
   /** The only writable mounts: small tmpfs(es) mounted noexec,nosuid. */

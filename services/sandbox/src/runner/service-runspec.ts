@@ -25,6 +25,21 @@ import type { RunBackend, ResourceServiceSpec, ServiceRestartPolicy } from "./ty
 export const SERVICE_NAME_PATTERN = /^utter_res_[a-z0-9-]+$/;
 
 /**
+ * Reject any non-named network: empty, "host" (a forbidden isolation break), or
+ * "none" (defeats a reachable service). Shared by the primary `network` guard and
+ * each `extraNetworks` entry so they validate identically. `field` names the
+ * offending option in the error.
+ */
+function assertNamedNetwork(value: string, field: string): void {
+  if (!value) throw new Error(`buildResourceServiceSpec: ${field} is required`);
+  if (value === "host" || value === "none") {
+    throw new Error(
+      `buildResourceServiceSpec: ${field} must be a named internal network, not '${value}'`,
+    );
+  }
+}
+
+/**
  * The default restart policy: on-failure with a bounded retry cap (security
  * review H4 - NOT unless-stopped). A crashing untrusted handler must not
  * restart-loop forever and burn the host. The cap is a small fixed bound, not a
@@ -50,6 +65,15 @@ export interface BuildResourceServiceSpecOptions {
    * the isolation invariant.
    */
   network: string;
+  /**
+   * Optional ADDITIONAL named internal networks the service joins after the
+   * primary `network` (a post-create connect per extra; see the runner). Each is
+   * validated by the SAME guard the primary uses: non-empty, never "host"/"none",
+   * and never equal to the primary `network` (a duplicate). Used for the sidecar's
+   * ingress(primary)+controlplane+proxynet membership. Absent leaves the
+   * single-network behavior unchanged.
+   */
+  extraNetworks?: string[];
   /** The raw config map (validated + allowlisted by buildServiceEnv). */
   env: Record<string, string>;
   /** The stable container name (must match SERVICE_NAME_PATTERN). */
@@ -96,11 +120,19 @@ export function buildResourceServiceSpec(
 
   // Relaxation guard 1: a named network only. "host" is a forbidden isolation
   // break; "none" defeats the whole point of a reachable service.
-  if (!network) throw new Error("buildResourceServiceSpec: network is required");
-  if (network === "host" || network === "none") {
-    throw new Error(
-      `buildResourceServiceSpec: network must be a named internal network, not '${network}'`,
-    );
+  assertNamedNetwork(network, "network");
+
+  // Relaxation guard 1b: each extra net is validated by the SAME named-network
+  // guard, and must not duplicate the primary. Extras are attached post-create
+  // by the runner (create -> connect each -> start); they are connect-only and
+  // do NOT change the primary NetworkMode.
+  for (const extra of opts.extraNetworks ?? []) {
+    assertNamedNetwork(extra, "extraNetworks");
+    if (extra === network) {
+      throw new Error(
+        `buildResourceServiceSpec: extraNetworks must not duplicate the primary network '${network}'`,
+      );
+    }
   }
 
   // Relaxation guard 3: a stable, namespaced, dns-safe name.
@@ -118,6 +150,10 @@ export function buildResourceServiceSpec(
     image,
     runtime: runtimeFor(backend),
     network,
+    // Extras are connect-only (attached post-create, before start by the runner);
+    // the primary `network` is unchanged. Carried as a readonly copy, omitted when
+    // absent so the single-network spec is isolation-identical.
+    ...(opts.extraNetworks?.length ? { extraNetworks: [...opts.extraNetworks] } : {}),
     readonlyRootfs: true,
     tmpfs: hardenTmpfs(opts.tmpfs ?? DEFAULT_TMPFS),
     capDrop: ["ALL"] as const,
