@@ -408,13 +408,58 @@ describe("buildHandlerServiceEnv / buildSidecarServiceEnv", () => {
 });
 
 /**
- * A minimal dockerode + build stub. It satisfies: buildResourceImage's
- * buildImage/modem.followProgress (so build.built === true), GvisorRunner's
- * createContainer/getNetwork().connect/container.start(), launchResourcePair's
- * getContainer(id).inspect() for the handler IP, and getContainer(name).remove()
- * for idempotency. It records every call so the test can assert the launch flow.
+ * A STATEFUL dockerode + build stub (quick 260625-mwb FIX B). Unlike a static snapshot,
+ * this models a real network registry + container registry that MUTATE as launch/reap
+ * run, so the lifecycle tests assert genuine post-state instead of a pre-configured
+ * final state. It satisfies the full launch + reap surface:
+ *
+ *   - buildImage/modem.followProgress (so buildResourceImage.built === true).
+ *   - createNetwork: registers a network; throws a 409-shaped error if it already
+ *     exists (exercising ensurePairNetwork's idempotency + collision guard).
+ *   - createContainer: registers a container AND attaches it as an endpoint on its
+ *     primary network (HostConfig.NetworkMode); returns { id, start() }.
+ *   - getNetwork(name|id).connect: attaches the container as an endpoint on that extra
+ *     network (the post-create connect GvisorRunner does for each extra net).
+ *   - getNetwork(name|id).inspect: returns the LIVE Containers map + Labels.
+ *   - getNetwork(name|id).remove: throws a 403/in-use-shaped error if the Containers
+ *     map is non-empty, else deletes the network from the registry.
+ *   - getContainer(id|name).inspect: returns the container's per-network IP for the
+ *     handler-IP read (and a benign NetworkSettings for a name miss).
+ *   - getContainer(id|name).remove: removes the container AND detaches it from EVERY
+ *     network's Containers map (so the network endpoint count drops, exactly as Docker
+ *     does on a force-remove).
+ *   - listNetworks / listContainers: reflect the live registry with label filtering.
+ *
+ * Records every call so the existing launch-flow assertions keep working, and exposes
+ * the live `networks` / `containers` registries so lifecycle tests can assert post-state.
+ *
+ * @param handlerIp the IP the handler reports on its primary network (empty -> unresolved).
+ * @param opts.seedNetworks pre-existing networks (name -> labels) to model a redeploy or
+ *        a slug-collision (a pairnet already owned by another resource).
  */
-function makePairStub(handlerIp: string, opts: { createNetworkThrows409?: boolean } = {}) {
+function makePairStub(
+  handlerIp: string,
+  opts: { seedNetworks?: Record<string, Record<string, string>> } = {},
+) {
+  interface NetEntry {
+    id: string;
+    Labels: Record<string, string>;
+    Containers: Record<string, unknown>; // endpoint id -> {} (the live attachment set)
+  }
+  interface ContainerEntry {
+    id: string;
+    name: string;
+    primaryNetwork: string;
+    Labels: Record<string, string>;
+    networks: Set<string>; // every network name this container is attached to
+  }
+
+  const networks: Record<string, NetEntry> = {};
+  for (const [name, labels] of Object.entries(opts.seedNetworks ?? {})) {
+    networks[name] = { id: `net-${name}`, Labels: { ...labels }, Containers: {} };
+  }
+  const containers: Record<string, ContainerEntry> = {};
+
   const calls = {
     builtTags: [] as string[],
     createOrder: [] as Array<Docker.ContainerCreateOptions>,
@@ -422,16 +467,36 @@ function makePairStub(handlerIp: string, opts: { createNetworkThrows409?: boolea
     inspectedIds: [] as string[],
     removed: [] as string[],
     createdNetworks: [] as Array<{ Name: string; Internal?: boolean; Labels?: Record<string, string> }>,
+    removedNetworks: [] as string[],
+    // Every getNetwork().remove() ATTEMPT (recorded BEFORE the in-use 403 check), so a
+    // test can prove the reap never even tried to remove a pairnet that still had an
+    // endpoint (catches a reverted FIX A / a premature remove that the daemon's 403
+    // would otherwise silently absorb).
+    attemptedNetworkRemoves: [] as string[],
+    inspectedNetworks: [] as string[],
     // A single ordered event log so a test can assert createNetwork precedes the
     // handler container create (the FATAL ordering requirement).
     order: [] as string[],
   };
-  // Each createContainer mints a distinct id from its name so inspect can key off it.
   let createIdx = 0;
-  // The handler joins its per-slug pairnet now (not proxynet); inspect must report the
-  // IP under whatever network the handler was created on. We read the NetworkMode of
-  // the FIRST created container so the inspect mirrors the real handler network.
-  let handlerNetworkMode = "";
+
+  // Resolve a network entry by name OR by id (listNetworks hands back ids).
+  function findNet(idOrName: string): { name: string; entry: NetEntry } | undefined {
+    if (networks[idOrName]) return { name: idOrName, entry: networks[idOrName]! };
+    for (const [name, entry] of Object.entries(networks)) {
+      if (entry.id === idOrName) return { name, entry };
+    }
+    return undefined;
+  }
+
+  // Attach a container endpoint to a network's live Containers map (createContainer +
+  // connect both route here so the endpoint count is always the source of truth).
+  function attach(netName: string, containerId: string) {
+    const entry = networks[netName];
+    if (!entry) return; // attaching to an unknown/dev-override net: ignored in the model.
+    entry.Containers[containerId] = {};
+    containers[containerId]?.networks.add(netName);
+  }
 
   const docker = {
     // --- build path (buildResourceImage) ---
@@ -452,28 +517,93 @@ function makePairStub(handlerIp: string, opts: { createNetworkThrows409?: boolea
     // --- network path (ensurePairNetwork) ---
     async createNetwork(spec: { Name: string; Internal?: boolean; Labels?: Record<string, string> }) {
       calls.order.push(`createNetwork:${spec.Name}`);
-      if (opts.createNetworkThrows409) {
+      if (networks[spec.Name]) {
+        // Already exists: 409, exactly as the daemon does (drives the idempotency +
+        // collision guard, which then inspect()s the existing net's Labels).
         const err = new Error("network with name already exists") as Error & { statusCode?: number };
         err.statusCode = 409;
         throw err;
       }
       calls.createdNetworks.push(spec);
-      return { id: `net-${spec.Name}` } as unknown;
+      networks[spec.Name] = {
+        id: `net-${spec.Name}`,
+        Labels: { ...(spec.Labels ?? {}) },
+        Containers: {},
+      };
+      return { id: networks[spec.Name]!.id } as unknown;
+    },
+    async listNetworks(listOpts: { filters: { label: string[] } }) {
+      const want = listOpts.filters.label[0] ?? "";
+      return Object.values(networks)
+        .filter((e) => {
+          const kind = e.Labels[PAIRNET_KIND_LABEL];
+          return want === `${PAIRNET_KIND_LABEL}=${kind}`;
+        })
+        .map((e) => ({ Id: e.id }));
+    },
+    async listContainers(listOpts: { filters: { label: string[] } }) {
+      const label = listOpts.filters.label[0] ?? "";
+      const eq = label.indexOf("=");
+      const key = eq >= 0 ? label.slice(0, eq) : label;
+      const val = eq >= 0 ? label.slice(eq + 1) : undefined;
+      return Object.values(containers)
+        .filter((c) => (val === undefined ? c.Labels[key] !== undefined : c.Labels[key] === val))
+        .map((c) => ({ Id: c.id, Labels: c.Labels, State: "running" }));
     },
     // --- runner path (GvisorRunner.startService) ---
     async createContainer(createOpts: Docker.ContainerCreateOptions) {
       calls.createOrder.push(createOpts);
       calls.order.push(`createContainer:${createOpts.name}`);
-      if (createIdx === 0) {
-        handlerNetworkMode = (createOpts.HostConfig?.NetworkMode as string) ?? "";
-      }
       const id = `cid-${createIdx++}-${createOpts.name}`;
+      const primaryNetwork = (createOpts.HostConfig?.NetworkMode as string) ?? "";
+      containers[id] = {
+        id,
+        name: createOpts.name ?? id,
+        primaryNetwork,
+        Labels: { ...((createOpts.Labels as Record<string, string>) ?? {}) },
+        networks: new Set<string>(),
+      };
+      // Attach as an endpoint on the primary network (mirrors a Docker create with a
+      // NetworkMode: the container boots already attached there).
+      attach(primaryNetwork, id);
       return { id, async start() {} } as unknown as Docker.Container;
     },
-    getNetwork(network: string) {
+    getNetwork(idOrName: string) {
       return {
         async connect({ Container }: { Container: string }) {
-          calls.connects.push({ network, container: Container });
+          calls.connects.push({ network: idOrName, container: Container });
+          const found = findNet(idOrName);
+          if (found) attach(found.name, Container);
+        },
+        async inspect() {
+          calls.inspectedNetworks.push(idOrName);
+          const found = findNet(idOrName);
+          if (!found) {
+            const err = new Error("network not found") as Error & { statusCode?: number };
+            err.statusCode = 404;
+            throw err;
+          }
+          return { Labels: found.entry.Labels, Containers: { ...found.entry.Containers } };
+        },
+        async remove() {
+          const found = findNet(idOrName);
+          if (!found) {
+            const err = new Error("network not found") as Error & { statusCode?: number };
+            err.statusCode = 404;
+            throw err;
+          }
+          calls.attemptedNetworkRemoves.push(found.name);
+          if (Object.keys(found.entry.Containers).length > 0) {
+            // In-use: the daemon refuses with a 403 (this is the leak-guard the reap
+            // paths MUST respect - they inspect first and never force this).
+            const err = new Error(
+              `network ${found.name} has active endpoints`,
+            ) as Error & { statusCode?: number };
+            err.statusCode = 403;
+            throw err;
+          }
+          calls.removedNetworks.push(found.name);
+          delete networks[found.name];
         },
       };
     },
@@ -481,15 +611,24 @@ function makePairStub(handlerIp: string, opts: { createNetworkThrows409?: boolea
       return {
         async remove() {
           calls.removed.push(idOrName);
+          const entry = containers[idOrName];
+          if (!entry) return; // name-keyed idempotency remove for a non-existent container.
+          // Detach from EVERY network's live Containers map (a force-remove drops every
+          // endpoint), then delete the container.
+          for (const netName of entry.networks) {
+            const n = networks[netName];
+            if (n) delete n.Containers[entry.id];
+          }
+          delete containers[idOrName];
         },
         async inspect() {
           calls.inspectedIds.push(idOrName);
+          const entry = containers[idOrName];
+          const net = entry?.primaryNetwork || "proxynet";
           return {
             NetworkSettings: {
               Networks: {
-                // Report the handler IP under the network it was actually created on
-                // (the per-slug pairnet by default), so the IP read keys off it.
-                [handlerNetworkMode || "proxynet"]: { IPAddress: handlerIp },
+                [net]: { IPAddress: handlerIp },
               },
             },
           };
@@ -498,7 +637,7 @@ function makePairStub(handlerIp: string, opts: { createNetworkThrows409?: boolea
     },
   };
 
-  return { docker: docker as unknown as DockerHandle, calls };
+  return { docker: docker as unknown as DockerHandle, calls, networks, containers };
 }
 
 describe("launchResourcePair", () => {
@@ -545,6 +684,10 @@ describe("launchResourcePair", () => {
     expect(createdPairnet).toBeDefined();
     expect(createdPairnet!.Internal).toBe(true);
     expect(createdPairnet!.Labels?.[PAIRNET_KIND_LABEL]).toBe(PAIRNET_KIND);
+    // FIX C: the pairnet is stamped with its owning resourceId so a slug-collision
+    // (a different resource reusing this slug) can be caught and refused.
+    expect(createdPairnet!.Labels?.[RESOURCE_ID_LABEL]).toBe(RESOURCE_ID);
+    expect(createdPairnet!.Labels?.[SLUG_LABEL]).toBe("echo");
     const netIdx = calls.order.indexOf(`createNetwork:${pairnet}`);
     const handlerIdx = calls.order.indexOf("createContainer:utter_res_echo-handler");
     expect(netIdx).toBeGreaterThanOrEqual(0);
@@ -598,8 +741,17 @@ describe("launchResourcePair", () => {
     });
   });
 
-  it("succeeds idempotently when the pairnet already exists (createNetwork 409)", async () => {
-    const { docker, calls } = makePairStub("172.30.0.9", { createNetworkThrows409: true });
+  it("succeeds idempotently when the SAME-owner pairnet already exists (createNetwork 409)", async () => {
+    // A prior deploy of THIS resource already minted the pairnet (same resourceId owner).
+    const { docker, calls } = makePairStub("172.30.0.9", {
+      seedNetworks: {
+        [pairnetName("echo")]: {
+          [PAIRNET_KIND_LABEL]: PAIRNET_KIND,
+          [SLUG_LABEL]: "echo",
+          [RESOURCE_ID_LABEL]: RESOURCE_ID,
+        },
+      },
+    });
 
     const result = await launchResourcePair(docker, {
       resourceId: RESOURCE_ID,
@@ -612,14 +764,78 @@ describe("launchResourcePair", () => {
       classifierSchema: CLASSIFIER_SCHEMA,
     });
 
-    // The 409 was swallowed (treated as success) and the pair still launched on the
-    // (pre-existing) pairnet: both containers were created.
+    // The 409 was swallowed (same owner -> idempotent redeploy) and the pair still
+    // launched on the pre-existing pairnet: both containers were created.
     expect(calls.order).toContain(`createNetwork:${pairnetName("echo")}`);
     expect(calls.createOrder.map((c) => c.name)).toEqual([
       "utter_res_echo-handler",
       "utter_res_echo-gate",
     ]);
     expect(result.handlerImage).toBe("utter-resource-echo-handler:latest");
+  });
+
+  it("THROWS on a slug-collision: an existing pairnet owned by a DIFFERENT resource (FIX C)", async () => {
+    // The pairnet for this slug already exists but is owned by ANOTHER resourceId. Co-
+    // tenanting would share the internal pairnet across two resources -> the cross-tenant
+    // free-compute HIGH. ensurePairNetwork must FAIL LOUD rather than adopt it.
+    const otherResource =
+      "0x1111111111111111111111111111111111111111111111111111111111111111" as Hex;
+    const { docker, calls } = makePairStub("172.30.0.9", {
+      seedNetworks: {
+        [pairnetName("echo")]: {
+          [PAIRNET_KIND_LABEL]: PAIRNET_KIND,
+          [SLUG_LABEL]: "echo",
+          [RESOURCE_ID_LABEL]: otherResource,
+        },
+      },
+    });
+
+    await expect(
+      launchResourcePair(docker, {
+        resourceId: RESOURCE_ID, // different from the existing owner
+        slug: "echo",
+        cap: 10_000n,
+        pricing: PRICING,
+        maxTimeoutSeconds: 30,
+        facilitatorUrl: "http://172.20.0.5:8787",
+        facilitatorToken: FACILITATOR_TOKEN,
+        classifierSchema: CLASSIFIER_SCHEMA,
+      }),
+    ).rejects.toThrow(/already owned by a different resource/);
+
+    // It refused BEFORE creating any pair container (fail loud, no co-tenant launch).
+    expect(calls.createOrder).toEqual([]);
+  });
+
+  it("adopts an UNLABELED legacy pairnet (no resource-id label) without throwing", async () => {
+    // A pairnet created before the FIX C ownership label exists: ensurePairNetwork must
+    // adopt it (proceed), not throw, so an in-place upgrade does not break a redeploy.
+    const { docker, calls } = makePairStub("172.30.0.9", {
+      seedNetworks: {
+        [pairnetName("echo")]: {
+          [PAIRNET_KIND_LABEL]: PAIRNET_KIND,
+          [SLUG_LABEL]: "echo",
+          // no RESOURCE_ID_LABEL
+        },
+      },
+    });
+
+    const result = await launchResourcePair(docker, {
+      resourceId: RESOURCE_ID,
+      slug: "echo",
+      cap: 10_000n,
+      pricing: PRICING,
+      maxTimeoutSeconds: 30,
+      facilitatorUrl: "http://172.20.0.5:8787",
+      facilitatorToken: FACILITATOR_TOKEN,
+      classifierSchema: CLASSIFIER_SCHEMA,
+    });
+
+    expect(result.handlerImage).toBe("utter-resource-echo-handler:latest");
+    expect(calls.createOrder.map((c) => c.name)).toEqual([
+      "utter_res_echo-handler",
+      "utter_res_echo-gate",
+    ]);
   });
 
   it("throws when the handler IP cannot be inspected", async () => {
@@ -641,180 +857,184 @@ describe("launchResourcePair", () => {
 });
 
 /**
- * A docker stub modelling a tiny NETWORK registry + a per-slug CONTAINER list, so the
- * pairnet teardown lifecycle (remove-on-last, not-while-sibling, orphan GC, idempotent
- * 404) can be asserted autonomously. `networks` is keyed by name; each entry tracks its
- * attached container count + a labels map. `containersBySlug` is the listContainers
- * result the reaper reads back. Records every remove for assertions.
+ * Drive a real pair launch through the STATEFUL stub for a slug, returning the launch
+ * result. After this resolves the stub's `networks`/`containers` registries hold the
+ * live pairnet (with both endpoints attached) and both containers, so the lifecycle
+ * tests below assert genuine post-state (not a pre-configured snapshot).
  */
-function makeLifecycleStub(init: {
-  networks?: Record<string, { attached: number; labels?: Record<string, string>; id?: string }>;
-  containersBySlug?: Record<string, Array<{ Id: string }>>;
-}) {
-  const networks: Record<string, { attached: number; labels?: Record<string, string>; id: string }> = {};
-  for (const [name, n] of Object.entries(init.networks ?? {})) {
-    networks[name] = { attached: n.attached, labels: n.labels, id: n.id ?? `net-${name}` };
-  }
-  const containersBySlug = init.containersBySlug ?? {};
-  const calls = {
-    removedContainers: [] as string[],
-    removedNetworks: [] as string[],
-    inspectedNetworks: [] as string[],
-  };
-
-  // Resolve a network entry by name OR by id (listNetworks hands back ids).
-  function findNet(idOrName: string) {
-    if (networks[idOrName]) return { name: idOrName, entry: networks[idOrName] };
-    for (const [name, entry] of Object.entries(networks)) {
-      if (entry.id === idOrName) return { name, entry };
-    }
-    return undefined;
-  }
-
-  const docker = {
-    async listContainers(opts: { filters: { label: string[] } }) {
-      // The only label filter the reaper uses is `${SLUG_LABEL}=<slug>`.
-      const label = opts.filters.label[0] ?? "";
-      const slug = label.startsWith(`${SLUG_LABEL}=`) ? label.slice(`${SLUG_LABEL}=`.length) : "";
-      return (containersBySlug[slug] ?? []) as Array<{ Id: string }>;
-    },
-    async listNetworks(opts: { filters: { label: string[] } }) {
-      const want = opts.filters.label[0] ?? "";
-      return Object.entries(networks)
-        .filter(([, e]) => {
-          const kind = e.labels?.[PAIRNET_KIND_LABEL];
-          return want === `${PAIRNET_KIND_LABEL}=${kind}`;
-        })
-        .map(([, e]) => ({ Id: e.id }));
-    },
-    getContainer(id: string) {
-      return {
-        async remove() {
-          calls.removedContainers.push(id);
-        },
-      };
-    },
-    getNetwork(idOrName: string) {
-      return {
-        async inspect() {
-          calls.inspectedNetworks.push(idOrName);
-          const found = findNet(idOrName);
-          if (!found) {
-            const err = new Error("network not found") as Error & { statusCode?: number };
-            err.statusCode = 404;
-            throw err;
-          }
-          const containers: Record<string, unknown> = {};
-          for (let i = 0; i < found.entry.attached; i += 1) containers[`c${i}`] = {};
-          return { Containers: containers };
-        },
-        async remove() {
-          const found = findNet(idOrName);
-          if (!found) {
-            const err = new Error("network not found") as Error & { statusCode?: number };
-            err.statusCode = 404;
-            throw err;
-          }
-          calls.removedNetworks.push(found.name);
-          delete networks[found.name];
-        },
-      };
-    },
-  } as unknown as DockerHandle;
-
-  return { docker, calls, networks };
+async function launchInto(
+  stub: ReturnType<typeof makePairStub>,
+  slug: string,
+  resourceId: Hex = RESOURCE_ID,
+) {
+  return launchResourcePair(stub.docker, {
+    resourceId,
+    slug,
+    cap: 10_000n,
+    pricing: PRICING,
+    maxTimeoutSeconds: 30,
+    facilitatorUrl: "http://172.20.0.5:8787",
+    facilitatorToken: FACILITATOR_TOKEN,
+    classifierSchema: CLASSIFIER_SCHEMA,
+  });
 }
 
-describe("reapResourcePair", () => {
-  it("force-removes every container labeled with the slug + the route + the pairnet", async () => {
-    const pairnet = pairnetName("echo");
-    const { docker, calls } = makeLifecycleStub({
-      // After the containers are reaped the pairnet is endpoint-less (attached 0).
-      networks: { [pairnet]: { attached: 0, labels: { [PAIRNET_KIND_LABEL]: PAIRNET_KIND } } },
-      containersBySlug: { echo: [{ Id: "cid-handler" }, { Id: "cid-gate" }] },
-    });
-
-    // reapResourcePair uses the module's default dynamic dir for the route removal
-    // (a no-op ENOENT when absent); here we assert the container teardown (force-remove
-    // EVERY labeled container) + that the per-resource pairnet is removed after them.
-    await reapResourcePair(docker, "echo");
-
-    expect(calls.removedContainers).toEqual(["cid-handler", "cid-gate"]);
-    expect(calls.removedNetworks).toEqual([pairnet]);
-  });
-});
-
-describe("reapResourceContainer - pairnet teardown (the reconcile seam, the FATAL fix)", () => {
-  function actual(id: string, slug: string): ActualContainer {
-    return { id, resourceId: RESOURCE_ID, running: true, slug };
+describe("pairnet lifecycle - STATEFUL stub (FIX B: post-state, not snapshots)", () => {
+  function actual(stub: ReturnType<typeof makePairStub>, name: string, slug: string): ActualContainer {
+    // Resolve the live container id by its name so reapResourceContainer removes the
+    // actual endpoint (the stateful stub keys containers by minted id, named by suffix).
+    const entry = Object.values(stub.containers).find((c) => c.name === name);
+    if (!entry) throw new Error(`launch produced no container named ${name}`);
+    return { id: entry.id, resourceId: RESOURCE_ID, running: true, slug };
   }
 
-  it("does NOT remove the pairnet while a sibling slug-container remains", async () => {
+  it("creates the internal pairnet BEFORE the handler container (ordering)", async () => {
+    const stub = makePairStub("172.30.0.9");
+    await launchInto(stub, "echo");
+
     const pairnet = pairnetName("echo");
-    const { docker, calls } = makeLifecycleStub({
-      networks: { [pairnet]: { attached: 1, labels: { [PAIRNET_KIND_LABEL]: PAIRNET_KIND } } },
-      // After removing the handler, the gate is STILL present (sibling remains).
-      containersBySlug: { echo: [{ Id: "cid-0-utter_res_echo-handler" }, { Id: "cid-1-utter_res_echo-gate" }] },
-    });
-
-    await reapResourceContainer(docker, actual("cid-0-utter_res_echo-handler", "echo"));
-
-    // The handler container was force-removed, but the pairnet was NOT touched (the
-    // gate sibling still holds it).
-    expect(calls.removedContainers).toContain("cid-0-utter_res_echo-handler");
-    expect(calls.removedNetworks).toEqual([]);
+    const netIdx = stub.calls.order.indexOf(`createNetwork:${pairnet}`);
+    const handlerIdx = stub.calls.order.indexOf("createContainer:utter_res_echo-handler");
+    expect(netIdx).toBeGreaterThanOrEqual(0);
+    expect(handlerIdx).toBeGreaterThan(netIdx);
+    // Post-state: the pairnet exists with BOTH endpoints (handler primary + sidecar extra).
+    expect(Object.keys(stub.networks[pairnet]!.Containers)).toHaveLength(2);
   });
 
-  it("removes the pairnet exactly once when the LAST slug-container is reaped", async () => {
+  it("reapResourcePair force-removes both containers + the route + the now-empty pairnet", async () => {
+    const stub = makePairStub("172.30.0.9");
+    await launchInto(stub, "echo");
     const pairnet = pairnetName("echo");
-    const { docker, calls } = makeLifecycleStub({
-      // The pairnet has no endpoints left once the last container is gone.
-      networks: { [pairnet]: { attached: 0, labels: { [PAIRNET_KIND_LABEL]: PAIRNET_KIND } } },
-      // The list (after this container is removed) reports ONLY this id, so excluding it
-      // leaves zero -> this is the last container.
-      containersBySlug: { echo: [{ Id: "cid-1-utter_res_echo-gate" }] },
-    });
 
-    await reapResourceContainer(docker, actual("cid-1-utter_res_echo-gate", "echo"));
+    await reapResourcePair(stub.docker, "echo");
 
-    expect(calls.removedContainers).toContain("cid-1-utter_res_echo-gate");
-    expect(calls.removedNetworks).toEqual([pairnet]);
+    // Post-state: both containers gone, the pairnet removed exactly once (it was empty
+    // after both endpoints detached).
+    expect(Object.keys(stub.containers)).toHaveLength(0);
+    expect(stub.networks[pairnet]).toBeUndefined();
+    expect(stub.calls.removedNetworks).toEqual([pairnet]);
   });
 
-  it("swallows a 404 when the pairnet is already gone (idempotent)", async () => {
-    // No network in the registry: inspect/remove both 404. The reap must not throw.
-    const { docker, calls } = makeLifecycleStub({
-      networks: {},
-      containersBySlug: { echo: [{ Id: "cid-1-utter_res_echo-gate" }] },
-    });
+  it("reap ONE of two: the pairnet STILL EXISTS (the sidecar endpoint remains)", async () => {
+    const stub = makePairStub("172.30.0.9");
+    await launchInto(stub, "echo");
+    const pairnet = pairnetName("echo");
 
-    await expect(
-      reapResourceContainer(docker, actual("cid-1-utter_res_echo-gate", "echo")),
-    ).resolves.toBeUndefined();
-    expect(calls.removedNetworks).toEqual([]);
+    // Reap the HANDLER only. removePairNetwork must decline (the gate endpoint remains).
+    await reapResourceContainer(stub.docker, actual(stub, "utter_res_echo-handler", "echo"));
+
+    expect(stub.networks[pairnet]).toBeDefined();
+    // One endpoint (the sidecar) is still attached -> not removed.
+    expect(Object.keys(stub.networks[pairnet]!.Containers)).toHaveLength(1);
+    expect(stub.calls.removedNetworks).toEqual([]);
+    // CRITICAL (catches a reverted FIX A / a premature removal): removePairNetwork must
+    // gate off the network's OWN endpoint list and NOT EVEN ATTEMPT net.remove() while
+    // the sidecar endpoint is attached. If FIX A is reverted (or the in-use guard in
+    // removePairNetwork is dropped) this attempt fires and the assertion fails - the
+    // daemon's 403 would otherwise silently absorb a premature remove.
+    expect(stub.calls.attemptedNetworkRemoves).toEqual([]);
   });
-});
 
-describe("reapOrphanPairNetworks - the orphan-network GC sweep", () => {
-  it("removes a labeled endpoint-less pairnet and SKIPS one with an attached container", async () => {
-    const orphan = pairnetName("orphan");
-    const live = pairnetName("live");
-    const { docker, calls } = makeLifecycleStub({
-      networks: {
-        [orphan]: { attached: 0, labels: { [PAIRNET_KIND_LABEL]: PAIRNET_KIND } },
-        [live]: { attached: 2, labels: { [PAIRNET_KIND_LABEL]: PAIRNET_KIND } },
+  it("reap LAST: the pairnet is GONE after the sidecar is reaped (removed exactly once)", async () => {
+    const stub = makePairStub("172.30.0.9");
+    await launchInto(stub, "echo");
+    const pairnet = pairnetName("echo");
+
+    await reapResourceContainer(stub.docker, actual(stub, "utter_res_echo-handler", "echo"));
+    expect(stub.networks[pairnet]).toBeDefined(); // still up after the first reap.
+
+    await reapResourceContainer(stub.docker, actual(stub, "utter_res_echo-gate", "echo"));
+
+    // The last endpoint detached -> the pairnet is removed exactly once. The remove was
+    // attempted exactly once (on the LAST reap), never on the first.
+    expect(stub.networks[pairnet]).toBeUndefined();
+    expect(stub.calls.removedNetworks).toEqual([pairnet]);
+    expect(stub.calls.attemptedNetworkRemoves).toEqual([pairnet]);
+  });
+
+  it("redeploy E2E: launch -> reap both -> launch again same slug -> clean pairnet + success", async () => {
+    const stub = makePairStub("172.30.0.9");
+    const pairnet = pairnetName("echo");
+
+    // First deploy.
+    await launchInto(stub, "echo");
+    // Tear the WHOLE pair down (both containers + pairnet).
+    await reapResourceContainer(stub.docker, actual(stub, "utter_res_echo-handler", "echo"));
+    await reapResourceContainer(stub.docker, actual(stub, "utter_res_echo-gate", "echo"));
+    expect(stub.networks[pairnet]).toBeUndefined();
+    expect(Object.keys(stub.containers)).toHaveLength(0);
+
+    // Redeploy the SAME slug + resource: ensurePairNetwork recreates the pairnet cleanly
+    // (no stale-net 409 to swallow because teardown removed it), and the launch succeeds.
+    const result = await launchInto(stub, "echo");
+    expect(result.handlerImage).toBe("utter-resource-echo-handler:latest");
+    expect(stub.networks[pairnet]).toBeDefined();
+    expect(Object.keys(stub.networks[pairnet]!.Containers)).toHaveLength(2);
+  });
+
+  it("redeploy over a STALE same-owner pairnet: 409 path is idempotent (FIX C)", async () => {
+    // A previous deploy left the pairnet behind (crash before teardown). The pairnet is
+    // owned by THIS resource, so ensurePairNetwork's 409 path adopts it (idempotent) and
+    // the redeploy succeeds rather than throwing.
+    const pairnet = pairnetName("echo");
+    const stub = makePairStub("172.30.0.9", {
+      seedNetworks: {
+        [pairnet]: {
+          [PAIRNET_KIND_LABEL]: PAIRNET_KIND,
+          [SLUG_LABEL]: "echo",
+          [RESOURCE_ID_LABEL]: RESOURCE_ID,
+        },
       },
     });
 
-    await reapOrphanPairNetworks(docker);
-
-    // The endpoint-less orphan is swept; the in-use one is left alone.
-    expect(calls.removedNetworks).toEqual([orphan]);
+    const result = await launchInto(stub, "echo");
+    expect(result.handlerImage).toBe("utter-resource-echo-handler:latest");
+    // Both endpoints attached to the adopted pairnet.
+    expect(Object.keys(stub.networks[pairnet]!.Containers)).toHaveLength(2);
   });
 
-  it("is a no-op when there are no labeled pairnets", async () => {
-    const { docker, calls } = makeLifecycleStub({ networks: {} });
-    await expect(reapOrphanPairNetworks(docker)).resolves.toBeUndefined();
-    expect(calls.removedNetworks).toEqual([]);
+  it("orphan GC: removes a labeled endpoint-less pairnet, SKIPS one with an attached container", async () => {
+    // Launch one pair (live, two endpoints), then create a second pairnet and orphan it
+    // by reaping ITS containers' endpoints so it is empty. The GC must sweep ONLY the
+    // empty one.
+    const stub = makePairStub("172.30.0.9");
+    await launchInto(stub, "live");
+
+    // Hand-mint an endpoint-less orphan pairnet directly in the registry (a crash left a
+    // labeled pairnet with no containers).
+    const orphan = pairnetName("orphan");
+    stub.networks[orphan] = {
+      id: `net-${orphan}`,
+      Labels: { [PAIRNET_KIND_LABEL]: PAIRNET_KIND, [SLUG_LABEL]: "orphan" },
+      Containers: {},
+    };
+
+    await reapOrphanPairNetworks(stub.docker);
+
+    // The endpoint-less orphan is swept; the live pairnet (2 endpoints) is left alone.
+    expect(stub.networks[orphan]).toBeUndefined();
+    expect(stub.networks[pairnetName("live")]).toBeDefined();
+    expect(stub.calls.removedNetworks).toEqual([orphan]);
+  });
+
+  it("orphan GC is a no-op when there are no labeled pairnets", async () => {
+    const stub = makePairStub("172.30.0.9");
+    await expect(reapOrphanPairNetworks(stub.docker)).resolves.toBeUndefined();
+    expect(stub.calls.removedNetworks).toEqual([]);
+  });
+
+  it("reapResourceContainer swallows a 404 when the pairnet is already gone (idempotent)", async () => {
+    // A container with a slug whose pairnet never existed: inspect/remove both 404 inside
+    // removePairNetwork. The reap must not throw.
+    const stub = makePairStub("172.30.0.9");
+    await expect(
+      reapResourceContainer(stub.docker, {
+        id: "ghost",
+        resourceId: RESOURCE_ID,
+        running: true,
+        slug: "echo",
+      }),
+    ).resolves.toBeUndefined();
+    expect(stub.calls.removedNetworks).toEqual([]);
   });
 });
