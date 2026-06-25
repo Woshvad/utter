@@ -94,19 +94,24 @@ export interface BuildResourceServiceSpecOptions {
 }
 
 /**
- * Build the hardened spec for one long-lived resource-service container.
- *
- * Isolation invariants (asserted in service-runspec.test.ts, identical to the
- * one-shot spec): runtime runsc for gvisor, readonlyRootfs true, capDrop ALL,
- * capAdd [], no-new-privileges, positive pids/mem/cpu, hardened tmpfs. The four
- * relaxed fields are validated here.
+ * Internal: run EVERY shared validation and assemble the hardened service spec
+ * literal from the `env` it is HANDED. This is the single source of the
+ * isolation surface (runtime, readonly root, hardened tmpfs, capDrop ALL,
+ * capAdd [], no-new-privileges, pids/mem/cpu, storageOptSize, name pattern,
+ * restartPolicy default, port, extraNetworks). Both the untrusted and the
+ * trusted public builders call this with the SAME options; they differ ONLY in
+ * how `env` is admitted before it is passed in (the untrusted path runs the
+ * secret guard, the trusted path does not). It is deliberately NOT exported -
+ * callers must go through a public builder so the env-admission decision is
+ * always explicit.
  *
  * @throws if a limit or the port is non-positive, the image is missing, the
  *         name does not match SERVICE_NAME_PATTERN, the network is "host"/"none"
- *         or empty, or buildServiceEnv rejects the env.
+ *         or empty, or an extra network is invalid/duplicate.
  */
-export function buildResourceServiceSpec(
+function assembleServiceSpec(
   opts: BuildResourceServiceSpecOptions,
+  env: Record<string, string>,
 ): ResourceServiceSpec {
   const { backend, image, limits, network, name, port } = opts;
 
@@ -142,10 +147,6 @@ export function buildResourceServiceSpec(
     );
   }
 
-  // Relaxation guard 2: the env allowlist + secret guard. Throws a
-  // ServiceEnvViolation (key + reason only, never the value) on any violation.
-  const env = buildServiceEnv(opts.env);
-
   const spec: ResourceServiceSpec = {
     image,
     runtime: runtimeFor(backend),
@@ -174,4 +175,69 @@ export function buildResourceServiceSpec(
   };
 
   return spec;
+}
+
+/**
+ * Build the hardened spec for one long-lived resource-service container.
+ *
+ * Isolation invariants (asserted in service-runspec.test.ts, identical to the
+ * one-shot spec): runtime runsc for gvisor, readonlyRootfs true, capDrop ALL,
+ * capAdd [], no-new-privileges, positive pids/mem/cpu, hardened tmpfs. The four
+ * relaxed fields are validated here.
+ *
+ * This is the UNTRUSTED path: it runs the env secret-guard (`buildServiceEnv`),
+ * so it admits ONLY the non-secret config allowlist and rejects any secret- or
+ * token-shaped env. Use this for AI-generated/untrusted resource handlers.
+ *
+ * @throws if a limit or the port is non-positive, the image is missing, the
+ *         name does not match SERVICE_NAME_PATTERN, the network is "host"/"none"
+ *         or empty, or buildServiceEnv rejects the env.
+ */
+export function buildResourceServiceSpec(
+  opts: BuildResourceServiceSpecOptions,
+): ResourceServiceSpec {
+  // Relaxation guard 2: the env allowlist + secret guard. Throws a
+  // ServiceEnvViolation (key + reason only, never the value) on any violation.
+  // The untrusted path ALWAYS runs this guard - it is the only difference from
+  // buildTrustedServiceSpec.
+  return assembleServiceSpec(opts, buildServiceEnv(opts.env));
+}
+
+/**
+ * !! TRUSTED-ONLY BUILDER - FIRST-PARTY PLATFORM SIDECARS ONLY !!
+ *
+ * Build the hardened spec for one long-lived FIRST-PARTY service container whose
+ * code WE author and audit (e.g. the per-resource escrow-gate sidecar). It is
+ * byte-for-byte identical to buildResourceServiceSpec on EVERY isolation flag -
+ * runsc/runtime, readonly root, hardened tmpfs, capDrop ALL, capAdd [],
+ * no-new-privileges, pids/mem/cpu, storageOptSize, name pattern, restartPolicy,
+ * port, extraNetworks, and all the network/name/limit validations - because both
+ * builders share assembleServiceSpec. The ONLY difference is env admission: this
+ * builder passes the raw env straight through WITHOUT the buildServiceEnv secret
+ * guard, so a first-party sidecar may carry its own secret (e.g.
+ * SIDECAR_FACILITATOR_TOKEN, the per-resource caller-auth token it presents to
+ * the facilitator) plus its non-secret config (FACILITATOR_URL, HANDLER_URL,
+ * CLASSIFIER_SCHEMA, etc).
+ *
+ * MUST NEVER be used to launch AI-generated or otherwise untrusted code. The
+ * untrusted env secret-guard (the *_TOKEN / *_KEY / SECRET / PRIVATE denylist,
+ * the value-shape rules, the entropy pass) exists precisely to stop untrusted
+ * code from exfiltrating or smuggling a secret in its env. Bypassing it for
+ * untrusted code would be a secret-leak / free-compute vector. The untrusted
+ * path is buildResourceServiceSpec - use that for any handler we did not author.
+ *
+ * The isolation flags are NOT relaxed here; only the env admission differs
+ * (trusted code may hold its own secret, untrusted code may not).
+ *
+ * @throws on the SAME non-env validations as buildResourceServiceSpec (a
+ *         non-positive limit/port, a missing image, a bad name, a "host"/"none"
+ *         or duplicate network). It does NOT run the env secret-guard.
+ */
+export function buildTrustedServiceSpec(
+  opts: BuildResourceServiceSpecOptions,
+): ResourceServiceSpec {
+  // Trusted path: carry the raw env verbatim (a shallow copy so the caller's map
+  // is not aliased). NO buildServiceEnv - a first-party sidecar may hold its own
+  // secret. Every other field/validation is identical via assembleServiceSpec.
+  return assembleServiceSpec(opts, { ...opts.env });
 }

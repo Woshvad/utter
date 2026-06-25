@@ -57,6 +57,7 @@ export {
   DEFAULT_SERVICE_RESTART_POLICY,
   SERVICE_NAME_PATTERN,
   buildResourceServiceSpec,
+  buildTrustedServiceSpec,
   type BuildResourceServiceSpecOptions,
 } from "./runner/service-runspec";
 export { toServiceDockerodeCreateOptions } from "./runner/service-dockerode-spec";
