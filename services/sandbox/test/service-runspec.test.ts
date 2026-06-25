@@ -133,6 +133,82 @@ describe("service-runspec - the four relaxed deployment fields", () => {
   });
 });
 
+describe("service-runspec - extraNetworks (additive multi-network membership)", () => {
+  it("carries extraNetworks onto the spec as a readonly copy", () => {
+    const svc = buildResourceServiceSpec(
+      baseOpts("gvisor", { extraNetworks: ["controlplane", "proxynet"] }),
+    );
+    expect(svc.extraNetworks).toEqual(["controlplane", "proxynet"]);
+    // The primary network is unchanged by extras.
+    expect(svc.network).toBe("ingress");
+  });
+
+  it("THROWS when an extra net is 'host'", () => {
+    expect(() =>
+      buildResourceServiceSpec(baseOpts("gvisor", { extraNetworks: ["host"] })),
+    ).toThrow(/host/);
+  });
+
+  it("THROWS when an extra net is 'none'", () => {
+    expect(() =>
+      buildResourceServiceSpec(baseOpts("gvisor", { extraNetworks: ["none"] })),
+    ).toThrow(/none/);
+  });
+
+  it("THROWS when an extra net is empty", () => {
+    expect(() =>
+      buildResourceServiceSpec(baseOpts("gvisor", { extraNetworks: [""] })),
+    ).toThrow(/extraNetworks/);
+  });
+
+  it("THROWS when an extra net duplicates the primary network", () => {
+    expect(() =>
+      buildResourceServiceSpec(
+        baseOpts("gvisor", { network: "ingress", extraNetworks: ["ingress"] }),
+      ),
+    ).toThrow(/duplicate/);
+  });
+
+  it("omitting extraNetworks leaves the spec isolation-identical (no regression)", () => {
+    const withExtras = buildResourceServiceSpec(
+      baseOpts("gvisor", { extraNetworks: ["controlplane"] }),
+    );
+    const without = buildResourceServiceSpec(baseOpts("gvisor"));
+    // No extraNetworks field at all when absent (additive, not a default).
+    expect("extraNetworks" in without).toBe(false);
+    expect(without.extraNetworks).toBeUndefined();
+    // Every isolation-relevant field is identical with or without extras.
+    expect(without.runtime).toBe(withExtras.runtime);
+    expect(without.readonlyRootfs).toBe(withExtras.readonlyRootfs);
+    expect(without.capDrop).toEqual(withExtras.capDrop);
+    expect(without.capAdd).toEqual(withExtras.capAdd);
+    expect(without.securityOpt).toEqual(withExtras.securityOpt);
+    expect(without.tmpfs).toEqual(withExtras.tmpfs);
+    expect(without.pidsLimit).toBe(withExtras.pidsLimit);
+    expect(without.memoryBytes).toBe(withExtras.memoryBytes);
+    expect(without.cpus).toBe(withExtras.cpus);
+    expect(without.network).toBe(withExtras.network);
+  });
+
+  it("the dockerode NetworkMode is the primary only (extras are connect-only)", () => {
+    // Use extra-net names that do NOT appear in any other field so a substring
+    // check is unambiguous (the default env FACILITATOR_URL would otherwise
+    // contain 'controlplane').
+    const svc = buildResourceServiceSpec(
+      baseOpts("gvisor", {
+        env: { PORT: "8080" },
+        network: "ingress",
+        extraNetworks: ["zzz-extra-a", "zzz-extra-b"],
+      }),
+    );
+    const opts = toServiceDockerodeCreateOptions(svc);
+    expect(opts.HostConfig?.NetworkMode).toBe("ingress");
+    // extraNetworks do NOT leak into the create-options (they are post-create connects).
+    expect(JSON.stringify(opts)).not.toContain("zzz-extra-a");
+    expect(JSON.stringify(opts)).not.toContain("zzz-extra-b");
+  });
+});
+
 describe("service-runspec - misconfiguration guards", () => {
   it("rejects a non-positive port", () => {
     expect(() => buildResourceServiceSpec(baseOpts("gvisor", { port: 0 }))).toThrow(/port/);
