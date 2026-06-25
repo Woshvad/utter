@@ -66,6 +66,7 @@ import {
   resolveFacilitatorUrl,
   launchResourcePair,
   pairNames,
+  pairnetName,
   sidecarContainerUrl,
   writeTraefikDynamicFile,
   waitForUnpaid402,
@@ -510,9 +511,12 @@ export async function liveDeployEcho(
   // probe image can never break the live 402->200 proof.
   let nonAllowlistedUnreachable = false;
   if (process.env.UTTER_RUN_EGRESS_PROBE === "1") {
-    // Thread the handler container name: the probe shares the handler's network
-    // namespace so the connect tests the HANDLER's real reachability of a blocked host.
-    nonAllowlistedUnreachable = await runEgressProbe(docker, handlerName);
+    // Thread the handler's PAIRNET name: the probe attaches to the same internal
+    // (no-gateway) bridge as the handler, so the connect tests the HANDLER's real
+    // reachability of a blocked host. This is runtime-agnostic (works whether the
+    // handler runs under runc or runsc); it does NOT share the handler's netns,
+    // which a runc probe cannot reliably observe across a runsc userspace netstack.
+    nonAllowlistedUnreachable = await runEgressProbe(docker, pairnetName(SLUG));
   } else {
     console.log(
       "[live-deploy] PRX-02 SKIPPED (Phase 1): set UTTER_RUN_EGRESS_PROBE=1 to run the " +
@@ -549,8 +553,8 @@ export const BLOCKED_HOST_PROBE_IMAGE = "utter/blocked-host-probe:latest";
 export interface BuildProbeCreateOptionsInput {
   /** The host the probe attempts to reach (rides in Cmd, NOT the image tag). */
   targetHost: string;
-  /** The handler container name whose network namespace the probe shares. */
-  handlerName: string;
+  /** The handler's pairnet network name the probe attaches to. */
+  network: string;
   /** The probe image (defaults to {@link BLOCKED_HOST_PROBE_IMAGE}). */
   image?: string;
 }
@@ -560,10 +564,21 @@ export interface BuildProbeCreateOptionsInput {
  *
  * The image reference is the plain tag (no `#host` suffix - that is an INVALID
  * Docker reference that the old code produced and the daemon rejected with
- * "invalid reference format"). The dynamic target rides in `Cmd` instead, and the
- * probe shares the HANDLER's network namespace (`NetworkMode: container:<handler>`)
- * so the connect tests the handler's real reachability. The container is hardened
- * (read-only root, cap-drop ALL, no-new-privileges, pids/mem caps, auto-remove).
+ * "invalid reference format"). The dynamic target rides in `Cmd` instead.
+ *
+ * The probe attaches to the handler's PAIRNET (`NetworkMode: <network>`), the same
+ * `internal: true` bridge the handler is on. That bridge has no gateway, so a probe
+ * container joined to it has the SAME L3 reachability as the handler - it faithfully
+ * tests the egress containment without sharing the handler's netns. This is
+ * runtime-agnostic: it works whether the handler runs under runc or runsc, unlike a
+ * `container:<handler>` netns share, which a runc probe cannot reliably observe
+ * across a runsc userspace netstack.
+ *
+ * NOTE (out of scope here): the DEFAULT_PROBE_TARGETS "host-loopback" 127.0.0.1 is
+ * the probe container's OWN loopback from inside any container, so that one target is
+ * not a meaningful host-loopback test from a separate probe container. The other
+ * targets (metadata 169.254.169.254, RFC1918, Arc RPC, facilitator) ARE correctly
+ * tested from the pairnet. This is a pre-existing probe-semantics nuance.
  *
  * This is a pure function so the construction is unit-testable without a daemon -
  * the runtime probe run itself still needs the provisioned gVisor host.
@@ -579,8 +594,10 @@ export function buildProbeCreateOptions(input: BuildProbeCreateOptionsInput): {
     // The target host as the single command arg (the probe.sh entrypoint reads $1).
     Cmd: [input.targetHost],
     HostConfig: {
-      // Share the handler's netns so the probe tests the HANDLER's reachability.
-      NetworkMode: `container:${input.handlerName}`,
+      // Attach to the handler's pairnet (same internal bridge, no gateway), so the
+      // probe has the same reachability as the handler - runtime-agnostic, no
+      // fragile netns sharing.
+      NetworkMode: input.network,
       AutoRemove: true,
       ReadonlyRootfs: true,
       CapDrop: ["ALL"],
@@ -605,9 +622,9 @@ export function buildProbeCreateOptions(input: BuildProbeCreateOptionsInput): {
  * untrusted RunSpec (empty env, no cmd, which cannot carry a dynamic target).
  * Instead this injects a `connectProbe` that launches the blocked-host probe image
  * DIRECTLY via dockerode ({@link buildProbeCreateOptions}): a VALID image
- * reference, the target host in `Cmd`, run inside the HANDLER's network namespace
- * so the connect tests the handler's real reachability. exit 0 == reachable ==
- * containment failure.
+ * reference, the target host in `Cmd`, attached to the HANDLER's pairnet (the same
+ * internal no-gateway bridge) so the connect tests the handler's real reachability.
+ * exit 0 == reachable == containment failure.
  *
  * When NO docker handle is available (the autonomous box), it SKIPS with a clear
  * operator-gated log and returns `false` - a skip, NOT a false pass and NOT a false
@@ -615,14 +632,14 @@ export function buildProbeCreateOptions(input: BuildProbeCreateOptionsInput): {
  * the provisioned host (infrastructure/RUNBOOK.md Acceptance 1).
  *
  * @param docker the host dockerode handle (undefined on the autonomous box -> skip).
- * @param handlerName the handler container name whose netns the probe shares. Omitted
+ * @param network the handler's pairnet network name the probe attaches to. Omitted
  *        only when docker is absent (the skip path never launches a probe).
  * @returns true only when the live probe actually ran and every target was
  *          unreachable; false when the probe was skipped (no host docker handle).
  */
 export async function runEgressProbe(
   docker?: DockerHandle,
-  handlerName?: string,
+  network?: string,
 ): Promise<boolean> {
   if (!docker) {
     console.log(
@@ -632,11 +649,12 @@ export async function runEgressProbe(
     );
     return false;
   }
-  if (!handlerName) {
+  if (!network) {
     throw new Error(
-      "runEgressProbe: a handlerName is required to run the live probe - the probe shares the " +
-        "handler's network namespace (NetworkMode: container:<handlerName>) to test the handler's " +
-        "real reachability. Thread pairNames(SLUG).handlerName from the launch into this call.",
+      "runEgressProbe: a pairnet network name is required to run the live probe - the probe " +
+        "attaches to the handler's pairnet (NetworkMode: <network>, the same internal no-gateway " +
+        "bridge) to test the handler's real reachability. Thread pairnetName(SLUG) from the launch " +
+        "into this call.",
     );
   }
 
@@ -650,11 +668,11 @@ export async function runEgressProbe(
     runner,
     // Inject the host connectProbe: launch the probe image DIRECTLY via dockerode,
     // bypassing the locked RunSpec (which cannot carry a dynamic target). The image
-    // reference is valid (target in Cmd), and it runs in the handler's netns.
+    // reference is valid (target in Cmd), and it attaches to the handler's pairnet.
     connectProbe: async (_spec, target): Promise<boolean> => {
       const createOpts = buildProbeCreateOptions({
         targetHost: target.host,
-        handlerName,
+        network,
       });
       const container = await dockerApi.createContainer(
         createOpts as unknown as Docker.ContainerCreateOptions,
