@@ -21,6 +21,7 @@ import {
   createReconcileLoop,
   type ActualContainer,
 } from "../src/reconcile";
+import type { RunawayPolicy } from "../src/reaper";
 
 const AGENT: Hex = `0x${"a9".repeat(32)}`;
 
@@ -37,8 +38,8 @@ function record(resourceId: Hex, over: Partial<DeploymentRecord> = {}): Deployme
 }
 
 /** A container in the actual (dockerode) state, labelled with its resourceId. */
-function container(resourceId: Hex): ActualContainer {
-  return { id: `ctr-${resourceId.slice(2, 6)}`, resourceId, running: true };
+function container(resourceId: Hex, over: Partial<ActualContainer> = {}): ActualContainer {
+  return { id: `ctr-${resourceId.slice(2, 6)}`, resourceId, running: true, ...over };
 }
 
 describe("InMemoryDeploymentStore (DEP-05 test default)", () => {
@@ -262,5 +263,160 @@ describe("createReconcileLoop (DEP-05)", () => {
     expect(() => loop.stop()).not.toThrow();
     // Idempotent stop.
     expect(() => loop.stop()).not.toThrow();
+  });
+});
+
+describe("reconcile - status filter (only active records are desired-running, H4)", () => {
+  it("a 'failed' record is NOT in toLaunch and its running container becomes toReap", () => {
+    const r1: Hex = `0x${"f1".repeat(32)}`;
+    const desired = [record(r1, { status: "failed" })];
+    const actual = [container(r1)]; // a container still runs for the quarantined record
+    const result = reconcile(desired, actual);
+    // The failed record is excluded from desired-running: not relaunched ...
+    expect(result.toLaunch).toEqual([]);
+    // ... and its still-running container is now an orphan to reap (no reap->relaunch loop).
+    expect(result.toReap.map((c) => c.resourceId)).toEqual([r1]);
+  });
+
+  it("a 'stopped' record is not relaunched", () => {
+    const r1: Hex = `0x${"f2".repeat(32)}`;
+    const desired = [record(r1, { status: "stopped" })];
+    const actual: ActualContainer[] = []; // nothing running
+    const result = reconcile(desired, actual);
+    expect(result.toLaunch).toEqual([]);
+    expect(result.toReap).toEqual([]);
+    expect(result.healthy).toBe(true);
+  });
+
+  it("a 'deploying' record IS desired-running (relaunched if no container)", () => {
+    const r1: Hex = `0x${"f3".repeat(32)}`;
+    const desired = [record(r1, { status: "deploying" })];
+    const result = reconcile(desired, []);
+    expect(result.toLaunch.map((d) => d.resourceId)).toEqual([r1]);
+  });
+});
+
+describe("createReconcileLoop - runaway pass (H4 quarantine + reap)", () => {
+  const POLICY: RunawayPolicy = { maxRestartCount: 5, cpuFraction: 0.95, sustainedSamples: 3 };
+
+  it("quarantines (record -> failed) AND reaps a restart-loop-wedged container, surfaced as 'runaway'", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"e1".repeat(32)}`;
+    await store.put(record(r1));
+
+    const wedged = container(r1, { restartCount: 5 });
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [wedged]);
+    const reaped: string[] = [];
+    const reapContainer = vi.fn(async (c: ActualContainer) => {
+      reaped.push(c.id);
+    });
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: POLICY,
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    await loop.tick();
+
+    // Quarantined: the record is now failed so a later reconcile will not relaunch it.
+    const rec = await store.get(r1);
+    expect(rec?.status).toBe("failed");
+    // Reaped exactly once, via the runaway pass (NOT double-reaped by the orphan pass).
+    expect(reapContainer).toHaveBeenCalledTimes(1);
+    expect(reaped).toEqual([wedged.id]);
+    // Surfaced as a runaway event (no secret material - reason is the restart-loop string).
+    const runaway = errors.filter((e) => e.phase === "runaway");
+    expect(runaway.length).toBeGreaterThanOrEqual(1);
+    expect(runaway.some((e) => e.message.includes("restart-loop"))).toBe(true);
+    // No orphan-pass "reap" event for the same container (no double reap).
+    expect(errors.some((e) => e.phase === "reap")).toBe(false);
+  });
+
+  it("does NOT touch a healthy container (below the restart cap)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"e2".repeat(32)}`;
+    await store.put(record(r1));
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [
+      container(r1, { restartCount: 1 }),
+    ]);
+    const reapContainer = vi.fn(async () => undefined);
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      runawayPolicy: POLICY,
+    });
+    await loop.tick();
+    expect(reapContainer).not.toHaveBeenCalled();
+    expect((await store.get(r1))?.status).toBe("running");
+  });
+});
+
+describe("createReconcileLoop - host concurrency cap (H4)", () => {
+  it("defers ALL launches and surfaces a 'capacity' event when running is at the cap", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"d1".repeat(32)}`;
+    const r2: Hex = `0x${"d2".repeat(32)}`;
+    const running: Hex = `0x${"d9".repeat(32)}`;
+    await store.put(record(r1));
+    await store.put(record(r2));
+    await store.put(record(running)); // already running, occupies the only slot
+
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [container(running)]);
+    const launched: Hex[] = [];
+    const launchContainer = vi.fn(async (rec: DeploymentRecord) => {
+      launched.push(rec.resourceId);
+    });
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      launchContainer,
+      maxConcurrent: 1, // one running already -> zero capacity
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    await loop.tick();
+
+    // Both pending records are deferred (nothing launched), and the deferral is loud.
+    expect(launched).toEqual([]);
+    const capacity = errors.filter((e) => e.phase === "capacity");
+    expect(capacity).toHaveLength(1);
+    expect(capacity[0]?.message).toContain("deferred");
+  });
+
+  it("launches exactly one when a single slot is free, deferring the rest", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"c1".repeat(32)}`;
+    const r2: Hex = `0x${"c2".repeat(32)}`;
+    await store.put(record(r1));
+    await store.put(record(r2));
+
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => []); // nothing running
+    const launched: Hex[] = [];
+    const launchContainer = vi.fn(async (rec: DeploymentRecord) => {
+      launched.push(rec.resourceId);
+    });
+    const errors: { phase: string; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      launchContainer,
+      maxConcurrent: 1, // zero running -> exactly one slot
+      onError: (e) => errors.push({ phase: e.phase, message: e.message }),
+    });
+    await loop.tick();
+
+    // Exactly one launched (input order preserved), one deferred + surfaced.
+    expect(launched).toEqual([r1]);
+    expect(errors.filter((e) => e.phase === "capacity")).toHaveLength(1);
   });
 });
