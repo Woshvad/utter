@@ -19,6 +19,8 @@ import { describe, it, expect } from "vitest";
 import {
   buildTraefikDynamicConfig,
   parseTraefikDynamicConfig,
+  validateSlug,
+  SLUG_PATTERN,
 } from "../src/traefik-config";
 
 const DOMAIN = "utter.example";
@@ -91,5 +93,46 @@ describe("traefik-config", () => {
     expect(typeof yaml).toBe("string");
     const parsed = parseTraefikDynamicConfig(yaml);
     expect(parsed).toEqual(config);
+  });
+});
+
+describe("traefik-config - slug validation (M5, routing-boundary guard)", () => {
+  it("exports the validator + the pattern", () => {
+    expect(typeof validateSlug).toBe("function");
+    expect(SLUG_PATTERN.source).toBe("^[a-z0-9-]+$");
+  });
+
+  it("accepts a valid slug ([a-z0-9-]) and returns it unchanged", () => {
+    expect(validateSlug("weather-bot")).toBe("weather-bot");
+    expect(validateSlug("echo")).toBe("echo");
+    expect(validateSlug("res-123")).toBe("res-123");
+  });
+
+  it("a valid slug builds a config keyed on the same validated token", () => {
+    const { config } = buildTraefikDynamicConfig({ slug: "weather-bot", domain: DOMAIN });
+    expect(Object.keys(config.http.routers)).toEqual(["weather-bot"]);
+    expect(config.http.routers["weather-bot"]!.rule).toBe(
+      "Host(`weather-bot.resources.utter.example`)",
+    );
+    expect(config.http.services["weather-bot"]!.loadBalancer.servers).toEqual([
+      { url: "http://weather-bot:8080" },
+    ]);
+  });
+
+  it.each([
+    ["a dotted slug (extra DNS label / Host() collision surface)", "bad.slug"],
+    ["an uppercase slug", "BadSlug"],
+    ["a slug with a space", "bad slug"],
+    ["a slug with a slash", "bad/slug"],
+    ["an underscore slug", "bad_slug"],
+    ["an empty slug", ""],
+  ])("rejects %s", (_label, slug) => {
+    expect(() => validateSlug(slug)).toThrow(/invalid slug/);
+  });
+
+  it("buildTraefikDynamicConfig throws on an invalid slug (cannot mint a colliding router)", () => {
+    expect(() => buildTraefikDynamicConfig({ slug: "bad.slug", domain: DOMAIN })).toThrow(
+      /invalid slug/,
+    );
   });
 });

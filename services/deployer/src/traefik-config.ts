@@ -65,6 +65,37 @@ export interface BuildTraefikDynamicConfigOpts {
 export const DEFAULT_RESOURCE_PORT = 8080;
 
 /**
+ * The single allowed slug shape: lowercase letters, digits, and hyphens only.
+ * A slug becomes a Traefik router/service key, a Docker container name component,
+ * and the leftmost label of `Host(<slug>.resources.<domain>)`. Anything outside
+ * this set is a routing-boundary hazard (M5): a dot would graft an extra DNS label
+ * onto the host rule (a collision / subdomain takeover surface), uppercase or
+ * spaces would not round-trip through the file-provider key, and an empty slug
+ * yields a host of `.resources.<domain>`. Rejecting at the boundary means a bad
+ * slug can never mint a colliding router key or an overlapping Host() rule.
+ */
+export const SLUG_PATTERN = /^[a-z0-9-]+$/;
+
+/**
+ * Validate + canonicalize a resource slug at the routing boundary. Returns the
+ * slug unchanged when it matches {@link SLUG_PATTERN}; throws a clear error
+ * otherwise. The router/service key and the `http://<slug>:8080` loadBalancer URL
+ * are all derived from this one validated token so they can never diverge.
+ *
+ * @throws if the slug is empty or contains anything but `[a-z0-9-]`.
+ */
+export function validateSlug(slug: string): string {
+  if (!SLUG_PATTERN.test(slug)) {
+    throw new Error(
+      `invalid slug ${JSON.stringify(slug)}: a resource slug must match ${SLUG_PATTERN} ` +
+        "(lowercase letters, digits, and hyphens only - no dots, spaces, or uppercase), " +
+        "because the slug becomes the Traefik router key and the leftmost Host() label.",
+    );
+  }
+  return slug;
+}
+
+/**
  * Build the per-resource Traefik file-provider dynamic config for
  * `Host(<slug>.resources.<domain>)`. Returns the structured config object AND its
  * YAML serialization (the deployer writes the YAML to
@@ -76,7 +107,12 @@ export const DEFAULT_RESOURCE_PORT = 8080;
 export function buildTraefikDynamicConfig(
   opts: BuildTraefikDynamicConfigOpts,
 ): { config: TraefikDynamicConfig; yaml: string } {
-  const { slug, domain } = opts;
+  const { domain } = opts;
+  // Validate + canonicalize the slug at the SINGLE point it enters routing (M5).
+  // Every downstream key (router, service, Host() label, loadBalancer URL) derives
+  // from this one validated token, so a bad slug can never produce a colliding
+  // router key or an overlapping Host() rule.
+  const slug = validateSlug(opts.slug);
   const apex = `resources.${domain}`;
   const port = opts.port ?? DEFAULT_RESOURCE_PORT;
   const containerUrl = opts.containerUrl ?? `http://${slug}:${port}`;
