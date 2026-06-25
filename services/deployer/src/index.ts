@@ -12,6 +12,7 @@
 export {
   InMemoryDeploymentStore,
   InMemoryResponseCache,
+  SlugConflictError,
   createInMemoryStores,
   type DeployerStores,
   type DeploymentRecord,
