@@ -29,7 +29,26 @@ export {
   type ReconcileResult,
   type ReconcileLoop,
   type ReconcileLoopOpts,
+  type ReconcileErrorEvent,
 } from "./reconcile";
+
+// Global host concurrency cap (H4 / SPEC §9.5): the pure launch-admission helper
+// the reconcile loop uses to defer (never silently drop) over-cap (re)launches.
+export {
+  admitLaunches,
+  DEFAULT_MAX_CONCURRENT_RESOURCES,
+  type AdmitLaunchesOpts,
+  type AdmitLaunchesResult,
+} from "./concurrency";
+
+// Runaway-container classifier (H4 / SPEC §9.5): the pure verdict the loop uses to
+// quarantine (record -> failed) + reap a wedged/CPU-pegged container.
+export {
+  classifyRunaway,
+  DEFAULT_RUNAWAY_POLICY,
+  type RunawayPolicy,
+  type RunawayVerdict,
+} from "./reaper";
 
 // In-process x402 injection (DEP-01): wrap a resource app in the Phase 2
 // `requirePayment` escrow gate configured with this resource's pricing/escrow.
@@ -138,9 +157,13 @@ export {
   removeTraefikDynamicFile,
   launchEchoContainer,
   reapEchoContainer,
+  listResourceContainers,
+  reapResourceContainer,
   waitForUnpaid402,
   ECHO_SERVICE,
   ECHO_IMAGE_TAG,
+  RESOURCE_ID_LABEL,
+  SLUG_LABEL,
   type ResolveFacilitatorUrlOpts,
   type BuildEchoServiceEnvOpts,
   type WriteTraefikDynamicFileOpts,

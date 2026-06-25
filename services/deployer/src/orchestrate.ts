@@ -32,6 +32,20 @@ import {
   buildTraefikDynamicConfig,
   validateSlug,
 } from "./traefik-config";
+import type { ActualContainer } from "./reconcile";
+
+/**
+ * The Docker label key carrying a managed container's resourceId. The reconcile
+ * loop filters containers by this label to find the ones IT manages, and reads the
+ * value back as the resourceId. Non-secret operator metadata.
+ */
+export const RESOURCE_ID_LABEL = "io.utter.resource-id";
+
+/**
+ * The Docker label key carrying a managed container's resource slug. The reaper
+ * reads it to drop the matching Traefik dynamic file. Non-secret operator metadata.
+ */
+export const SLUG_LABEL = "io.utter.slug";
 
 /**
  * A minimal docker handle the orchestrator needs (the GvisorRunner constructor and
@@ -335,6 +349,12 @@ export async function launchEchoContainer(
     }),
     name: ECHO_SERVICE.name,
     port: ECHO_SERVICE.port,
+    // Stamp the non-secret resourceId + slug labels so the reconcile loop can read
+    // this managed container back (listResourceContainers / reapResourceContainer).
+    labels: {
+      [RESOURCE_ID_LABEL]: opts.resourceId,
+      [SLUG_LABEL]: "echo",
+    },
   });
 
   const handle = await new GvisorRunner(docker).startService(spec);
@@ -358,6 +378,85 @@ export async function reapEchoContainer(
   }
   // Drop the route so Traefik stops advertising a backend that no longer exists.
   await removeTraefikDynamicFile("echo");
+}
+
+/**
+ * The reconcile loop's `listContainers` provider on the host. Lists every managed
+ * resource container (filtered by the resourceId label so platform containers are
+ * never touched) and maps each to an {@link ActualContainer}: its dockerode id, the
+ * resourceId + slug read back from the labels, whether it is running, and the
+ * RestartCount (the runaway restart-loop signal).
+ *
+ * `listContainers` does NOT carry RestartCount, so each managed container is
+ * inspected once to read `State.RestartCount` (cheap - one inspect per managed
+ * container). Entries with no resourceId label are skipped (defensive: the filter
+ * already requires the label).
+ *
+ * cpuFraction is intentionally left undefined this round: live CPU-stats streaming
+ * is a documented follow-up. The runaway classifier already supports cpuFraction,
+ * so the restart-loop signal works today and the CPU signal lights up when stats
+ * land - the gap is explicit here, not hidden.
+ */
+export async function listResourceContainers(
+  docker: DockerHandle,
+): Promise<ActualContainer[]> {
+  const dockerApi = docker as unknown as Docker;
+  const infos = await dockerApi.listContainers({
+    all: true,
+    filters: { label: [RESOURCE_ID_LABEL] },
+  });
+
+  const result: ActualContainer[] = [];
+  for (const info of infos) {
+    const labels = info.Labels ?? {};
+    const resourceId = labels[RESOURCE_ID_LABEL];
+    if (!resourceId) continue; // no resourceId label: not a container we manage.
+
+    // listContainers omits RestartCount; inspect once to read it (best-effort - a
+    // missing/gone container leaves it undefined, treated as 0 by the classifier).
+    let restartCount: number | undefined;
+    try {
+      const inspected = await dockerApi.getContainer(info.Id).inspect();
+      // dockerode's State type omits RestartCount, but the daemon returns it; read
+      // it through a narrow cast (it is a plain number on the inspect payload).
+      const state = inspected.State as unknown as { RestartCount?: number };
+      restartCount = state?.RestartCount;
+    } catch {
+      // Container vanished between list and inspect: leave restartCount undefined.
+    }
+
+    result.push({
+      id: info.Id,
+      resourceId: resourceId as Hex,
+      slug: labels[SLUG_LABEL],
+      running: info.State === "running",
+      ...(restartCount !== undefined ? { restartCount } : {}),
+      // cpuFraction left undefined: live CPU stats are a documented follow-up.
+    });
+  }
+  return result;
+}
+
+/**
+ * The reconcile loop's `reapContainer` provider on the host. Generalizes
+ * {@link reapEchoContainer} to any managed container: force-remove it by its
+ * dockerode id (a missing container is a no-op), then drop its Traefik dynamic file
+ * if the slug is known. Best-effort: the goal is that a reaped container leaves no
+ * live container and no dangling route behind.
+ */
+export async function reapResourceContainer(
+  docker: DockerHandle,
+  container: ActualContainer,
+): Promise<void> {
+  const dockerApi = docker as unknown as Docker;
+  try {
+    await dockerApi.getContainer(container.id).remove({ force: true });
+  } catch {
+    // Already gone: nothing to remove.
+  }
+  if (container.slug) {
+    await removeTraefikDynamicFile(container.slug);
+  }
 }
 
 /** Options for {@link waitForUnpaid402}. */
