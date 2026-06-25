@@ -135,12 +135,19 @@ export {
 // recorded as a Deferred Item in STATE.md (Plan 06).
 export { liveDeployEcho, runEgressProbe, type LiveDeployResult, type DockerHandle } from "./live-deploy";
 
-// Echo bundler (deploy plane B): esbuild the echo into a single self-contained
-// server.js + a prebundled Dockerfile (FROM the resolved digest, CMD node
-// server.js) - the standalone artifact buildResourceImage streams to dockerode.
+// Node-entry bundlers (deploy plane B): esbuild a workspace entrypoint into a single
+// self-contained server.js + a prebundled Dockerfile (FROM the resolved digest, CMD
+// node server.js) - the standalone artifact buildResourceImage streams to dockerode.
+// bundleEcho is the Phase 1 in-process path; bundleEchoHandler (gate-less handler)
+// and bundleSidecar (trusted gate-server) are the wave BC1 sidecar-topology images.
 export {
   bundleEcho,
+  bundleEchoHandler,
+  bundleSidecar,
   buildEchoDockerfile,
+  buildNodeBundleDockerfile,
+  type BundleOpts,
+  type BundleResult,
   type BundleEchoOpts,
   type BundleEchoResult,
 } from "./bundle-echo";

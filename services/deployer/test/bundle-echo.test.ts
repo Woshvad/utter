@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { resolveBaseImage, PINNED_BASE_IMAGES } from "../src/build";
-import { bundleEcho } from "../src/bundle-echo";
+import { bundleEcho, bundleEchoHandler, bundleSidecar } from "../src/bundle-echo";
 
 const NODE_OVERRIDE = "DEPLOY_BASE_IMAGE_NODE";
 const ORIGINAL_NODE = process.env[NODE_OVERRIDE];
