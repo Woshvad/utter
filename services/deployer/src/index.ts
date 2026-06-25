@@ -125,3 +125,24 @@ export {
   type BundleEchoOpts,
   type BundleEchoResult,
 } from "./bundle-echo";
+
+// Deploy orchestrator (host phase H2): build the echo image, run it as a hardened
+// runsc service on utter_appnet, atomically write the Traefik route, and resolve a
+// real dockerode handle on the provisioned host. launchEchoContainer /
+// reapEchoContainer are the real launch/reap the future reconcile hooks (H3) reuse.
+export {
+  resolveDockerHandle,
+  buildEchoServiceEnv,
+  writeTraefikDynamicFile,
+  removeTraefikDynamicFile,
+  launchEchoContainer,
+  reapEchoContainer,
+  waitForUnpaid402,
+  ECHO_SERVICE,
+  ECHO_IMAGE_TAG,
+  type BuildEchoServiceEnvOpts,
+  type WriteTraefikDynamicFileOpts,
+  type LaunchEchoContainerOpts,
+  type LaunchEchoContainerResult,
+  type WaitForUnpaid402Opts,
+} from "./orchestrate";
