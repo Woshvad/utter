@@ -19,6 +19,7 @@ import {
   type ResourceSpec,
   type ValidationResult,
 } from "@utter/ai-runtime";
+import { resourceIdForLabel } from "@utter/x402-arc";
 import { LiveAdapter } from "../app/adapter/live";
 import { RequiresLiveServicesError } from "../app/adapter/live";
 import { BuildEventChannel } from "../app/adapter/build-channel";
@@ -121,6 +122,9 @@ async function makeLiveAdapter(
       ...STUB_REVENUE,
       receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })),
     }),
+    // The cardUrl builder is bound to DEPLOY_DOMAIN by buildLiveDeps in production; inject a
+    // deterministic offline builder so createResource records a real-shaped agent-card URL.
+    buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
   });
 }
 
@@ -167,8 +171,12 @@ describe("LiveAdapter read path (injected offline deps)", () => {
     const adapter = await makeLiveAdapter();
     const detail = await adapter.getResourceDetail(FIXTURE_RESOURCE_ID);
     expect(detail.resourceId).toBe(FIXTURE_RESOURCE_ID);
+    // creator stays a real owner address (the ownership gate compares it to the SIWE
+    // account); the registry stores creator and resourceId separately.
     expect(detail.creator).toMatch(/^0x[0-9a-fA-F]{40}$/);
-    expect(detail.payout).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    // payout is now the canonical bytes32 resourceId, the escrow target the wallet signs
+    // (PaymentEscrow.debit keys settlement off the resourceId, not a creator EOA).
+    expect(detail.payout).toBe(FIXTURE_RESOURCE_ID);
     expect(detail.bond).toBeTypeOf("bigint");
     expect(detail.pricing.base).toBeTruthy();
     expect(detail.health).toHaveProperty("verified");
@@ -313,5 +321,28 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(revenue.calls).toBe(STUB_REVENUE.calls);
     expect(revenue.gross).toBe(STUB_REVENUE.gross);
     expect(revenue.creatorShare + revenue.platformShare).toBe(revenue.gross);
+  });
+
+  it("createResource derives the canonical keccak id (deterministic, no counter)", async () => {
+    const adapter = await makeLiveAdapter();
+    // The same prompt yields the same slug, and the slug yields the same canonical keccak
+    // id via the shared resourceIdForLabel (no monotonic counter). The studio label scheme
+    // is utter:resource:<slug>; the slug for this prompt is the kebab of the prompt text.
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+    const slug = "echo-the-caller-s-text-back-with-its-length";
+    expect(resourceId).toBe(resourceIdForLabel(`utter:resource:${slug}`));
+    expect(resourceId).toMatch(/^0x[0-9a-fA-F]{64}$/);
+  });
+
+  it("a created resource's detail payout equals the canonical resourceId and the cardUrl is real-shaped", async () => {
+    const adapter = await makeLiveAdapter();
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+    const detail = await adapter.getResourceDetail(resourceId);
+    // payout is the bytes32 escrow target (the wallet signs this), == the resourceId.
+    expect(detail.payout).toBe(resourceId);
+    // The cardUrl comes from the injected DEPLOY_DOMAIN builder, not a hardcode in live.ts.
+    expect(detail.cardUrl).toMatch(
+      /^https:\/\/[a-z0-9-]+\.resources\.[a-z0-9.-]+\/\.well-known\/agent-card\.json$/,
+    );
   });
 });

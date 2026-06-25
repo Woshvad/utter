@@ -65,6 +65,9 @@ function makeRealLiveAdapter(): LiveAdapter {
     getRevenue: async () => {
       throw new Error("live-create-real test does not exercise getRevenue");
     },
+    // The cardUrl builder is normally bound to DEPLOY_DOMAIN by buildLiveDeps; here a
+    // deterministic offline builder is injected so createResource records a real-shaped URL.
+    buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
   });
 }
 
