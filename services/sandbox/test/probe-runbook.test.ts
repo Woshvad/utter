@@ -15,12 +15,15 @@ import {
   EGRESS_BLOCK_SET,
   RequiresProvisionedHostError,
   ContainmentFailureError,
+  SiblingUnreachabilityError,
   createOperatorGatedProbe,
   createLiveHostProbe,
+  createOperatorGatedSiblingProbe,
+  createLiveSiblingProbe,
   DEFAULT_PROBE_IMAGE,
   DEFAULT_PROBE_TARGETS,
 } from "../src/index";
-import type { RunSpec, SandboxRunner } from "../src/index";
+import type { RunSpec, SandboxRunner, SiblingTarget } from "../src/index";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // repoRoot = services/sandbox/test -> ../../.. = repo root.
@@ -163,5 +166,96 @@ describe("probe-runbook - the live probe stays guarded in the autonomous suite",
     });
     const spec = {} as RunSpec;
     await expect(probe.assertBlocked(spec, [...DEFAULT_PROBE_TARGETS])).resolves.toBeUndefined();
+  });
+});
+
+describe("probe-runbook - the sibling-unreachability probe stays guarded (PRX-02, quick 260625-mwb)", () => {
+  // A sibling handler + sidecar (DISALLOWED cross-tenant) plus the resource's own
+  // data-proxy (the explicitly ALLOWED peer).
+  const SIBLINGS: SiblingTarget[] = [
+    { role: "handler", ip: "172.31.0.7", port: 8080, reason: "sibling-handler" },
+    { role: "sidecar", ip: "172.20.0.8", port: 8080, reason: "sibling-sidecar" },
+    { role: "data-proxy", ip: "172.30.0.10", port: 3128, reason: "own-data-proxy" },
+  ];
+
+  it("the operator-gated default is unavailable and throws requiresProvisionedHost", async () => {
+    const probe = createOperatorGatedSiblingProbe();
+    expect(probe.available).toBe(false);
+    const spec = {} as RunSpec;
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).rejects.toBeInstanceOf(
+      RequiresProvisionedHostError,
+    );
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).rejects.toMatchObject({
+      code: "requiresProvisionedHost",
+    });
+  });
+
+  it("createLiveSiblingProbe REFUSES a non-gvisor runner (docker-dev is never a boundary)", () => {
+    const dockerDevRunner = { backend: "docker-dev" } as unknown as SandboxRunner;
+    expect(() => createLiveSiblingProbe({ runner: dockerDevRunner })).toThrow(
+      RequiresProvisionedHostError,
+    );
+  });
+
+  it("createLiveSiblingProbe is operator-runnable with a gvisor runner (available:true)", () => {
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    const probe = createLiveSiblingProbe({ runner: gvisorRunner });
+    expect(probe.available).toBe(true);
+  });
+
+  it("throws SiblingUnreachabilityError when a DISALLOWED sibling handler is reachable", async () => {
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    // The sibling HANDLER is reachable (an isolation failure); everything else blocked.
+    const probe = createLiveSiblingProbe({
+      runner: gvisorRunner,
+      connectProbe: async (_spec, s) => s.role === "handler" && s.ip === "172.31.0.7",
+    });
+    const spec = {} as RunSpec;
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).rejects.toBeInstanceOf(
+      SiblingUnreachabilityError,
+    );
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).rejects.toMatchObject({
+      code: "siblingReachable",
+    });
+  });
+
+  it("throws SiblingUnreachabilityError when a DISALLOWED sibling sidecar is reachable", async () => {
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    const probe = createLiveSiblingProbe({
+      runner: gvisorRunner,
+      connectProbe: async (_spec, s) => s.role === "sidecar",
+    });
+    const spec = {} as RunSpec;
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).rejects.toBeInstanceOf(
+      SiblingUnreachabilityError,
+    );
+  });
+
+  it("resolves when every DISALLOWED sibling is unreachable (the isolated-OK path)", async () => {
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    const probe = createLiveSiblingProbe({
+      runner: gvisorRunner,
+      connectProbe: async () => false, // every sibling unreachable
+    });
+    const spec = {} as RunSpec;
+    await expect(probe.assertUnreachable(spec, SIBLINGS)).resolves.toBeUndefined();
+  });
+
+  it("does NOT probe the allowed data-proxy peer (only disallowed siblings are checked)", async () => {
+    const gvisorRunner = { backend: "gvisor" } as unknown as SandboxRunner;
+    const probedRoles: string[] = [];
+    const probe = createLiveSiblingProbe({
+      runner: gvisorRunner,
+      connectProbe: async (_spec, s) => {
+        probedRoles.push(s.role);
+        return false;
+      },
+    });
+    const spec = {} as RunSpec;
+    await probe.assertUnreachable(spec, SIBLINGS);
+    // The data-proxy peer is allowed and therefore never probed; only the cross-tenant
+    // handler + sidecar are checked.
+    expect(probedRoles.sort()).toEqual(["handler", "sidecar"]);
+    expect(probedRoles).not.toContain("data-proxy");
   });
 });
