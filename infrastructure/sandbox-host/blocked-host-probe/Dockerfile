@@ -1,9 +1,10 @@
 # blocked-host-probe - the TRUSTED operator probe image (SBX-02/06, PRX-02).
 #
 # This image is an operator tool, NOT untrusted handler code. The deployer's
-# runEgressProbe launches it inside the handler's network namespace
-# (NetworkMode: container:<handlerName>) so a single TCP connect from this image
-# tests the HANDLER's real reachability of a blocked host. It exits 0 if the
+# runEgressProbe launches it on the handler's pairnet (NetworkMode: the pairnet
+# name - the same internal bridge, no gateway, so the same reachability as the
+# handler) so a single TCP connect from this image tests the HANDLER's real
+# reachability of a blocked host. It exits 0 if the
 # target is reachable (a CONTAINMENT FAILURE) and non-zero if the connect is
 # refused / times out (the blocked-OK outcome the acceptance wants).
 #

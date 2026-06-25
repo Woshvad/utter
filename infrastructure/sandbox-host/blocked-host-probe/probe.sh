@@ -6,9 +6,10 @@
 # (a containment FAILURE the caller must surface), non-zero if the connect is
 # refused / times out (the blocked-OK outcome).
 #
-# This runs inside the HANDLER's network namespace (the host caller sets
-# NetworkMode: container:<handlerName>), so the reachability it tests is the
-# handler's real reachability, not this container's own.
+# This runs on the handler's pairnet (the host caller sets NetworkMode to the
+# pairnet name - the same internal bridge, no gateway, so the same reachability
+# as the handler), so the reachability it tests is the handler's real
+# reachability, not this container's own.
 set -eu
 
 TARGET_HOST="${1:?probe.sh: missing target host (arg 1)}"

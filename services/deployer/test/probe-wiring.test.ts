@@ -6,19 +6,19 @@
 // that launches the blocked-host probe image DIRECTLY via dockerode. It is
 // HOST-GATED:
 //   - NO docker handle  -> SKIP (operator-gated log), return false (NOT a false pass).
-//   - WITH a docker handle but NO handlerName -> throw (the probe needs the handler
-//     netns to test the handler's reachability).
-//   - WITH a docker handle + handlerName -> drive the genuine probe; every blocked
+//   - WITH a docker handle but NO pairnet network -> throw (the probe attaches to the
+//     handler's pairnet to test the handler's reachability).
+//   - WITH a docker handle + network -> drive the genuine probe; every blocked
 //     host unreachable -> resolve true; a reachable host -> ContainmentFailureError.
 //
 // AUTONOMOUS: no real daemon. The "with a handle" path injects a docker spy whose
 // containers exit non-zero (a non-zero exit == the host was UNREACHABLE == the
 // blocked-OK outcome), so assertBlocked resolves and we assert the wiring built a
-// VALID createContainer spec (no `#host` tag, the target in Cmd, the handler netns).
-// No live SSRF is ever attempted.
+// VALID createContainer spec (no `#host` tag, the target in Cmd, the pairnet
+// NetworkMode). No live SSRF is ever attempted.
 //
 // HOST VALIDATION REQUIRED: the construction logic below is verified here, but the
-// actual probe RUN (launching utter/blocked-host-probe in the handler netns and
+// actual probe RUN (launching utter/blocked-host-probe on the handler's pairnet and
 // observing real reachability) needs the provisioned gVisor host - it is NOT
 // runtime-validated in this suite.
 import { describe, it, expect, vi } from "vitest";
@@ -30,14 +30,14 @@ import {
   type DockerHandle,
 } from "../src/live-deploy";
 
-const HANDLER_NAME = "utter_res_echo-handler";
+const PAIRNET_NAME = "utter_pairnet_echo";
 
 /**
  * A docker spy shaped to what the injected connectProbe needs: createContainer ->
  * { id, start(), wait() -> { StatusCode } }. A non-zero StatusCode means the probe
  * container could NOT reach the target (the blocked-OK outcome), so assertBlocked
  * resolves. Records every createContainer arg so the test can assert the spec is a
- * VALID dockerode create spec (no `#` in the image, the target in Cmd, the netns).
+ * VALID dockerode create spec (no `#` in the image, the target in Cmd, the pairnet).
  */
 function mockDocker(statusCode = 1): {
   docker: DockerHandle;
@@ -55,7 +55,7 @@ function mockDocker(statusCode = 1): {
 
 describe("buildProbeCreateOptions - the pure dockerode create spec (verifiable here)", () => {
   it("builds a VALID image reference (no `#host` suffix) with the target in Cmd", () => {
-    const opts = buildProbeCreateOptions({ targetHost: "169.254.169.254", handlerName: HANDLER_NAME });
+    const opts = buildProbeCreateOptions({ targetHost: "169.254.169.254", network: PAIRNET_NAME });
     // The image is the plain tag - NEVER `utter/blocked-host-probe:latest#169.254.169.254`,
     // which Docker rejects with "invalid reference format".
     expect(opts.Image).toBe(BLOCKED_HOST_PROBE_IMAGE);
@@ -64,13 +64,17 @@ describe("buildProbeCreateOptions - the pure dockerode create spec (verifiable h
     expect(opts.Cmd).toEqual(["169.254.169.254"]);
   });
 
-  it("runs the probe inside the HANDLER's network namespace", () => {
-    const opts = buildProbeCreateOptions({ targetHost: "10.0.0.1", handlerName: HANDLER_NAME });
-    expect(opts.HostConfig.NetworkMode).toBe(`container:${HANDLER_NAME}`);
+  it("attaches the probe to the handler's pairnet (NOT a container:<handler> netns share)", () => {
+    const opts = buildProbeCreateOptions({ targetHost: "10.0.0.1", network: PAIRNET_NAME });
+    // The pairnet name verbatim - the same internal no-gateway bridge as the handler,
+    // so the same reachability. NEVER `container:<handler>` (a fragile netns share a
+    // runc probe cannot observe across a runsc userspace netstack).
+    expect(opts.HostConfig.NetworkMode).toBe(PAIRNET_NAME);
+    expect(opts.HostConfig.NetworkMode).not.toContain("container:");
   });
 
   it("hardens the probe container (auto-remove, cap-drop, no-new-privileges, caps)", () => {
-    const opts = buildProbeCreateOptions({ targetHost: "127.0.0.1", handlerName: HANDLER_NAME });
+    const opts = buildProbeCreateOptions({ targetHost: "127.0.0.1", network: PAIRNET_NAME });
     expect(opts.HostConfig.AutoRemove).toBe(true);
     expect(opts.HostConfig.ReadonlyRootfs).toBe(true);
     expect(opts.HostConfig.CapDrop).toEqual(["ALL"]);
@@ -80,7 +84,7 @@ describe("buildProbeCreateOptions - the pure dockerode create spec (verifiable h
   });
 });
 
-describe("runEgressProbe - host gate (skip without a docker handle)", () => {
+describe("runEgressProbe - host gate (skip without a docker handle, pairnet-attached probe)", () => {
   it("SKIPS and returns false when no docker handle is available (operator-gated, NOT a false pass)", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const result = await runEgressProbe(undefined);
@@ -90,9 +94,9 @@ describe("runEgressProbe - host gate (skip without a docker handle)", () => {
     log.mockRestore();
   });
 
-  it("THROWS when a docker handle is present but no handlerName is given (needs the handler netns)", async () => {
+  it("THROWS when a docker handle is present but no pairnet network is given (needs the handler's pairnet)", async () => {
     const { docker } = mockDocker(1);
-    await expect(runEgressProbe(docker)).rejects.toThrow(/handlerName/i);
+    await expect(runEgressProbe(docker)).rejects.toThrow(/pairnet network/i);
   });
 });
 
@@ -101,22 +105,23 @@ describe("runEgressProbe - real probe path (injected connectProbe -> dockerode)"
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { docker, createContainer } = mockDocker(1); // non-zero exit == unreachable == blocked OK
 
-    const result = await runEgressProbe(docker, HANDLER_NAME);
+    const result = await runEgressProbe(docker, PAIRNET_NAME);
 
     expect(result).toBe(true);
     // The real probe launched a probe container per target (the full EGRESS_BLOCK_SET
     // plus DEFAULT_PROBE_TARGETS) through the injected connectProbe -> dockerode seam.
     expect(createContainer).toHaveBeenCalled();
     // Every create call carried a VALID spec: a plain image tag (no `#`), a Cmd that
-    // carries the target host, and the handler netns. The old code built
-    // `${image}#${host}` which Docker rejected as an invalid reference.
+    // carries the target host, and the handler's pairnet NetworkMode. The old code
+    // built `${image}#${host}` which Docker rejected as an invalid reference.
     for (const call of createContainer.mock.calls) {
       const spec = call[0] as { Image: string; Cmd: string[]; HostConfig: { NetworkMode: string } };
       expect(spec.Image).toBe(BLOCKED_HOST_PROBE_IMAGE);
       expect(spec.Image).not.toContain("#");
       expect(Array.isArray(spec.Cmd)).toBe(true);
       expect(spec.Cmd).toHaveLength(1);
-      expect(spec.HostConfig.NetworkMode).toBe(`container:${HANDLER_NAME}`);
+      expect(spec.HostConfig.NetworkMode).toBe(PAIRNET_NAME);
+      expect(spec.HostConfig.NetworkMode).not.toContain("container:");
     }
     expect(log).toHaveBeenCalledWith(expect.stringContaining("PRX-02 OK"));
     log.mockRestore();
@@ -126,7 +131,7 @@ describe("runEgressProbe - real probe path (injected connectProbe -> dockerode)"
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { docker } = mockDocker(0); // exit 0 == the host WAS reachable == containment failure
 
-    await expect(runEgressProbe(docker, HANDLER_NAME)).rejects.toThrow(/containment/i);
+    await expect(runEgressProbe(docker, PAIRNET_NAME)).rejects.toThrow(/containment/i);
     log.mockRestore();
   });
 });
