@@ -491,3 +491,43 @@ Once all three acceptances pass on the provisioned host, update the three
 to "Verified live", and tick the `## Manual-Only Verifications` rows in
 `.planning/phases/03-sandbox-deploy/03-VALIDATION.md`. Until then they remain
 Deferred Items - the autonomous logic is already proven by the Plans 02-05 suite.
+
+---
+
+## Host the studio at app.utter.technology (no tunnel)
+
+These steps put the Utter studio behind the existing Traefik at
+https://app.utter.technology with automatic TLS and no SSH tunnel. The studio is
+a trusted control-plane service placed on ingress/controlplane/upstreamnet only;
+it never joins edge, proxynet, or redisnet, so it does not weaken the resource or
+money-path isolation.
+
+1. DNS. Create a DNS A record `app.utter.technology` pointing at the host public
+   IP. Traefik derives the cert domain from the router Host rule, so a single A
+   record is enough; no wildcard SAN is needed for this host.
+
+2. Secrets in .env.local. Ensure `.env.local` (gitignored, never committed) has:
+   - `SESSION_SECRET` at least 32 chars, for example `openssl rand -hex 32`. The
+     production studio fails closed without it: session.server.ts refuses to start
+     with a short or missing secret rather than fall back to the dev key.
+   - `DEPLOYER_AUTH_SECRET` the Bearer the studio presents to the host deployer.
+   - `DEPLOY_DOMAIN` the deploy domain the agent-card URLs are built from.
+   - `ARC_RPC_URL` the Arc RPC endpoint (optional; the chain default is used when
+     blank).
+   - `NAMECHEAP_API_USER` and `NAMECHEAP_API_KEY` the same DNS-01 credentials the
+     wildcard cert already uses, so the le resolver can issue the studio cert.
+
+3. Host deployer. Make sure the deployer host process is running on :8788 and that
+   8788 is NOT open to the public internet (host firewall). The studio reaches it
+   only over the docker bridge via host.docker.internal; POST /deploy is
+   Bearer-authed by DEPLOYER_AUTH_SECRET regardless.
+
+4. Build and bring up only the studio:
+   `docker compose -f infrastructure/docker-compose.yml --env-file .env.local up -d --build studio`
+   Traefik picks up `dynamic/studio.yml` through the file provider with no restart
+   and issues the cert on the first request, which can take a few seconds.
+
+5. Verify. Browse https://app.utter.technology and run
+   `curl -I https://app.utter.technology`, expecting a 200 or 302 with a valid
+   Let's Encrypt cert. The very first request may briefly 404 or show a
+   cert-pending state while ACME completes; retry after a few seconds.
