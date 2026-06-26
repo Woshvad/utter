@@ -107,6 +107,8 @@ describe("bundleGeneratedHandler (trusted shim + esbuild + no-install Dockerfile
       expect(serverJs).not.toMatch(/from\s+["']@utter\//);
       // The generated handler's success shape is inlined (it references `length`).
       expect(serverJs).toContain("length");
+      // The src type-stub handler is NOT bundled: the generated handler shadows it.
+      expect(serverJs).not.toContain("NOT_BUNDLED");
 
       const dockerfile = await readFile(dockerfilePath, "utf8");
       expect(dockerfile).toContain('CMD ["node", "server.js"]');

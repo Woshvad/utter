@@ -165,6 +165,15 @@ export {
   GENERATED_BUNDLE_KEYS,
 } from "./bundle-generated";
 
+// Pre-build fail-closed static gate (deploy plane B, security-critical): run the
+// @utter/sandbox prepublish static checks over the in-memory generated bundle and throw
+// BundleGateError on ANY violation (or if the check itself errors) BEFORE any build runs.
+export {
+  gateGeneratedBundle,
+  BundleGateError,
+  runStaticChecksForGate,
+} from "./gate-bundle";
+
 // Deployer-side per-resource caller-auth token mint (C1): reuse the facilitator's
 // mintResourceAuthToken to mint ONE rid-bound token per deploy for the SIDECAR
 // (never the untrusted handler). Validates the secret (>=32 chars) and defaults to a

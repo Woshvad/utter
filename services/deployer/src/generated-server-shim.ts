@@ -15,6 +15,11 @@
 // mirrors examples/echo/handler-main.ts (the proven gate-less handler entrypoint).
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+// `./handler` is the generated handler. At deployer typecheck time it resolves to the
+// sibling type-stub src/handler.ts in this dir (the template `handler` contract). At
+// deploy time bundleGeneratedHandler writes THIS shim into the bundle dir next to the
+// GENERATED handler.ts, so esbuild resolves `./handler` to the real generated handler -
+// the src stub is never bundled. The stub gives tsc the exact contract the shim relies on.
 import { handler } from "./handler";
 
 /** The default port the shim listens on (matches the no-install Dockerfile EXPOSE). */
