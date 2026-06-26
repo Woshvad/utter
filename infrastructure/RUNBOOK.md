@@ -32,7 +32,7 @@ and publication is failed/flagged.
 # 1. Build the blocked-host probe-tester image on the host (per the probe contract):
 #    a tiny image that, given PROBE_TARGET, attempts a TCP connect + HTTP GET and
 #    exits 0 ONLY if the host is reachable (the containment-FAILURE outcome).
-docker build -t utter/blocked-host-probe:latest infrastructure/sandbox-host/probe/
+docker build -t utter/blocked-host-probe:latest infrastructure/sandbox-host/blocked-host-probe/
 
 # 2. Run the malicious fixture (services/sandbox/test/fixtures/malicious) under
 #    runsc behind the host nftables rules, then drive the dynamic blocked-host
