@@ -1,0 +1,50 @@
+# The studio edge router (HOST-STUDIO). Operator-managed STATIC dynamic config.
+#
+# This file is hand-maintained by the operator, distinct from the per-resource
+# <slug>.yml files the deployer generates into this same directory. Traefik
+# hot-loads it through the existing file provider (traefik.yml providers.file,
+# watch: true), so adding it needs no Traefik restart.
+#
+# The router fronts the trusted studio container at Host(app.utter.technology).
+# The `app` host is RESERVED for the studio and must NOT be used as a resource
+# slug, or the deployer would generate a conflicting router for the same host.
+#
+# Operator prerequisites: create a DNS A record app.utter.technology -> the host
+# public IP, and keep the Namecheap creds (NAMECHEAP_API_USER / NAMECHEAP_API_KEY)
+# in .env.local so the le DNS-01 resolver can issue the cert. Traefik derives the
+# cert domain from the Host rule, so no wildcard SAN is needed for this router.
+http:
+  routers:
+    # The studio over HTTPS. websecure + the le DNS-01 resolver terminate TLS.
+    studio:
+      rule: "Host(`app.utter.technology`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: le
+      service: studio
+
+    # Plain HTTP for the same host redirects to HTTPS. No insecure entrypoint
+    # serves the studio.
+    studio-web:
+      rule: "Host(`app.utter.technology`)"
+      entryPoints:
+        - web
+      middlewares:
+        - studio-https-redirect
+      service: studio
+
+  middlewares:
+    # Permanent redirect of plain http to https for the studio host.
+    studio-https-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+  services:
+    # Traefik resolves the compose service name `studio` over the shared ingress
+    # network via Docker embedded DNS; the container listens on PORT 3000.
+    studio:
+      loadBalancer:
+        servers:
+          - url: "http://studio:3000"
