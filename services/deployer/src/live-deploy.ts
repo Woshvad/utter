@@ -145,6 +145,33 @@ export interface LiveDeployResult {
   toTreasury?: string;
 }
 
+/**
+ * The trusted control-plane spec a {@link deployResource} run is driven by.
+ *
+ * resourceId, slug, pricing, and maxTimeoutSeconds are TRUSTED operator/control-plane
+ * inputs - they NEVER come from an untrusted generated bundle. classifierSchema is the
+ * openapi the sidecar classifies declared-errors against (the ONE field a generated
+ * deploy reads FROM its bundle). handlerBundleDir (optional) is the ALREADY-GATED
+ * generated bundle dir the handler image is built from; absent, the echo gate-less
+ * handler is bundled.
+ */
+export interface DeployResourceSpec {
+  /** The resource being charged (bytes32 Hex) - the escrow payTo. TRUSTED. */
+  resourceId: Hex;
+  /** The resource slug; derives the container names + the Traefik route. TRUSTED. */
+  slug: string;
+  /** The per-resource metered pricing terms. TRUSTED. */
+  pricing: Pricing;
+  /** Max handler runtime before the gate times out (seconds). TRUSTED. */
+  maxTimeoutSeconds: number;
+  /** The JSON response schema the sidecar classifies against (the one bundle-sourced field). */
+  classifierSchema: string;
+  /** The EXACT discovery routes the sidecar bypasses the gate on (FREE_PATHS). */
+  freePaths: string[];
+  /** The ALREADY-GATED generated bundle dir for the handler image (absent -> echo handler). */
+  handlerBundleDir?: string;
+}
+
 /** Read a required env var or throw an operator-friendly error (never logs the value). */
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -181,8 +208,55 @@ function randomNonce(): Hex {
  *
  * This function is the operator entry point. It is NEVER invoked by the autonomous
  * suite (no provisioned host / cert), so it is exported but not auto-run on import.
+ *
+ * It now delegates to {@link deployResource}: it resolves the docker handle, applies
+ * the host-gate throw, builds the echo spec from the module constants (NO
+ * handlerBundleDir), and runs the generic deploy core. Its observable behavior is
+ * identical to before this extraction.
  */
 export async function liveDeployEcho(
+  fetchImpl: typeof fetch = fetch,
+): Promise<LiveDeployResult> {
+  // Resolve docker + apply the host gate BEFORE any on-chain step (it now fires here in
+  // the wrapper, not deep in the body): off-host this fails fast before gas. The echo
+  // spec is built from the trusted module constants - NO handlerBundleDir (the echo
+  // handler is bundled). classifierSchema is the public echo openapi (declared-errors
+  // free). Then delegate to the generic deploy core.
+  const docker: DockerHandle | undefined = resolveDockerHandle();
+  if (!docker) {
+    throw new Error(
+      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
+        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
+    );
+  }
+  const echoSpec: DeployResourceSpec = {
+    resourceId: RESOURCE_ID,
+    slug: SLUG,
+    pricing: PRICING,
+    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    classifierSchema: readFileSync(ECHO_OPENAPI_PATH, "utf8"),
+    // The echo's ONLY free route is its A2A discovery card; everything else is gated.
+    freePaths: ["/.well-known/agent-card.json"],
+  };
+  return deployResource(docker, echoSpec, fetchImpl);
+}
+
+/**
+ * The generic live HTTPS deploy core (the former liveDeployEcho body, now parameterized).
+ *
+ * It takes a resolved docker handle + a TRUSTED {@link DeployResourceSpec} + a fetch
+ * impl and runs the full deploy: ensure the buyer's escrow deposit, register the
+ * resource on-chain, build+run the sidecar+handler pair (threading spec.handlerBundleDir
+ * into launchResourcePair only when present), write the Traefik route, prove
+ * 402(unpaid)->200(paid) over HTTPS, verify the on-chain Debited split, and run the
+ * PRX-02 egress probe. Returns the same LiveDeployResult shape.
+ *
+ * The host gate lives in the WRAPPERS (liveDeployEcho / deployGeneratedBundle): this
+ * core assumes a live docker handle. It is NEVER run end-to-end by the autonomous suite.
+ */
+export async function deployResource(
+  docker: DockerHandle,
+  spec: DeployResourceSpec,
   fetchImpl: typeof fetch = fetch,
 ): Promise<LiveDeployResult> {
   // (0) Operator inputs from .env.local ONLY. DEPLOY_DOMAIN + the buyer key are
@@ -305,35 +379,29 @@ export async function liveDeployEcho(
       admin: adminWallet as unknown as RegistryAdminWriter,
       reader: publicClient as unknown as RegistryReader,
     },
-    { resourceId: RESOURCE_ID, creator, treasury, creatorBps },
+    { resourceId: spec.resourceId, creator, treasury, creatorBps },
   );
   if (registration.registered) {
-    console.log(`[live-deploy] registered resource ${RESOURCE_ID} (tx ${registration.registrationTx})`);
+    console.log(`[live-deploy] registered resource ${spec.resourceId} (tx ${registration.registrationTx})`);
   } else if (registration.alreadyActive) {
-    console.log(`[live-deploy] resource ${RESOURCE_ID} already active (registration skipped, idempotent redeploy)`);
+    console.log(`[live-deploy] resource ${spec.resourceId} already active (registration skipped, idempotent redeploy)`);
   } else if (registration.registeredButPaused) {
     console.warn(
-      `[live-deploy] resource ${RESOURCE_ID} is registered but PAUSED; not auto-unpausing. ` +
+      `[live-deploy] resource ${spec.resourceId} is registered but PAUSED; not auto-unpausing. ` +
         "Unpause it via the registry owner before expecting a debit to succeed.",
     );
   }
 
   // (0c) BUILD + RUN the sidecar+handler PAIR as hardened runsc services. This is
   // the genuine launch the curl needs: without the running containers the URL serves
-  // nothing. It is HOST-GATED (UTTER_SANDBOX_HOST=1): resolveDockerHandle returns
-  // undefined off-host, so refuse loudly rather than curling a dead URL.
+  // nothing. The host gate (UTTER_SANDBOX_HOST=1) already ran in the WRAPPER before any
+  // on-chain step, so `docker` here is a live handle.
   //
   // NOTE: the pair's live path now REQUIRES wave BD's six-network compose to be
   // applied on the host first - the default proxynet/ingress/controlplane networks
   // must exist or the launch (and the post-create extra-net attach) fail. Apply BD,
   // then run this; see infrastructure/RUNBOOK.md.
-  const docker: DockerHandle | undefined = resolveDockerHandle();
-  if (!docker) {
-    throw new Error(
-      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
-        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
-    );
-  }
+  //
   // Resolve the facilitator URL the SIDECAR (only) will POST verify/settle/release
   // to. An explicit FACILITATOR_URL env override still wins (a non-default deploy);
   // otherwise we auto-resolve the facilitator's on-network IP. The IP (not the name)
@@ -354,29 +422,33 @@ export async function liveDeployEcho(
   console.log(`[live-deploy] facilitator resolved to ${facilitatorUrl}`);
 
   // Mint the per-resource caller-auth token the SIDECAR presents to the facilitator
-  // (C1). It is bound to RESOURCE_ID; the untrusted handler NEVER receives it. NEVER
-  // logged. The classifier schema is the public echo openapi (declared-errors free).
+  // (C1). It is bound to spec.resourceId; the untrusted handler NEVER receives it. NEVER
+  // logged. The classifier schema comes from the spec (the public openapi the sidecar
+  // classifies declared-errors against - the one bundle-sourced field for a generated
+  // deploy; the echo wrapper reads the echo openapi).
   const facilitatorToken = mintFacilitatorToken({
-    resourceId: RESOURCE_ID,
+    resourceId: spec.resourceId,
     secret: facilitatorAuthSecret,
   });
-  const classifierSchema = readFileSync(ECHO_OPENAPI_PATH, "utf8");
+  const classifierSchema = spec.classifierSchema;
 
-  const { handlerName, sidecarName } = pairNames(SLUG);
+  const { handlerName, sidecarName } = pairNames(spec.slug);
   const launched = await launchResourcePair(docker, {
-    resourceId: RESOURCE_ID,
-    slug: SLUG,
+    resourceId: spec.resourceId,
+    slug: spec.slug,
     cap,
-    pricing: PRICING,
-    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    pricing: spec.pricing,
+    maxTimeoutSeconds: spec.maxTimeoutSeconds,
     facilitatorUrl,
     facilitatorToken,
     classifierSchema,
-    // The echo's ONLY free route is its A2A discovery card; everything else is gated.
-    // Explicit here to document intent (this is also buildSidecarServiceEnv's default).
-    // PRICING.maxResponseBytes already flows via `pricing` above, so fix F2's
-    // MAX_RESPONSE_BYTES now reaches the sidecar's metering + bounded proxy read.
-    freePaths: ["/.well-known/agent-card.json"],
+    // The free routes the sidecar bypasses the gate on (spec-driven; the echo wrapper
+    // passes only the A2A discovery card). pricing.maxResponseBytes flows via `pricing`,
+    // so fix F2's MAX_RESPONSE_BYTES reaches the sidecar's metering + bounded proxy read.
+    freePaths: spec.freePaths,
+    // Build the handler image from the ALREADY-GATED generated bundle dir when present;
+    // absent, launchResourcePair bundles the echo gate-less handler (back-compat).
+    ...(spec.handlerBundleDir ? { handlerBundleDir: spec.handlerBundleDir } : {}),
   });
   console.log(
     `[live-deploy] pair running under runsc: handler ${handlerName} (image ` +
@@ -389,11 +461,11 @@ export async function liveDeployEcho(
   // points at the sidecar (not the handler): the 402->200 flows Traefik -> sidecar
   // -> handler, and the sidecar serves /echo and proxies it to the gate-less handler.
   const apex = `resources.${domain}`;
-  const url = `https://${SLUG}.${apex}/echo`;
+  const url = `https://${spec.slug}.${apex}/echo`;
   const routePath = await writeTraefikDynamicFile({
-    slug: SLUG,
+    slug: spec.slug,
     domain,
-    containerUrl: sidecarContainerUrl(SLUG),
+    containerUrl: sidecarContainerUrl(spec.slug),
   });
   console.log(`[live-deploy] deploying echo at ${url} (Traefik route written to ${routePath})`);
 
@@ -417,10 +489,10 @@ export async function liveDeployEcho(
   // (3) Sign a real DebitAuthorization under the locked UtterEscrow/1 domain and
   // re-call with X-PAYMENT -> expect 200 over HTTPS (the live paywall releases).
   const nonce = randomNonce();
-  const validBefore = computeValidBefore(MAX_TIMEOUT_SECONDS, SETTLE_BUFFER_SECONDS);
+  const validBefore = computeValidBefore(spec.maxTimeoutSeconds, SETTLE_BUFFER_SECONDS);
   const signed = await signDebitAuthorization(buyerWallet, {
     buyer,
-    resourceId: RESOURCE_ID,
+    resourceId: spec.resourceId,
     maxAmount: cap,
     nonce,
     validBefore,
@@ -431,7 +503,7 @@ export async function liveDeployEcho(
     network: "eip155:5042002",
     authorization: {
       buyer,
-      resourceId: RESOURCE_ID,
+      resourceId: spec.resourceId,
       maxAmount: cap.toString(),
       nonce,
       validBefore: validBefore.toString(),
@@ -524,7 +596,7 @@ export async function liveDeployEcho(
     // reachability of a blocked host. This is runtime-agnostic (works whether the
     // handler runs under runc or runsc); it does NOT share the handler's netns,
     // which a runc probe cannot reliably observe across a runsc userspace netstack.
-    nonAllowlistedUnreachable = await runEgressProbe(docker, pairnetName(SLUG));
+    nonAllowlistedUnreachable = await runEgressProbe(docker, pairnetName(spec.slug));
   } else {
     console.log(
       "[live-deploy] PRX-02 SKIPPED (Phase 1): set UTTER_RUN_EGRESS_PROBE=1 to run the " +

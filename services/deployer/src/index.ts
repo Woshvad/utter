@@ -134,7 +134,14 @@ export {
 // HTTPS + assert non-allowlisted unreachability. WRITTEN + type-checks, NEVER run
 // in the autonomous suite (needs the provisioned host + *.resources.<domain> cert);
 // recorded as a Deferred Item in STATE.md (Plan 06).
-export { liveDeployEcho, runEgressProbe, type LiveDeployResult, type DockerHandle } from "./live-deploy";
+export {
+  liveDeployEcho,
+  deployResource,
+  runEgressProbe,
+  type DeployResourceSpec,
+  type LiveDeployResult,
+  type DockerHandle,
+} from "./live-deploy";
 
 // Node-entry bundlers (deploy plane B): esbuild a workspace entrypoint into a single
 // self-contained server.js + a prebundled Dockerfile (FROM the resolved digest, CMD
