@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { bundleNodeEntry, type BundleResult } from "./bundle-echo";
+import { gateGeneratedBundle } from "./gate-bundle";
 
 /**
  * The bundle file keys, as a POSIX-literal `as const` tuple. The VALUE is mirrored from
@@ -84,6 +85,23 @@ export async function bundleGeneratedHandler(
   opts?: { port?: number },
 ): Promise<BundleResult> {
   const dir = resolve(bundleDir);
+
+  // BELT-AND-BRACES structural gate: reconstruct the generated bundle from the on-disk
+  // dir and re-run the fail-closed static gate BEFORE writing the shim or running
+  // esbuild. The pre-build gate in deployGeneratedBundle already ran over the in-memory
+  // bundle, but re-gating here guarantees NO build path can produce server.js for an
+  // ungated bundle, even if a caller forgot the pre-build gate. gateGeneratedBundle
+  // throws BundleGateError on any violation (or fails closed if the check itself errors).
+  const onDisk: Record<string, string> = {};
+  for (const key of GENERATED_BUNDLE_KEYS) {
+    try {
+      onDisk[key] = await readFile(join(dir, key), "utf8");
+    } catch {
+      // Per-key absent (ENOENT) is fine: only the keys actually present are gated, and
+      // handler.ts is required by writeBundleToDir before this runs anyway.
+    }
+  }
+  gateGeneratedBundle(onDisk);
 
   // Write the trusted shim INTO the bundle dir as the esbuild entry, so its relative
   // `./handler` import resolves to the already-written generated bundleDir/handler.ts.

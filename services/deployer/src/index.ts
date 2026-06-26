@@ -137,6 +137,7 @@ export {
 export {
   liveDeployEcho,
   deployResource,
+  deployGeneratedBundle,
   runEgressProbe,
   type DeployResourceSpec,
   type LiveDeployResult,

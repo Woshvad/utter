@@ -28,8 +28,10 @@ import { config as loadEnv } from "dotenv";
 import type Docker from "dockerode";
 import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { decodeEventLog, type Address, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -72,7 +74,17 @@ import {
   waitForUnpaid402,
   type DockerHandle,
 } from "./orchestrate";
+import { validateSlug } from "./traefik-config";
+import {
+  GENERATED_BUNDLE_KEYS,
+  writeBundleToDir,
+} from "./bundle-generated";
+import { gateGeneratedBundle } from "./gate-bundle";
 import { mintFacilitatorToken } from "./facilitator-token";
+// Self-namespace import so deployGeneratedBundle calls deployResource through the module
+// binding. That single indirection lets the adversarial gate-before-build test spy on
+// deployResource and assert it is called ZERO times when the bundle fails the gate.
+import * as self from "./live-deploy";
 
 // `quiet: true` keeps dotenv's stdout "injected env" banner off stdout. This module's
 // top-level load fires at IMPORT time, and @utter/deployer is reachable transitively from
@@ -619,6 +631,98 @@ export async function deployResource(
   };
 }
 
+/**
+ * Deploy a GENERATED (untrusted) bundle from an on-disk dir through the same proven
+ * deploy core liveDeployEcho uses.
+ *
+ * SECURITY (untrusted-code handling):
+ *   1. Load the on-disk bundle into an in-memory Record.
+ *   2. GATE FIRST, FAIL CLOSED: run gateGeneratedBundle over the in-memory bundle BEFORE
+ *      any write or build. A violation throws BundleGateError and stops here (zero
+ *      downstream writeBundleToDir / deployResource calls).
+ *   3. Build the TRUSTED control-plane spec: slug / on-chain resourceId / pricing come
+ *      from operator ENV, NEVER from the untrusted bundle. ONLY openapi.json is read FROM
+ *      the bundle (the classifier schema). The handler stays gate-less + token-less
+ *      (deployResource -> launchResourcePair builds buildResourceServiceSpec for the
+ *      handler; the trusted sidecar alone holds FACILITATOR_URL + the rid-bound token).
+ *   4. Write the bundle to a fresh work dir and hand it to deployResource as the
+ *      handlerBundleDir (bundleGeneratedHandler re-gates it structurally before esbuild).
+ *
+ * It is HOST-GATED exactly like liveDeployEcho (UTTER_SANDBOX_HOST=1) and is NEVER run
+ * end-to-end by the autonomous suite. deployResource is called through the module
+ * namespace (`self.deployResource`) so the adversarial test can assert it is NOT reached
+ * when the gate rejects the bundle.
+ */
+export async function deployGeneratedBundle(
+  bundlePath: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<LiveDeployResult> {
+  // (1) Load the on-disk bundle into an in-memory Record. Only GENERATED_BUNDLE_KEYS are
+  // read; a per-key ENOENT is swallowed (an absent optional file is fine). handler.ts is
+  // REQUIRED to bundle: a missing/empty one throws a clear error naming the path.
+  const bundle: Record<string, string> = {};
+  for (const key of GENERATED_BUNDLE_KEYS) {
+    try {
+      bundle[key] = readFileSync(join(bundlePath, key), "utf8");
+    } catch {
+      // ENOENT (or another read miss) for an optional key: skip it.
+    }
+  }
+  const handler = bundle["handler.ts"];
+  if (!handler || handler.trim().length === 0) {
+    throw new Error(
+      `[live-deploy] generated bundle at '${bundlePath}' is missing handler.ts (required to deploy).`,
+    );
+  }
+
+  // (2) GATE FIRST, FAIL CLOSED. Run the pre-build static gate over the in-memory bundle
+  // BEFORE any write or build. A violation throws BundleGateError here, so no work dir is
+  // written and deployResource is never reached.
+  gateGeneratedBundle(bundle);
+
+  // (3) Build the TRUSTED control-plane spec. slug / resourceId / pricing are TRUSTED
+  // operator inputs, NOT from the untrusted bundle; ONLY openapi.json is read FROM the
+  // bundle (the classifier schema). validateSlug rejects a path-traversing / non-dns slug.
+  const slug = validateSlug(requireEnv("DEPLOY_SLUG"));
+  const resourceId = resourceIdForLabel(process.env.DEPLOY_RESOURCE_LABEL?.trim() || slug);
+  // A generated bundle without an openapi still deploys with a permissive empty-paths
+  // classifier; we do NOT read any other bundle file as control-plane input.
+  const bundleOpenapi = bundle["openapi.json"];
+  const classifierSchema =
+    bundleOpenapi && bundleOpenapi.trim().length > 0
+      ? bundleOpenapi
+      : JSON.stringify({ openapi: "3.1.0", paths: {} });
+  const deploySpec: DeployResourceSpec = {
+    resourceId,
+    slug,
+    // Reuse the SAME PRICING the echo path uses (it reads PRICE_* / MAX_RESPONSE_BYTES
+    // env). This is a TRUSTED operator input, never the bundle's choosing.
+    pricing: PRICING,
+    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    classifierSchema,
+    freePaths: ["/.well-known/agent-card.json"],
+  };
+
+  // (4) Write the bundle to a fresh work dir, then host-gate docker exactly like
+  // liveDeployEcho and run the deploy core with the work dir as the handlerBundleDir.
+  const workDir = await mkdtemp(join(tmpdir(), "utter-generated-bundle-"));
+  await writeBundleToDir(bundle, workDir);
+
+  const docker: DockerHandle | undefined = resolveDockerHandle();
+  if (!docker) {
+    throw new Error(
+      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
+        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
+    );
+  }
+  // Call through the module namespace so the adversarial test can spy + assert ZERO calls.
+  return self.deployResource(
+    docker,
+    { ...deploySpec, handlerBundleDir: workDir },
+    fetchImpl,
+  );
+}
+
 // `resolveDockerHandle` + the `DockerHandle` type now live in orchestrate.ts (the
 // canonical launch plane); they are imported above and re-exported here for
 // back-compat with the barrel and existing callers. The old always-undefined stub
@@ -781,7 +885,11 @@ export async function runEgressProbe(
 // and POSIX alike (server.ts uses the same cross-platform pattern);
 // import.meta.main is a Bun-ism that is always undefined on Node.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  liveDeployEcho()
+  // DEPLOY_BUNDLE_PATH selects the GENERATED-bundle deploy; absent, the echo deploy runs.
+  // Both return a LiveDeployResult and share the same logging + exit-1 chain.
+  const bundlePath = process.env.DEPLOY_BUNDLE_PATH?.trim();
+  const run = bundlePath ? deployGeneratedBundle(bundlePath) : liveDeployEcho();
+  run
     .then((r) => {
       console.log(`[live-deploy] OK: ${r.url} 402(unpaid)->200(paid); PRX-02 unreachable=${r.nonAllowlistedUnreachable}`);
       if (r.settleTx) {
