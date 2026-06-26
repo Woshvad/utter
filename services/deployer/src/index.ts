@@ -145,6 +145,7 @@ export {
   bundleEcho,
   bundleEchoHandler,
   bundleSidecar,
+  bundleNodeEntry,
   buildEchoDockerfile,
   buildNodeBundleDockerfile,
   type BundleOpts,
@@ -152,6 +153,17 @@ export {
   type BundleEchoOpts,
   type BundleEchoResult,
 } from "./bundle-echo";
+
+// GENERATED (untrusted) bundle build core (deploy plane B): write a generated bundle to
+// a dir using POSIX keys verbatim, then esbuild a TRUSTED gate-less shim (which imports
+// the generated ./handler) into a self-contained server.js behind the SAME no-install
+// Dockerfile echo uses. NEVER the generated npm-ci Dockerfile. The pre-build static gate
+// (gate-bundle.ts) MUST run before this.
+export {
+  writeBundleToDir,
+  bundleGeneratedHandler,
+  GENERATED_BUNDLE_KEYS,
+} from "./bundle-generated";
 
 // Deployer-side per-resource caller-auth token mint (C1): reuse the facilitator's
 // mintResourceAuthToken to mint ONE rid-bound token per deploy for the SIDECAR
