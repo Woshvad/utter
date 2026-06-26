@@ -220,7 +220,12 @@ async function proxyToHandler(
 
     // Preserve the upstream status + headers so a declared-error 400 still surfaces
     // and the gate's clone-read + byte-length metering see the bounded body intact.
-    return new Response(buffered, {
+    // Copy the bounded Buffer into a fresh Uint8Array before constructing the body: a
+    // Node Buffer is typed Uint8Array<ArrayBufferLike>, which DOM's BodyInit rejects,
+    // whereas new Uint8Array(buffered) is a concrete Uint8Array<ArrayBuffer> that
+    // satisfies BodyInit under both the node and DOM type libs. The copy also detaches
+    // from Node's shared Buffer pool, so only the logical bytes are sent. Same bytes.
+    return new Response(new Uint8Array(buffered), {
       status: upstream.status,
       headers: upstream.headers,
     });
