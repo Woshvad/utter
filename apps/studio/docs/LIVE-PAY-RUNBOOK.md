@@ -53,6 +53,33 @@ accepts an optional `path` override if a resource exposes a different run route.
    infrastructure runbook at `infrastructure/RUNBOOK.md` for provisioning the isolation host and
    nested-virt requirements.
 
+## Studio to deployer seam (DEPLOYER_URL + DEPLOYER_AUTH_SECRET)
+
+When these two env vars are set, `createResource` deploys a created resource through the
+increment-A deployer instead of the local simulation. The real build stages (register,
+build, launch, route, verify, probe) stream into the studio build channel as Mint, Deploy,
+and Verify events; Generate, Publish, and Live stay studio-side.
+
+- **DEPLOYER_URL.** The base URL of the deployer. The studio POSTs the generated bundle to
+  `{DEPLOYER_URL}/deploy`. When set together with `DEPLOYER_AUTH_SECRET`, `createResource`
+  streams the real deployer build stages into the build channel. When unset, `createResource`
+  falls back to the local-sim `LOCAL_REAL_BUILD_EVENTS` stream.
+
+- **DEPLOYER_AUTH_SECRET.** The shared bearer the studio sends as `Authorization: Bearer` on
+  the deploy request. It must equal the deployer's `DEPLOYER_AUTH_SECRET` and be at least 32
+  characters. Store it ONLY in `.env.local` (gitignored); never commit it. The studio never
+  logs it, never returns it to the browser, and never places it in a build-event log.
+
+Both must be present and non-empty to enable real deploys. If either is unset the studio uses
+the local simulation. `DEPLOYER_URL` and `DEPLOYER_AUTH_SECRET` are read only server-side in
+`live-deps.server.ts`, and the deploy client is a `.server.ts` module, so the secret never
+reaches the client bundle.
+
+The studio sends the conservative pricing `{ model: "metered", perKB: "0",
+computeMultiplier: "0", maxResponseBytes: 1048576 }` today, with the base price taken from the
+compose price, so the deployer applies no per-KB or per-compute charge. Richer pricing capture
+is a follow-up.
+
 ## Manual end-to-end test
 
 Once the above is provisioned:
