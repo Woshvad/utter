@@ -22,6 +22,8 @@ import {
 import { resourceIdForLabel } from "@utter/x402-arc";
 import { LiveAdapter } from "../app/adapter/live";
 import { RequiresLiveServicesError } from "../app/adapter/live";
+import type { LiveDeps } from "../app/adapter/live-deps.server";
+import type { BuildEvent } from "../app/adapter/types";
 import { BuildEventChannel } from "../app/adapter/build-channel";
 import { runPlaygroundHarness } from "../app/adapter/playground-harness";
 import type { ComposeSpec, Hex, RevenueSummary } from "../app/adapter/types";
@@ -103,6 +105,7 @@ const STUB_REVENUE: RevenueSummary = {
  */
 async function makeLiveAdapter(
   validate: (bundle: Bundle, spec: ResourceSpec) => Promise<ValidationResult> = validateBundle,
+  deployBundle?: LiveDeps["deployBundle"],
 ): Promise<LiveAdapter> {
   const indexStore = new InMemoryIndexStore();
   for (const rec of seedRecords()) {
@@ -114,6 +117,9 @@ async function makeLiveAdapter(
     buildChannel: new BuildEventChannel(),
     generate: scaffoldGenerate,
     validate,
+    // The real deploy seam (undefined by default so the existing cases keep the
+    // LOCAL_REAL_BUILD_EVENTS local-sim path). When injected, createResource streams it.
+    deployBundle,
     // Inject the REAL harness so the escrow reserve-before-run gate is proven, not faked.
     runPlayground: runPlaygroundHarness,
     // Inject a deterministic revenue seam (the production seam GETs the facilitator's
@@ -344,5 +350,95 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(detail.cardUrl).toMatch(
       /^https:\/\/[a-z0-9-]+\.resources\.[a-z0-9.-]+\/\.well-known\/agent-card\.json$/,
     );
+  });
+});
+
+describe("LiveAdapter create flow with the real deployer seam (injected deployBundle)", () => {
+  /** The slug derived from the standard makeComposeSpec prompt (kebab of the prompt text). */
+  const EXPECTED_SLUG = "echo-the-caller-s-text-back-with-its-length";
+
+  it("streams Generate -> deployer events (Mint/Deploy/Verify) -> Publish -> Live", async () => {
+    // Record the single argument the seam is called with, and yield three deployer events.
+    let captured: { bundle: unknown; slug: string; resourceLabel: string; pricing: unknown } | undefined;
+    const deployBundle: LiveDeps["deployBundle"] = (params) => {
+      captured = params;
+      return (async function* (): AsyncGenerator<BuildEvent> {
+        yield { stage: "Mint", status: "ok", log: "identity registered" };
+        yield { stage: "Deploy", status: "ok", log: "sandbox launched" };
+        yield { stage: "Verify", status: "ok", log: "gates passed" };
+      })();
+    };
+    const adapter = await makeLiveAdapter(validateBundle, deployBundle);
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string }[] = [];
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status });
+    }
+
+    // The full ordered sequence: Generate(run,ok) -> the three deployer events -> Publish -> Live.
+    expect(collected).toEqual([
+      { stage: "Generate", status: "running" },
+      { stage: "Generate", status: "ok" },
+      { stage: "Mint", status: "ok" },
+      { stage: "Deploy", status: "ok" },
+      { stage: "Verify", status: "ok" },
+      { stage: "Publish", status: "ok" },
+      { stage: "Live", status: "ok" },
+    ]);
+
+    // The deployer is POSTed the keystone resourceLabel and the conservative pricing.
+    expect(captured?.resourceLabel).toBe(`utter:resource:${EXPECTED_SLUG}`);
+    expect(captured?.slug).toBe(EXPECTED_SLUG);
+    expect(captured?.pricing).toEqual({
+      model: "metered",
+      base: makeComposeSpec().basePrice.toString(),
+      perKB: "0",
+      computeMultiplier: "0",
+      maxResponseBytes: 1048576,
+    });
+  });
+
+  it("falls back to the LOCAL_REAL_BUILD_EVENTS stream when deployBundle is undefined", async () => {
+    // The existing default (no deployBundle) keeps the local-sim sequence Generate..Live.
+    const adapter = await makeLiveAdapter();
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const stages: string[] = [];
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      stages.push(ev.stage);
+    }
+    expect(stages[0]).toBe("Generate");
+    expect(stages.at(-1)).toBe("Live");
+    expect(stages).toContain("Deploy");
+    expect(stages).toContain("Verify");
+    expect(stages).toContain("Mint");
+    expect(stages).toContain("Publish");
+  });
+
+  it("a deployer throw surfaces a Deploy(error) and still completes the channel (no hang)", async () => {
+    const SECRET_SHAPED = "Bearer sk_live_should_never_appear";
+    const deployBundle: LiveDeps["deployBundle"] = () =>
+      (async function* (): AsyncGenerator<BuildEvent> {
+        yield { stage: "Mint", status: "ok", log: "identity registered" };
+        // The streamDeploy errors are already bearer-free; this message is plain prose.
+        throw new Error("deploy failed: build timed out");
+      })();
+    const adapter = await makeLiveAdapter(validateBundle, deployBundle);
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string; log: string }[] = [];
+    // If the channel did not complete, this loop would hang and the test would time out.
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status, log: ev.log });
+    }
+
+    const deployError = collected.find((e) => e.stage === "Deploy" && e.status === "error");
+    expect(deployError).toBeDefined();
+    expect(deployError?.log).toBe("deploy failed: build timed out");
+    // No emitted log carries a secret-shaped string.
+    for (const ev of collected) {
+      expect(ev.log).not.toContain(SECRET_SHAPED);
+    }
   });
 });
