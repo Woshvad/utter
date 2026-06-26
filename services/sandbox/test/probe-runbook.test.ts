@@ -94,26 +94,58 @@ describe("probe-runbook - nftables.rules.sh (host-side egress firewall)", () => 
     expect(NFTABLES.toLowerCase()).toContain("never inside the untrusted container");
   });
 
-  it("contains every EGRESS_BLOCK_SET CIDR", () => {
+  it("carries only the metadata SUBSET of EGRESS_BLOCK_SET; the rest lives in the data-proxy firewall", () => {
+    // The descoped host-output chain deliberately carries only a SUBSET of
+    // EGRESS_BLOCK_SET: the link-local/metadata entry. The full container-egress
+    // block set (RFC1918 + loopback) is enforced by the data-proxy firewall
+    // (services/sandbox/src/egress/firewall.ts) and a tracked forward-path
+    // DOCKER-USER TODO, NOT by this host-output chain. The full block-set coverage
+    // lives in firewall.test.ts ("firewall - the block set"); this test only
+    // documents the host chain's deliberate subset.
+    const metadata = "169.254.0.0/16";
+    // EGRESS_BLOCK_SET still imported + used: the metadata entry IS present host-side.
+    expect(EGRESS_BLOCK_SET.some((e) => e.cidr === metadata)).toBe(true);
+    expect(NFTABLES).toContain(metadata);
+    // Every non-metadata, non-loopback EGRESS_BLOCK_SET entry (the RFC1918 ranges)
+    // is NOT carried as a host drop rule - it is the data-proxy firewall's job.
     for (const entry of EGRESS_BLOCK_SET) {
-      expect(NFTABLES).toContain(entry.cidr);
+      if (entry.cidr === metadata || entry.cidr === "127.0.0.0/8") continue;
+      expect(NFTABLES).not.toContain(`ip daddr ${entry.cidr} drop`);
     }
   });
 
-  it("contains the metadata, RFC1918, host loopback, Arc RPC, and facilitator drops", () => {
+  it("drops ONLY link-local/metadata + the Arc RPC (no RFC1918, loopback, or facilitator drops)", () => {
+    // The descoped host denylist drops only the two host-only destinations.
     expect(NFTABLES).toContain("169.254.0.0/16");
-    expect(NFTABLES).toContain("10.0.0.0/8");
-    expect(NFTABLES).toContain("172.16.0.0/12");
-    expect(NFTABLES).toContain("192.168.0.0/16");
-    expect(NFTABLES).toContain("127.0.0.0/8");
     expect(NFTABLES).toContain("ARC_RPC_IP");
-    expect(NFTABLES).toContain("FACILITATOR_IP");
+    // The RFC1918 + loopback drops were removed: on a host-output chain they break
+    // host->container and loopback traffic while never touching the container's
+    // FORWARDED egress. Assert against the `drop` rule form (the CIDRs appear
+    // nowhere in this file, but the rule form is the robust assertion).
+    expect(NFTABLES).not.toContain("ip daddr 10.0.0.0/8 drop");
+    expect(NFTABLES).not.toContain("ip daddr 172.16.0.0/12 drop");
+    expect(NFTABLES).not.toContain("ip daddr 192.168.0.0/16 drop");
+    expect(NFTABLES).not.toContain("ip daddr 127.0.0.0/8 drop");
+    // The facilitator drop was removed too (host reaches the facilitator container
+    // via host->container traffic; dropping it would break the deployer->facilitator hop).
+    expect(NFTABLES).not.toContain("FACILITATOR_IP");
   });
 
-  it("default policy is drop and the ONLY accept is the data-proxy", () => {
-    expect(NFTABLES).toContain("policy drop");
-    expect(NFTABLES).toContain("DATA_PROXY_IP");
-    expect(NFTABLES).toContain("DATA_PROXY_PORT");
+  it("is a MINIMAL policy-ACCEPT denylist with SSH self-preservation (not a default-drop boundary)", () => {
+    // The active chain declaration is policy accept, never policy drop. (Prose in
+    // the header mentions a future "flip back to policy drop", so assert against the
+    // chain-decl line form `policy drop;`, not the bare substring.)
+    expect(NFTABLES).toContain("policy accept;");
+    expect(NFTABLES).not.toContain("policy drop;");
+    // SSH + loopback + established self-preservation so a flip to drop can never
+    // silently lock the operator out.
+    expect(NFTABLES).toContain("tcp sport 22 accept");
+    expect(NFTABLES).toContain('oifname "lo" accept');
+    expect(NFTABLES).toContain("ct state established,related accept");
+    // This host chain is NOT the container boundary, so it carries no data-proxy
+    // accept (that is the data-proxy firewall's domain, firewall.ts).
+    expect(NFTABLES).not.toContain("DATA_PROXY_IP");
+    expect(NFTABLES).not.toContain("DATA_PROXY_PORT");
   });
 
   it("refuses to run unless UTTER_SANDBOX_HOST=1 (cannot run on a dev box)", () => {
