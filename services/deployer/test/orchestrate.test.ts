@@ -7,9 +7,11 @@
 // and waitForUnpaid402's poll/retry/timeout behaviour against a stubbed fetch. The
 // docker-needing launch/reap paths are NOT exercised here (they need a live runsc).
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, access } from "node:fs/promises";
+import { mkdtemp, rm, readFile, access, stat } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type Docker from "dockerode";
 import type { Hex } from "viem";
 import type { Pricing } from "@utter/x402-arc";
@@ -38,8 +40,11 @@ import {
   PAIRNET_KIND,
   type DockerHandle,
 } from "../src/orchestrate";
+import { writeBundleToDir } from "../src/bundle-generated";
 import type { ActualContainer } from "../src/reconcile";
 import { parseTraefikDynamicConfig } from "../src/traefik-config";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const RESOURCE_ID =
   "0x9a3c1f2e4b5d6c7a8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90123456789ab" as Hex;
@@ -869,6 +874,53 @@ describe("launchResourcePair", () => {
         classifierSchema: CLASSIFIER_SCHEMA,
       }),
     ).rejects.toThrow(/could not resolve the handler's IP/);
+  });
+});
+
+describe("launchResourcePair with a generated handler bundle dir", () => {
+  it("builds the handler image from the GENERATED bundle dir and leaves the sidecar trusted path untouched", async () => {
+    const { docker, calls } = makePairStub("172.30.0.9");
+
+    // A generated bundle dir on disk: the benign handler source + a tiny openapi. The
+    // gate runs in the deployGeneratedBundle glue (Task 3) over the in-memory bundle;
+    // bundleGeneratedHandler re-gates the on-disk dir at its top (defense in depth).
+    const tmpDir = await mkdtemp(join(tmpdir(), "utter-orch-genbundle-"));
+    try {
+      await writeBundleToDir(
+        {
+          "handler.ts": readFileSync(
+            resolve(HERE, "fixtures/generated-benign/handler.ts"),
+            "utf8",
+          ),
+          "openapi.json": JSON.stringify({ openapi: "3.1.0", paths: {} }),
+        },
+        tmpDir,
+      );
+
+      await launchResourcePair(docker, {
+        resourceId: RESOURCE_ID,
+        slug: "echo",
+        cap: 10_000n,
+        pricing: PRICING,
+        maxTimeoutSeconds: 30,
+        facilitatorUrl: "http://172.20.0.5:8787",
+        facilitatorToken: FACILITATOR_TOKEN,
+        classifierSchema: CLASSIFIER_SCHEMA,
+        handlerBundleDir: tmpDir,
+      });
+
+      // (a) the handler image was built (from the generated dir, via bundleGeneratedHandler).
+      expect(calls.builtTags).toContain("utter-resource-echo-handler:latest");
+      // (b) the trusted sidecar was STILL built unchanged: handlerBundleDir does not
+      // touch the sidecar path.
+      expect(calls.builtTags).toContain("utter-resource-echo-gate:latest");
+      // (c) bundleGeneratedHandler ran on the generated dir: it wrote server.js (the
+      // esbuilt shim+handler) + the no-install Dockerfile into it.
+      await stat(join(tmpDir, "server.js"));
+      await stat(join(tmpDir, "Dockerfile"));
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
