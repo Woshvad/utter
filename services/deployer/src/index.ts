@@ -138,8 +138,11 @@ export {
   liveDeployEcho,
   deployResource,
   deployGeneratedBundle,
+  deployGatedBundle,
   runEgressProbe,
   type DeployResourceSpec,
+  type DeployGatedBundleParams,
+  type DeployProgressEvent,
   type LiveDeployResult,
   type DockerHandle,
 } from "./live-deploy";
