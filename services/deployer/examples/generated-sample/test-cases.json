@@ -1,0 +1,4 @@
+[
+  { "name": "ok", "input": { "text": "live" }, "expectStatus": 200 },
+  { "name": "bad-input", "input": { "text": 123 }, "expectStatus": 400 }
+]

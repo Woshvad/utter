@@ -1,0 +1,56 @@
+{
+  "$id": "openapi.json",
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Echo",
+    "version": "1.0.0",
+    "description": "Trusted in-process echo endpoint that proves the Phase 2 money path (deposit -> 402 -> 200 with an on-chain debit <= cap). Its success and declared-error schemas are what the response gate classifies handler output against."
+  },
+  "paths": {
+    "/echo": {
+      "post": {
+        "summary": "Echo the input string back with its length.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EchoSuccess" }
+              }
+            }
+          },
+          "400": {
+            "description": "Declared error (bad buyer input)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EchoError" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EchoSuccess": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["echo", "length"],
+        "properties": {
+          "echo": { "type": "string" },
+          "length": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "EchoError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      }
+    }
+  }
+}
