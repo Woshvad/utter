@@ -14,12 +14,15 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Hono } from "hono";
+import { classifyResponse } from "@utter/x402-arc";
 import {
   writeBundleToDir,
   bundleGeneratedHandler,
   GENERATED_BUNDLE_KEYS,
 } from "../src/bundle-generated";
 import { gateGeneratedBundle } from "../src/gate-bundle";
+import { handler as sampleHandler } from "../examples/generated-sample/handler";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -74,5 +77,56 @@ describe("the shipped generated-sample bundle (off-host guard)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// The handler<->classifier contract. The sidecar response gate runs the handler then
+// validates its body against the bundle's openapi.json; a shape mismatch is classified
+// a malfunction (502 response_failed_validation, NO debit) on the host. These cases run
+// the shipped sample handler and classify its REAL output with the SAME classifier the
+// sidecar uses, so a handler/classifier drift fails here off-host instead of as a live
+// 502. (This guard was added after a host run surfaced a { result } vs { echo } mismatch.)
+describe("the sample handler's output validates against its own openapi classifier", () => {
+  /** Mount the sample handler on /echo (the route the deploy probe POSTs to). */
+  function appWithSampleHandler(): Hono {
+    const app = new Hono();
+    app.post("/echo", (c) => sampleHandler(c));
+    return app;
+  }
+
+  /** The sample bundle's openapi doc, parsed (the classifier schema source). */
+  function sampleOpenapi(): Record<string, unknown> {
+    const raw = readFileSync(resolve(EXAMPLE_DIR, "openapi.json"), "utf8");
+    return JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  it("classifies a success body (text -> 200) as 'success'", async () => {
+    const res = await appWithSampleHandler().request("/echo", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "live" }),
+    });
+    expect(res.status).toBe(200);
+    // The exact check the sidecar does live: classify the handler's real body.
+    expect(classifyResponse(sampleOpenapi(), await res.json())).toBe("success");
+  });
+
+  it("classifies a bad-input body (non-string text -> 400) as 'declared_error'", async () => {
+    const res = await appWithSampleHandler().request("/echo", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: 123 }),
+    });
+    expect(res.status).toBe(400);
+    expect(classifyResponse(sampleOpenapi(), await res.json())).toBe("declared_error");
+  });
+
+  it("regression guard: the old { result, length } shape is a malfunction", () => {
+    // Documents the bug this guard prevents. EchoSuccess requires { echo, length } with
+    // additionalProperties:false, so { result, length } matches neither schema and the
+    // gate would 502 it. The handler must return { echo, length } to stay in lockstep.
+    expect(classifyResponse(sampleOpenapi(), { result: "live", length: 4 })).toBe(
+      "malfunction",
+    );
   });
 });

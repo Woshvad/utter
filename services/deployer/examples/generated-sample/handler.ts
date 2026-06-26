@@ -3,9 +3,10 @@
 // DEPLOY_BUNDLE_PATH at when walking the generated-bundle deploy in
 // infrastructure/RUNBOOK.md. It is kept deliberately benign so the pre-build static
 // gate (services/deployer/src/gate-bundle.ts) passes it and the live deploy yields a
-// clean 402->200. The body below is a verbatim copy of the proven benign fixture
-// (services/deployer/test/fixtures/generated-benign/handler.ts); only this comment is
-// prepended. The handler stays UNTRUSTED code: the static gate scans it before any build.
+// clean 402->200. The body mirrors the proven benign fixture
+// (services/deployer/test/fixtures/generated-benign/handler.ts), with the success body
+// keyed `echo` (not `result`) so it validates against this bundle's openapi.json
+// classifier. The handler stays UNTRUSTED code: the static gate scans it before any build.
 //
 // BENIGN generated-handler fixture (deploy plane B, source-only) - the clean
 // generated-shape handler the bundle-generated build core and the pre-build gate
@@ -51,6 +52,10 @@ export async function handler(c: Context): Promise<Response> {
     );
   }
 
-  // Success: return the result with its length.
-  return c.json({ result: text, length: text.length }, 200);
+  // Success: echo the text with its length. The key is `echo` (NOT `result`) so the
+  // body validates against this bundle's openapi.json classifier (EchoSuccess requires
+  // { echo, length }, additionalProperties:false); a mismatch makes the response gate
+  // classify it a malfunction (502, no debit). The guard test runs this handler and
+  // classifies its output to keep handler and classifier in lockstep.
+  return c.json({ echo: text, length: text.length }, 200);
 }
