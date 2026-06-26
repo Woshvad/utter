@@ -411,6 +411,9 @@ export function loadSidecarConfig(env: NodeJS.ProcessEnv = process.env): Sidecar
   if (schemaRaw && schemaRaw.trim().length > 0) {
     try {
       const openapi = JSON.parse(schemaRaw) as Record<string, unknown>;
+      // buildClassifier discovers the resource-named *Success/*Error component
+      // schemas by suffix, so a generated bundle's CLASSIFIER_SCHEMA (e.g.
+      // ResourceSuccess/ResourceError) loads without explicit refs.
       classifier = buildClassifier(openapi);
     } catch (err) {
       // A misconfigured classifier must NOT silently go permissive (that would

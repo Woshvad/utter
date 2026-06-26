@@ -30,20 +30,44 @@ export interface ClassifierRefs {
 }
 
 /**
- * Compile an openapi doc into a classifier. By default the doc must define
- * `components.schemas.EchoSuccess` and `EchoError` and carry `$id:"openapi.json"`
- * (Wave 0 echo fixture sets it). Pass `{ successRef, errorRef }` to classify
- * against resource-named component schemas instead (Phase 4 generated openapi),
- * e.g. `openapi.json#/components/schemas/WeatherSuccess`. Throws at build time if
- * either schema is absent so a misconfigured resource fails loudly rather than
- * silently classifying everything as malfunction.
+ * Find the single `*Success` or `*Error` component-schema ref in an openapi doc by
+ * the name suffix. This mirrors validate.ts findSchemaRefs semantics, replicated
+ * locally so x402-arc carries no dependency on the deploy layer. The pick is
+ * deterministic: names are sorted before matching so it never depends on object-key
+ * insertion order. Returns the `openapi.json#/components/schemas/<name>` ref ONLY
+ * when EXACTLY ONE name matches the suffix; returns undefined for zero matches OR
+ * more than one match. Ambiguity resolving to undefined is the fail-closed property:
+ * the caller then falls back to the Echo default ref, which is absent in a non-echo
+ * doc, so the throw-if-missing after resolution fires.
+ */
+function discoverComponentRef(
+  doc: Record<string, unknown>,
+  suffix: "Success" | "Error",
+): string | undefined {
+  const components = doc.components as { schemas?: Record<string, unknown> } | undefined;
+  const schemas = components?.schemas ?? {};
+  const names = Object.keys(schemas).sort();
+  const matches = names.filter((n) => n.endsWith(suffix));
+  if (matches.length !== 1) return undefined;
+  return `openapi.json#/components/schemas/${matches[0]}`;
+}
+
+/**
+ * Compile an openapi doc into a classifier. The success and declared-error schema
+ * refs are resolved by this precedence: explicit `{ successRef, errorRef }` opts win,
+ * else the single `*Success` / `*Error` component schema is discovered by name suffix
+ * (so a studio-generated bundle's `ResourceSuccess`/`ResourceError`, or a model's
+ * `<Name>Success`/`<Name>Error`, classifies with no opts), else the echo defaults
+ * `EchoSuccess`/`EchoError`. The doc must carry `$id:"openapi.json"` (set here if
+ * absent). Throws at build time if a resolved ref is absent or uncompilable so a
+ * misconfigured or ambiguous resource fails loudly rather than silently classifying
+ * everything as malfunction. Ambiguity (more than one `*Success`) resolves to the
+ * echo default, which is absent in a non-echo doc, so the throw still fires.
  */
 export function buildClassifier(
   openapi: Record<string, unknown>,
   opts?: ClassifierRefs,
 ): ClassifyResponse {
-  const successRef = opts?.successRef ?? SUCCESS_REF;
-  const errorRef = opts?.errorRef ?? ERROR_REF;
   // strict:false tolerates the OpenAPI 3.1 dialect; addFormats supplies
   // date-time/uri/email/etc. AJV would otherwise omit.
   const ajv = addFormats(new Ajv({ allErrors: true, strict: false }));
@@ -54,6 +78,11 @@ export function buildClassifier(
     doc.$id = "openapi.json";
   }
   ajv.addSchema(doc);
+
+  // Resolve refs AFTER `$id` is set so the discovered `openapi.json#...` prefix
+  // matches what ajv.getSchema resolves: explicit opts -> suffix discovery -> Echo.
+  const successRef = opts?.successRef ?? discoverComponentRef(doc, "Success") ?? SUCCESS_REF;
+  const errorRef = opts?.errorRef ?? discoverComponentRef(doc, "Error") ?? ERROR_REF;
 
   const validateSuccess: ValidateFunction | undefined = ajv.getSchema(successRef);
   const validateError: ValidateFunction | undefined = ajv.getSchema(errorRef);
