@@ -234,14 +234,14 @@ docker network inspect redisnet \
 #    Confirm redis is on NEITHER proxynet NOR controlplane (M6); it is on redisnet
 #    only and is unpublished (no host 6379).
 
-# 3. Apply the host nftables default-deny egress. DATA_PROXY_IP is the static
-#    proxynet address; DATA_PROXY_PORT is the data-proxy listen port (8080);
-#    FACILITATOR_IP resolves on controlplane (inspect it above). The ruleset shape
-#    is unchanged from Phase 1 - this is the C2 resolution, now honest because the
-#    handler is off controlplane and never needs the facilitator:
-DATA_PROXY_IP=172.30.0.10 DATA_PROXY_PORT=8080 \
-  ARC_RPC_IP=<resolved-arc-rpc-ip> \
-  FACILITATOR_IP=<facilitator-ip-on-controlplane> \
+# 3. Apply the host nftables egress rules. This is now a MINIMAL host-output
+#    denylist with policy ACCEPT (host self-preservation only): it can never lock
+#    the operator out and never breaks host->container traffic. It is NOT the
+#    container boundary - the container boundary is the per-resource internal:true
+#    pairnet (PRX-02), already proven live. The script needs only ARC_RPC_IP (so the
+#    host itself does not reach the Arc RPC directly; the facilitator CONTAINER
+#    reaches it via forwarded traffic and is unaffected) and UTTER_SANDBOX_HOST=1:
+ARC_RPC_IP=$(getent hosts rpc.testnet.arc.network | awk '{print $1}') \
   UTTER_SANDBOX_HOST=1 sudo -E bash infrastructure/sandbox-host/nftables.rules.sh
 
 # 4. Run the pair deploy WITH the live egress probe. UTTER_SANDBOX_HOST=1 lets the
