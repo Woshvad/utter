@@ -56,12 +56,14 @@ services:
 
   # The allowlisted egress proxy (PRX-01/PRX-02) - the ONLY permitted egress from
   # a sandboxed resource. It joins proxynet (the handler's sole data-plane peer)
-  # with a STATIC IP so the host nftables single-accept (DATA_PROXY_IP) is
-  # deterministic, upstreamnet (the only net where it reaches allowlisted external
-  # upstreams), and redisnet (its quota/cache backend). It verifies the scoped
-  # token, maps resource -> upstream credential server-side, forwards to
-  # allowlisted upstreams. The static proxynet IP 172.30.0.10 is the value the
-  # operator passes as DATA_PROXY_IP to nftables.rules.sh.
+  # with a STATIC IP, upstreamnet (the only net where it reaches allowlisted
+  # external upstreams), and redisnet (its quota/cache backend). It verifies the
+  # scoped token, maps resource -> upstream credential server-side, forwards to
+  # allowlisted upstreams. The static proxynet IP 172.30.0.10 is the data-proxy's
+  # deterministic proxynet address (the handler's sole data-plane peer) and is the
+  # address the future forward-path DOCKER-USER allow-rule will pin. It is NO
+  # LONGER an argument to nftables.rules.sh: that host-output chain was descoped
+  # to a policy-accept denylist that takes only UTTER_SANDBOX_HOST=1 + ARC_RPC_IP.
   data-proxy:
     build:
       context: ..

@@ -39,11 +39,16 @@ Block the SSRF / metadata / private / infra set at the **host** firewall, never
 inside the container (untrusted root-in-container could lift an in-container
 rule — RESEARCH Pitfall 2). The container's only reachable route is the
 data-proxy. Default mechanism is `--network=none` + a veth to the egress
-gateway (strongest "only route is the proxy"); the `DOCKER-USER` REJECT rules
-below are the defense-in-depth alternative:
+gateway (strongest "only route is the proxy").
+
+The `policy drop;` allowlist below is the TARGET forward-path / `DOCKER-USER`
+design (the host-gated proper-fix), NOT the currently-generated host-output
+script. It would constrain the CONTAINER's egress on the forward path; it must
+be validated live against Docker's own nftables integration before it ships:
 
 ```nft
-# nftables (generated; RESEARCH Pattern 2). policy drop; allow only the proxy.
+# TARGET forward-path / DOCKER-USER design (host-gated proper-fix, NOT yet
+# shipped). policy drop; allow only the proxy.
 chain egress {
   type filter hook output priority 0; policy drop;
   ip daddr <DATA_PROXY_IP> tcp dport <DATA_PROXY_PORT> accept   # the only egress
@@ -57,6 +62,14 @@ chain egress {
   # everything else -> policy drop
 }
 ```
+
+The CURRENTLY shipped `infrastructure/sandbox-host/nftables.rules.sh` is a
+different, minimal thing: a host-OUTPUT `policy accept;` denylist that drops
+only 169.254.0.0/16 and the Arc RPC IP, taking only `UTTER_SANDBOX_HOST=1` and
+`ARC_RPC_IP`. It is host-only belt-and-braces and is NOT the container boundary.
+The real container boundary today is the `internal: true` per-resource pairnet
+topology (PRX-02) plus the data-proxy egress firewall
+(`services/sandbox/src/egress/firewall.ts`).
 
 ## 3. Hardened run-spec (every resource container)
 

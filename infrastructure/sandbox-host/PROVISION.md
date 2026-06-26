@@ -76,20 +76,28 @@ enforced limits; disk quota is the operator-confirmed addition.
 
 ## 4. Apply the host egress firewall
 
-Resolve the Arc RPC + facilitator hosts to IPs at deploy time, then apply the
-HOST-side default-deny ruleset (it mirrors `EGRESS_BLOCK_SET` in
-`services/sandbox/src/egress/firewall.ts`):
+Resolve the Arc RPC host to an IP at deploy time, then apply the minimal
+host-output denylist:
 
 ```bash
-UTTER_SANDBOX_HOST=1 DATA_PROXY_IP=<proxy-ip> DATA_PROXY_PORT=8080 \
-  ARC_RPC_IP=<resolved-arc-rpc-ip> FACILITATOR_IP=<resolved-facilitator-ip> \
+UTTER_SANDBOX_HOST=1 \
+  ARC_RPC_IP=$(getent hosts rpc.testnet.arc.network | awk '{print $1}') \
   sudo -E bash infrastructure/sandbox-host/nftables.rules.sh
 ```
 
-The rule is applied at the host / egress-gateway netns, **never inside the
-container** (RESEARCH Pitfall 2). The primary mechanism is `--network=none` + a
-veth to the egress gateway (no route except the proxy); these explicit drops are
-defense-in-depth.
+The shipped `nftables.rules.sh` is a MINIMAL host-output `policy accept;`
+denylist: host-only belt-and-braces that drops only link-local/metadata
+(169.254.0.0/16) and the Arc RPC IP. It is NOT a default-deny container
+firewall and it is NOT the container containment boundary. The rule is applied
+at the host, **never inside the container** (RESEARCH Pitfall 2).
+
+The container boundary today is the `internal: true` per-resource pairnet
+topology (each handler joins only its own `utter_pairnet_<slug>` bridge, no
+gateway, no off-host route), already proven live (PRX-02). The full
+container-egress denylist on the forward path (`DOCKER-USER` / nftables
+`hook forward`, mirroring `EGRESS_BLOCK_SET` in
+`services/sandbox/src/egress/firewall.ts`) is the host-gated proper-fix TODO;
+it is not yet shipped.
 
 ## 5. Provision the internal Verdaccio build mirror (SBX-05)
 
