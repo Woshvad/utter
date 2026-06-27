@@ -8,10 +8,15 @@
 // runPlaygroundHarness VERBATIM so the reserve-before-run escrow gate stays intact.
 //
 // createResource + subscribeBuildEvents are REAL in local-real mode: createResource
-// scaffold-generates a bundle (no ANTHROPIC key), runs the four-gate validateBundle,
-// publishes an IndexRecord into the SHARED singleton store, and kicks off the build-
-// stage stream into the per-resource channel; subscribeBuildEvents is a real async
-// generator that delegates to the channel (yields Generate..Live, then terminates, never
+// computes the deterministic identity (slug -> keccak resourceId) UP FRONT and RETURNS
+// { resourceId, eventsUrl } IMMEDIATELY, before any generate/validate/upsert. The real
+// work runs in the background IIFE, emitting into the per-resource channel: it generates
+// the bundle (real AI generation can take tens of seconds), runs the four-gate
+// validateBundle, publishes an IndexRecord into the SHARED singleton store only after the
+// gate passes, then deploys. The real generation/validation outcome streams as stage
+// events, including the REAL error reason (a generate throw or a gate fail surfaces as a
+// Generate:error stage, never swallowed). subscribeBuildEvents is a real async generator
+// that delegates to the channel (yields the streamed stages, then terminates, never
 // throws before its first yield). getRevenue now reads REAL aggregated revenue through
 // the injected seam (an HTTP GET to the facilitator's /revenue/:resourceId), fail-loud on
 // an unreachable facilitator. None of these touch an operator-gated live service: the
@@ -58,24 +63,19 @@ export class RequiresLiveServicesError extends Error {
   }
 }
 
-/** The ordered local-real build-stage script. Mirrors fixtures/index.ts
- *  FIXTURE_BUILD_EVENTS (a running->ok pair per stage for Generate..Publish, then a
- *  single Live->ok). The Generate stage reflects the real scaffold generate+validate
- *  that already ran; Deploy and Mint are labeled local-sim HONESTLY (no container, no
- *  on-chain mint); Publish reflects the real index upsert that already ran. The logs
- *  carry only non-secret human prose (BuildEvent.log contract). */
-const LOCAL_REAL_BUILD_EVENTS: readonly BuildEvent[] = [
-  { stage: "Generate", status: "running", log: "generating handler bundle" },
-  { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" },
+/** The ordered local-sim DEPLOY stages (Deploy/Verify/Mint only). These are the stages
+ *  the local-sim branch contributes when no real deployer seam is bound. Generate (the
+ *  real scaffold generate + four-gate validate) and Publish/Live are emitted ONCE by the
+ *  background IIFE around this slice, so they are NOT included here (that would double
+ *  them). Deploy and Mint are labeled local-sim HONESTLY (no container, no on-chain mint).
+ *  The logs carry only non-secret human prose (BuildEvent.log contract). */
+const LOCAL_SIM_DEPLOY_EVENTS: readonly BuildEvent[] = [
   { stage: "Deploy", status: "running", log: "deploy (local-sim): in-process, no container" },
   { stage: "Deploy", status: "ok", log: "deploy (local-sim): sandbox simulated up" },
   { stage: "Verify", status: "running", log: "verify (local-sim): replaying gate checks" },
   { stage: "Verify", status: "ok", log: "verify (local-sim): gates already passed" },
   { stage: "Mint", status: "running", log: "mint (local id): no on-chain registry write" },
   { stage: "Mint", status: "ok", log: "mint (local id): local-dev agentId assigned" },
-  { stage: "Publish", status: "running", log: "publishing agent card + index" },
-  { stage: "Publish", status: "ok", log: "listed for discovery (shared local index)" },
-  { stage: "Live", status: "ok", log: "resource is live (local-real)" },
 ] as const;
 
 /** A small await gap between stage emits so the SSE reader observes stages streaming
@@ -188,12 +188,13 @@ export class LiveAdapter implements StudioDataAdapter {
   async createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
     const deps = this.requireDeps();
 
-    // 1. Translate the ComposeSpec into the ai-runtime ResourceSpec. The validator's
-    //    G4 (gatePricing) REQUIRES model "metered", so the pricing handed to the
-    //    runtime is ALWAYS metered regardless of spec.pricingModel; basePrice is a
-    //    base-unit bigint, so we carry it through as a string (no 1e6/decimals
-    //    literal). spec.pricingModel only shapes the DISPLAYED IndexRecord pricing in
-    //    step 4, not this validation pricing.
+    // 1. Compute the deterministic identity + params UP FRONT, WITHOUT the bundle. None
+    //    of this needs the generated bundle, so it can run before (and return ahead of)
+    //    the tens-of-seconds real generation. The validator's G4 (gatePricing) REQUIRES
+    //    model "metered", so the pricing handed to the runtime is ALWAYS metered
+    //    regardless of spec.pricingModel; basePrice is a base-unit bigint, so we carry it
+    //    through as a string (no 1e6/decimals literal). spec.pricingModel only shapes the
+    //    DISPLAYED IndexRecord pricing, not this validation pricing.
     const base = spec.basePrice.toString();
     const resourceSpec = {
       prompt: spec.prompt,
@@ -201,34 +202,22 @@ export class LiveAdapter implements StudioDataAdapter {
       pricing: { model: "metered" as const, base, perKB: "0", max: base },
     };
 
-    // 2. Scaffold-generate the bundle (no ANTHROPIC key on the default seam path).
-    const bundle = await deps.generate(resourceSpec);
-
-    // 3. Four-gate validate BEFORE any publish or stage emit. On failure, throw a clear
-    //    error naming the first violation (gate + kind + detail) and publish nothing
-    //    (reject-before-publish, T-1g-01). create.tsx surfaces the thrown reason.
-    const validation = await deps.validate(bundle, resourceSpec);
-    if (!validation.pass) {
-      const first = validation.violations[0];
-      const reason = first
-        ? `${first.gate}/${first.kind}: ${first.detail}`
-        : "validation failed with no reported violation";
-      throw new Error(`createResource: bundle failed validation (${reason})`);
-    }
-
-    // 4. Derive the slug, then the CANONICAL keccak resourceId via the shared
-    //    resourceIdForLabel over the studio label scheme (utter:resource:<slug>), build
-    //    the IndexRecord, and publish it into the SHARED singleton store. The id is the
-    //    same shared-helper keccak the deployer registers with, so the studio's id agrees
-    //    with the deployer-registered id and the resource's RESOURCE_ID env (§5.5).
-    //    agentId is a clearly-local decimal string (not an on-chain agentId).
-    //    pricing.model reflects the COMPOSE choice (what the UI displays); base/max are
-    //    the base-unit basePrice as strings, perKB "0". cardUrl is built from the injected
-    //    DEPLOY_DOMAIN builder (example.com only as the dev fallback), so the studio card
-    //    origin matches the deployed resource host. No money/identity value is authored
-    //    beyond the read-through projection.
+    // Derive the slug, then the CANONICAL keccak resourceId via the shared
+    // resourceIdForLabel over the studio label scheme (utter:resource:<slug>). The id is
+    // the same shared-helper keccak the deployer registers with, so the studio's id agrees
+    // with the deployer-registered id and the resource's RESOURCE_ID env (§5.5). It is
+    // deterministic by design (no counter), so it can be derived from the slug alone -
+    // before any bundle exists. This is the escrow/payTo keystone; do not change it.
     const slug = deriveSlug(spec.prompt);
     const resourceId = resourceIdForLabel(labelForSlug(slug));
+
+    // Build the IndexRecord that will be published ONLY after the four-gate validate
+    // passes (the upsert happens inside the background IIFE). agentId is a clearly-local
+    // decimal string (not an on-chain agentId). pricing.model reflects the COMPOSE choice
+    // (what the UI displays); base/max are the base-unit basePrice as strings, perKB "0".
+    // cardUrl is built from the injected DEPLOY_DOMAIN builder (example.com only as the
+    // dev fallback), so the studio card origin matches the deployed resource host. No
+    // money/identity value is authored beyond the read-through projection.
     const record: IndexRecord = {
       resourceId,
       agentId: "0",
@@ -242,7 +231,6 @@ export class LiveAdapter implements StudioDataAdapter {
       cardUrl: deps.buildCardUrl(slug),
       active: true,
     };
-    await deps.indexStore.upsert(record);
 
     // The conservative pricing the deployer is POSTed. The studio captures only the base
     // price today, so perKB and computeMultiplier are "0" (the deployer applies no
@@ -258,56 +246,111 @@ export class LiveAdapter implements StudioDataAdapter {
       maxResponseBytes: 1048576,
     };
 
-    // 5. Kick off the build-stage stream into the per-resource channel WITHOUT blocking
-    //    the return, then complete the channel so a draining reader terminates. When the
-    //    real deployer seam is bound (DEPLOYER_URL + DEPLOYER_AUTH_SECRET set) the
-    //    Deploy/Verify/Mint stages come from the deployer's stream; otherwise the local-
-    //    sim LOCAL_REAL_BUILD_EVENTS script is emitted verbatim. Generate/Publish/Live
-    //    stay studio-side. The finally ALWAYS completes the channel so a throw or a never-
-    //    done stream still terminates a draining reader (no hang/leak, T-1g-02).
+    // 2. Do generate + validate + upsert + deploy + publish + live INSIDE the background
+    //    IIFE, emitting into the per-resource channel. The method returns BEFORE this runs
+    //    (see the return below), so a tens-of-seconds real generation never blocks the
+    //    form POST; the page flips to the build stream and watches the stages arrive. The
+    //    channel BUFFERS for the late subscriber (same as the deploy stages today), so a
+    //    slightly-late reader still sees Generate. The finally ALWAYS completes the channel
+    //    so a throw, a gate fail, or a never-done stream still terminates a draining reader
+    //    (no hang/leak, T-1g-02).
     const channel = deps.buildChannel;
     const deployBundle = deps.deployBundle;
     void (async () => {
       try {
-        if (deployBundle) {
-          // Generation already ran in steps 2-3; mark it done, then stream the real deploy.
-          channel.emit(resourceId, { stage: "Generate", status: "running", log: "generating handler bundle" });
-          channel.emit(resourceId, { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" });
-          // The resourceLabel is utter:resource:<slug> so the deployer-derived resourceId
-          // (resourceIdForLabel(resourceLabel)) equals the studio resourceId from step 4
-          // (the escrow/payTo keystone). The conservative pricing avoids any overcharge.
-          for await (const ev of deployBundle({
-            bundle,
-            slug,
-            resourceLabel: labelForSlug(slug),
-            pricing: deployerPricing,
-          })) {
-            channel.emit(resourceId, ev);
+        // Generate running first (one event), then the real generate + four-gate validate.
+        // Wrap generation + validation in an INNER try/catch so a real throw (e.g. the
+        // ClaudeGenerator failing) streams the REAL reason as a Generate:error and returns
+        // without upsert/deploy, never swallowed into an opaque field error.
+        channel.emit(resourceId, { stage: "Generate", status: "running", log: "generating handler bundle" });
+        let bundle;
+        try {
+          bundle = await deps.generate(resourceSpec);
+          const validation = await deps.validate(bundle, resourceSpec);
+          if (!validation.pass) {
+            // A four-gate failure: emit the SAME reason string the old synchronous throw
+            // built (gate/kind: detail), publish NOTHING, deploy NOTHING
+            // (reject-without-publish, T-1g-01), and return - the finally completes the
+            // channel so the reader terminates.
+            const first = validation.violations[0];
+            const reason = first
+              ? `${first.gate}/${first.kind}: ${first.detail}`
+              : "validation failed with no reported violation";
+            channel.emit(resourceId, {
+              stage: "Generate",
+              status: "error",
+              log: `bundle failed validation (${reason})`,
+            });
+            return;
           }
-          // Publish + Live remain studio-side (the deployer covers register/build/launch/
-          // route/verify/probe -> Mint/Deploy/Verify).
+        } catch (err) {
+          // A real generate/validate throw streams its message as a Generate:error so the
+          // operator sees the real reason at the first stage instead of a blind hang. Log
+          // it server-side too. No upsert, no deploy; the finally completes the channel.
+          console.error("createResource generation failed", err);
+          channel.emit(resourceId, {
+            stage: "Generate",
+            status: "error",
+            log: (err as Error).message,
+          });
+          return;
+        }
+
+        // The gate passed: publish the IndexRecord into the SHARED singleton store (publish
+        // ONLY after the gate passes), then mark Generate done (one ok event).
+        await deps.indexStore.upsert(record);
+        channel.emit(resourceId, { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" });
+
+        // 3. The deploy section, in its OWN try/catch so a deployer failure surfaces a
+        //    Deploy(error) (preserving the existing contract) while a generation failure
+        //    surfaces a Generate(error). When the real deployer seam is bound (DEPLOYER_URL
+        //    + DEPLOYER_AUTH_SECRET set) the Deploy/Verify/Mint stages come from the
+        //    deployer's stream; otherwise the local-sim Deploy/Verify/Mint stages are
+        //    emitted. Publish + Live are emitted ONCE at the end.
+        try {
+          if (deployBundle) {
+            // The resourceLabel is utter:resource:<slug> so the deployer-derived resourceId
+            // (resourceIdForLabel(resourceLabel)) equals the studio resourceId above (the
+            // escrow/payTo keystone). The conservative pricing avoids any overcharge.
+            for await (const ev of deployBundle({
+              bundle,
+              slug,
+              resourceLabel: labelForSlug(slug),
+              pricing: deployerPricing,
+            })) {
+              channel.emit(resourceId, ev);
+            }
+          } else {
+            // The local-sim branch contributes ONLY Deploy/Verify/Mint (Generate and
+            // Publish/Live are emitted once, around this slice, so they are not doubled).
+            for (const event of LOCAL_SIM_DEPLOY_EVENTS) {
+              channel.emit(resourceId, event);
+              await delay(1);
+            }
+          }
+          // Publish + Live remain studio-side, emitted ONCE after the deploy branch (the
+          // deployer covers register/build/launch/route/verify/probe -> Mint/Deploy/Verify).
           channel.emit(resourceId, { stage: "Publish", status: "ok", log: "listed for discovery (shared local index)" });
           channel.emit(resourceId, { stage: "Live", status: "ok", log: "resource is live" });
-        } else {
-          for (const event of LOCAL_REAL_BUILD_EVENTS) {
-            channel.emit(resourceId, event);
-            await delay(1);
-          }
+        } catch (err) {
+          // A deployer failure surfaces a Deploy(error) into the channel. streamDeploy's
+          // errors are already bearer-free, so the message is safe to surface as a log. The
+          // finally below still completes the channel so a draining reader terminates.
+          channel.emit(resourceId, {
+            stage: "Deploy",
+            status: "error",
+            log: (err as Error).message,
+          });
         }
-      } catch (err) {
-        // A deployer failure surfaces a Deploy(error) into the channel. streamDeploy's
-        // errors are already bearer-free, so the message is safe to surface as a log. The
-        // finally below still completes the channel so a draining reader terminates.
-        channel.emit(resourceId, {
-          stage: "Deploy",
-          status: "error",
-          log: (err as Error).message,
-        });
       } finally {
         channel.complete(resourceId);
       }
     })();
 
+    // 4. RETURN { resourceId, eventsUrl } IMMEDIATELY, before any generate/validate/upsert
+    //    (those run in the background IIFE above). The SSE route subscribes the
+    //    module-singleton buildChannel by resourceId and the channel BUFFERS for the late
+    //    subscriber, so background-emitted events are still delivered.
     return { resourceId, eventsUrl: `/resources/${resourceId}/events` };
   }
 
