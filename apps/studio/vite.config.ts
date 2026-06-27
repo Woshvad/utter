@@ -6,19 +6,20 @@ import { defineConfig } from "vite";
 // gate. Tests run via the package-local vitest.config.ts, not this file.
 export default defineConfig({
   plugins: [reactRouter()],
-  // Keep ONLY the optional native CPU-feature addon out of the SSR bundle, and BUNDLE
-  // the pure-JS docker/ssh cluster. The studio's live-deps.server.ts imports
-  // @utter/ai-runtime (selectGenerator/validateBundle), and @utter/ai-runtime depends on
-  // @utter/deployer + @utter/sandbox, which pull dockerode -> docker-modem -> ssh2 -> the
-  // OPTIONAL cpu-features native addon (build/Release/cpufeatures.node). The SSR build
-  // noExternals the workspace packages, so dockerode/docker-modem/ssh2 are inlined into
-  // build/server/index.js; only cpu-features stays external so the bundler never tries to
-  // resolve the .node binary (ssh2 loads cpu-features lazily in a try/catch and degrades
-  // when it is absent). We must NOT externalize dockerode/ssh2 themselves: under pnpm's
-  // isolated node_modules the production server bundle cannot resolve a runtime
-  // `import "dockerode"` (a transitive dep the studio never executes - deploys go over HTTP
-  // to the deployer), which crashes the container at boot. Bundling them removes that import.
+  // Keep the docker/ssh cluster EXTERNAL to the SSR bundle. The studio's
+  // live-deps.server.ts imports @utter/ai-runtime (selectGenerator + validateBundle), which
+  // use real helpers from @utter/deployer + @utter/sandbox; those package barrels also
+  // statically pull in the dockerode -> docker-modem -> ssh2 -> cpu-features orchestration
+  // cluster, which the studio never executes (it deploys over HTTP to the deployer). That
+  // cluster is CJS, ships a native addon (build/Release/cpufeatures.node), and uses
+  // __dirname, so it can be NEITHER bundled into this ESM server (ReferenceError: __dirname
+  // is not defined, from ssh2 crypto init) NOR have its .node binary resolved at build time.
+  // So it stays external and loads as CJS at runtime (where __dirname is defined and
+  // cpu-features is an optional try/catch require). pnpm's isolated layout would otherwise
+  // hide these transitive deps from the studio server bundle, so the root .npmrc
+  // public-hoist-pattern hoists them into the root node_modules to make the runtime
+  // resolution succeed.
   ssr: {
-    external: ["cpu-features", "cpufeatures"],
+    external: ["dockerode", "docker-modem", "ssh2", "cpu-features", "cpufeatures"],
   },
 });
