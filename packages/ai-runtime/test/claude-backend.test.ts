@@ -5,11 +5,16 @@
 // assertions are: the discriminator, network-free construction, and that the public
 // generate() barrel routes through selectGenerator to the scaffold backend with no
 // key. The agent-loop constraints are asserted statically by reading the source.
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { describe, it, expect } from "vitest";
-import { ClaudeGenerator } from "../src/claude-backend.js";
+import { afterEach, describe, it, expect } from "vitest";
+import {
+  ClaudeGenerator,
+  buildRepairPrompt,
+  findMissingModelFiles,
+} from "../src/claude-backend.js";
 import { generate } from "../src/index.js";
 import { BUNDLE_KEYS } from "../src/types.js";
 
@@ -74,6 +79,13 @@ describe("claude-backend.ts source discipline (static assertions, no runtime cal
     expect(src).toContain("finally");
     expect(src).toContain("rmSync(tmpDir");
   });
+
+  it("drives both passes through a shared runAgent closure (refactor cannot regress)", () => {
+    // A substring check on the shared closure + maxTurns parameter, not an exact
+    // turn count - the closure refactor must stay so both passes share one sandbox.
+    expect(src).toContain("runAgent(");
+    expect(src).toContain("maxTurns");
+  });
 });
 
 describe("generate() barrel (autonomous: scaffold-only, no key)", () => {
@@ -87,5 +99,53 @@ describe("generate() barrel (autonomous: scaffold-only, no key)", () => {
       {}, // empty env -> scaffold backend, zero model calls
     );
     expect(Object.keys(bundle).sort()).toEqual([...BUNDLE_KEYS].sort());
+  });
+});
+
+describe("buildRepairPrompt (pure, no model call)", () => {
+  it("names the single missing file and the required handler export", () => {
+    const prompt = buildRepairPrompt(["handler.ts"]);
+    expect(prompt).toContain("handler.ts");
+    // The repair prompt restates the handler export signature when handler.ts is
+    // missing, so the model re-emits the mandatory core with the right shape.
+    expect(prompt).toContain("Promise<Response>");
+  });
+
+  it("names all missing files when several are missing", () => {
+    const prompt = buildRepairPrompt(["handler.ts", "openapi.json"]);
+    expect(prompt).toContain("handler.ts");
+    expect(prompt).toContain("openapi.json");
+  });
+});
+
+describe("findMissingModelFiles (pure, temp dir, no model call)", () => {
+  let dir: string;
+
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns all three required model files for an empty dir", () => {
+    dir = mkdtempSync(join(tmpdir(), "utter-gen-test-"));
+    expect(findMissingModelFiles(dir)).toEqual([
+      "handler.ts",
+      "openapi.json",
+      "test-cases.json",
+    ]);
+  });
+
+  it("returns only handler.ts when the other two exist", () => {
+    dir = mkdtempSync(join(tmpdir(), "utter-gen-test-"));
+    writeFileSync(join(dir, "openapi.json"), "{}");
+    writeFileSync(join(dir, "test-cases.json"), "{}");
+    expect(findMissingModelFiles(dir)).toEqual(["handler.ts"]);
+  });
+
+  it("returns empty when all three exist", () => {
+    dir = mkdtempSync(join(tmpdir(), "utter-gen-test-"));
+    writeFileSync(join(dir, "handler.ts"), "export {}");
+    writeFileSync(join(dir, "openapi.json"), "{}");
+    writeFileSync(join(dir, "test-cases.json"), "{}");
+    expect(findMissingModelFiles(dir)).toEqual([]);
   });
 });
