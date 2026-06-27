@@ -107,6 +107,76 @@ describe("prepublish - combined static gate", () => {
   });
 });
 
+describe("prepublish - declarative-JSON entropy exemption (agent-card payTo address)", () => {
+  // The bug this guards: the agent-card payTo (a public 42-char EVM address) tripped
+  // the generic Shannon-entropy pass, so EVERY generated bundle failed the gate. The
+  // fix scans declarative JSON (openapi/agent-card/test-cases) with named rules only
+  // (entropy off); executable/config files keep the full scan. A real key is still
+  // caught everywhere by the named rules.
+  const agentCard = JSON.stringify(
+    {
+      name: "demo",
+      payment: {
+        payTo: "0x87a9F3c2E1b7D48f60A3F9c2e1B7d48F6054aB54",
+        asset: "0x3600000000000000000000000000000000000000",
+      },
+    },
+    null,
+    2,
+  );
+
+  it("the entropy pass alone false-positives on a 0x address; entropy:false clears it", () => {
+    const bundle = { "agent-card.json": agentCard };
+    expect(scanSecrets(bundle).some((v) => v.rule === "high-entropy-string")).toBe(true);
+    expect(scanSecrets(bundle, { entropy: false })).toEqual([]);
+  });
+
+  it("PASSES a benign bundle whose agent-card.json carries a public payTo address", () => {
+    const result = runPrePublishStaticChecks({
+      "handler.ts": benignSource,
+      "agent-card.json": agentCard,
+    });
+    expect(result.pass).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it("STILL flags a high-entropy secret in handler.ts (code keeps the full entropy scan)", () => {
+    const result = runPrePublishStaticChecks({
+      "handler.ts": benignSource + '\nconst t = "Zk9Qm2Xy7Lp4Rt6Vb8Nc1Wd3Fg5Hj0";',
+      "agent-card.json": agentCard,
+    });
+    expect(result.pass).toBe(false);
+    expect(
+      result.violations.some(
+        (v) => v.kind === "secret" && v.rule === "high-entropy-string" && v.file === "handler.ts",
+      ),
+    ).toBe(true);
+  });
+
+  it("STILL flags a named-rule secret embedded in declarative JSON (entropy off, named rules on)", () => {
+    const result = runPrePublishStaticChecks({
+      "handler.ts": benignSource,
+      "agent-card.json": '{ "leak": "sk-abcdefABCDEF0123456789ghijklmn" }',
+    });
+    expect(result.pass).toBe(false);
+    expect(
+      result.violations.some(
+        (v) => v.kind === "secret" && v.rule === "openai-style-key" && v.file === "agent-card.json",
+      ),
+    ).toBe(true);
+  });
+
+  it("STILL flags a 0x<64hex> private key in declarative JSON (named hex-private-key rule)", () => {
+    const pk = "0x" + "a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
+    const result = runPrePublishStaticChecks({
+      "handler.ts": benignSource,
+      "openapi.json": `{ "x": "${pk}" }`,
+    });
+    expect(result.pass).toBe(false);
+    expect(result.violations.some((v) => v.rule === "hex-private-key" && v.file === "openapi.json")).toBe(true);
+  });
+});
+
 describe("prepublish - dynamic probe is operator-gated", () => {
   it("the stub is not available autonomously", () => {
     expect(createOperatorGatedProbe().available).toBe(false);
