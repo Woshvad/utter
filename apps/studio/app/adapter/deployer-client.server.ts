@@ -80,15 +80,33 @@ export async function* streamDeploy(
     ...(params.freePaths !== undefined ? { freePaths: params.freePaths } : {}),
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    // The bearer goes ONLY here. It is never logged or echoed into any message below.
-    headers: {
-      authorization: `Bearer ${opts.authSecret}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      // The bearer goes ONLY here. It is never logged or echoed into any message below.
+      headers: {
+        authorization: `Bearer ${opts.authSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    // A NETWORK-level failure (the deployer unreachable) throws TypeError "fetch failed"
+    // with the real reason in err.cause.code (ECONNREFUSED / ENOTFOUND / ETIMEDOUT).
+    // Surface a BEARER-FREE diagnostic naming the target URL (host:port only - the secret
+    // is in the header, never the URL) + the cause code + the actionable fix, so the build
+    // stream shows WHY instead of an opaque "fetch failed". The request body/headers are
+    // never echoed.
+    const code = (err as { cause?: { code?: unknown } }).cause?.code;
+    const codePart = typeof code === "string" ? ` (${code})` : "";
+    throw new Error(
+      `deployer POST ${url} could not be reached${codePart}: ${(err as Error).message}. ` +
+        "Check that the deployer host process is running and listening on that host:port, " +
+        "and that DEPLOYER_URL points at host.docker.internal (not localhost) from inside " +
+        "the studio container.",
+    );
+  }
 
   if (!res.ok) {
     // Read the pre-stream JSON error body and build a bearer-free message from the HTTP

@@ -285,9 +285,15 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
 export function start(port = Number(process.env.PORT ?? "8788")): void {
   const deps = buildDepsFromEnv();
   const app = createDeployerApp(deps);
-  // Log only the service name + port (no env values; mirror the facilitator).
-  console.log(`deployer listening on :${port}`);
-  serve({ fetch: app.fetch, port });
+  // Bind all interfaces (0.0.0.0) by default so the studio CONTAINER can reach this HOST
+  // process via host.docker.internal (the docker bridge gateway). A 127.0.0.1-only bind
+  // would refuse the container's connection - the "deploy: fetch failed" (ECONNREFUSED)
+  // symptom. The port must still be firewalled off the public internet (compose note) and
+  // every /deploy call is Bearer-authed + gate-first. HOST overrides the bind for an
+  // operator who pins it to the docker bridge IP. Log only host:port (no env values).
+  const hostname = process.env.HOST?.trim() || "0.0.0.0";
+  console.log(`deployer listening on ${hostname}:${port}`);
+  serve({ fetch: app.fetch, hostname, port });
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.

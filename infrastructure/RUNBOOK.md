@@ -532,6 +532,40 @@ money-path isolation.
    Let's Encrypt cert. The very first request may briefly 404 or show a
    cert-pending state while ACME completes; retry after a few seconds.
 
+### Troubleshooting: the Deploy step shows "fetch failed"
+
+When Generate reaches "done" (bundle generated and four-gate validated) but Deploy
+fails, the build stream now names the cause, for example
+`deployer POST http://host.docker.internal:8788/deploy could not be reached
+(ECONNREFUSED): ...`. "fetch failed" is a connection-level error: the studio
+container could not reach the deployer host process at all. Work through:
+
+1. Is the deployer host process running and listening on :8788? Start it on the host
+   (not in a container - it needs the host Docker daemon + runsc). Confirm with
+   `curl -s http://localhost:8788/health` on the host, expecting
+   `{"ok":true,"service":"deployer"}`.
+
+2. Can the studio CONTAINER reach it? The container reaches the host over the docker
+   bridge via host.docker.internal, not localhost. Test from inside the container:
+   `docker compose -f infrastructure/docker-compose.yml exec studio \
+     wget -qO- http://host.docker.internal:8788/health`
+   - ECONNREFUSED: the deployer is not listening on all interfaces. It now binds
+     0.0.0.0 by default; if you set HOST, make sure it is not 127.0.0.1.
+   - timeout: a host firewall is dropping the docker subnet -> host:8788. Allow the
+     docker bridge subnet to reach the host on 8788 (keep 8788 closed to the public
+     internet). The /deploy endpoint is Bearer-authed and gate-first regardless.
+   - ENOTFOUND host.docker.internal: the `host.docker.internal:host-gateway`
+     extra_host is missing; it is set on the studio service in the compose file.
+
+3. Is DEPLOYER_URL correct? Inside the container localhost is the container itself,
+   not the host. Leave DEPLOYER_URL unset to use the
+   `http://host.docker.internal:8788` default, or set it explicitly to that. Do NOT
+   set it to http://localhost:8788.
+
+4. Is DEPLOYER_AUTH_SECRET set on BOTH sides? The same value must be in the studio
+   env and the deployer host process env, or POST /deploy returns 401/503 (that
+   shows as an HTTP error in the stream, not "fetch failed").
+
 ## Enable real AI generation
 
 This turns the studio Generate step from the deterministic scaffold generator into
