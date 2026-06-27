@@ -21,6 +21,7 @@ import { validateAgentCard } from "@utter/ai-runtime";
 import type { Moderator } from "./moderation/classifier.js";
 import type { ModerationStore } from "./moderation/review-queue.js";
 import type { IndexStore, IndexRecord, ProjectedPricing, Hex } from "./index-store.js";
+import type { CardStore } from "./card-store.js";
 
 /** The Scorer's initial pre-list probe (Plan 03 ProbeResult shape, structurally typed). */
 export interface InitialProbeResult {
@@ -86,6 +87,12 @@ export interface PublishPipelineDeps {
   indexStore: IndexStore;
   /** Reads the projected bond amount for the index record (defaults to 0n if absent). */
   bondReader?: BondReader;
+  /**
+   * The finalized-card serving cache. When present, the LISTING step persists the EXACT
+   * finalized card the card route serves. Optional so existing callers/tests that only
+   * exercise the index projection compose the pipeline unchanged.
+   */
+  cardStore?: CardStore;
 }
 
 /** The publish request: the spec + the (pre-finalize) built card + its served URL. */
@@ -277,6 +284,11 @@ export function createPublishPipeline(deps: PublishPipelineDeps): PublishPipelin
         cardUrl,
         active: true,
       };
+      // Persist the EXACT finalizedCard the card route must serve. This is part of the
+      // LISTING step, reached ONLY after moderation + bond + probe + mint all pass, so a
+      // blocked / held / unbonded / unverified resource persists no card. Optional: when
+      // no cardStore is injected the pipeline lists via the index projection alone.
+      if (deps.cardStore) await deps.cardStore.put(resourceId, finalizedCard);
       await deps.indexStore.upsert(record);
 
       return { listed: true, agentId: minted.agentId, card: finalizedCard, record };

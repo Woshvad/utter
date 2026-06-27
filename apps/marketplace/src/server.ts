@@ -17,13 +17,16 @@ import { Hono } from "hono";
 import { createCardApp } from "./card-route";
 import { filterResources } from "./query";
 import { InMemoryIndexStore } from "./index-store";
+import { InMemoryCardStore } from "./card-store";
 import type { CardSource } from "./card-route";
 import type { FilterCriteria } from "./query";
-import type { IndexStore } from "./index-store";
+import type { IndexStore, Hex } from "./index-store";
+import type { CardStore } from "./card-store";
 
 /** The route deps for the marketplace host. */
 export interface MarketplaceAppDeps {
   indexStore: IndexStore;
+  cardStore: CardStore;
   cardSource: CardSource;
 }
 
@@ -35,15 +38,16 @@ export interface MarketplaceAppDeps {
  */
 export function buildDepsFromEnv(): MarketplaceAppDeps {
   const indexStore = new InMemoryIndexStore();
+  const cardStore = new InMemoryCardStore();
   const cardSource: CardSource = {
     async getCard(resourceId) {
-      const record = await indexStore.get(resourceId as `0x${string}`);
-      // The in-memory store is empty at boot, so an unknown resource is null -> 404
-      // via createCardApp. A real run resolves the finalized card projection here.
-      return record as Record<string, unknown> | null;
+      // Serve the FINALIZED card the publish pipeline persisted to the CardStore. The
+      // store is empty at boot, so an unknown resource is null -> 404 via createCardApp;
+      // a published resource resolves its finalized card here (re-validated at the route).
+      return (await cardStore.get(resourceId as Hex)) ?? null;
     },
   };
-  return { indexStore, cardSource };
+  return { indexStore, cardStore, cardSource };
 }
 
 /**
