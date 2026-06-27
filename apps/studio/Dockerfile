@@ -32,6 +32,13 @@ RUN pnpm install --frozen-lockfile
 # and build/server/index.js (the SSR entry react-router-serve runs).
 RUN pnpm -C apps/studio build
 
+# Stage the @utter/ai-runtime runtime assets next to the SSR bundle. The bundled
+# ScaffoldGenerator (and the claude backend) read their templates from disk at
+# runtime via import.meta.url -> <build>/skills/..., but vite does not copy those
+# source assets into the SSR build, so createResource generation ENOENTs without
+# them. The bundle resolves build/server/index.js -> ../skills, i.e. build/skills.
+RUN cp -r packages/ai-runtime/skills apps/studio/build/skills
+
 EXPOSE 3000
 
 # Serve the built app with the workspace react-router-serve binary, pointed at
