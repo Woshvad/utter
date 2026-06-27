@@ -43,6 +43,36 @@ describe("landing loader (read-through top marketplace)", () => {
     }
   });
 
+  it("omits only the card whose getRevenue throws and does not crash", async () => {
+    // Live-shaped failure: one card's facilitator read throws, the rest resolve. The
+    // thrown card is omitted from callsById; the others remain; the loader returns
+    // normally. Driven by a STUB throw (the fixture never throws).
+    const THROWS = "0x00000000000000000000000000000000000000000000000000000000000000a1";
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const realGetRevenue = adapter.getRevenue.bind(adapter);
+    const spy = vi
+      .spyOn(Object.getPrototypeOf(adapter) as { getRevenue: (id: string) => unknown }, "getRevenue")
+      .mockImplementation(async (id: string) => {
+        if (id === THROWS) throw new Error("facilitator unreachable");
+        return realGetRevenue(id);
+      });
+
+    const { loader } = await import("../app/routes/_index");
+    const data = await loader({
+      request: new Request("http://x/"),
+      params: {},
+      context: {},
+    } as never);
+
+    // the thrown card's figure is omitted; at least one other card's figure is present
+    expect(data.callsById[THROWS]).toBeUndefined();
+    const others = data.cards.filter((c) => c.resourceId !== THROWS);
+    expect(others.length).toBeGreaterThan(0);
+    expect(others.some((c) => data.callsById[c.resourceId] !== undefined)).toBe(true);
+    spy.mockRestore();
+  });
+
   it("lists through the adapter with the unfiltered top-list criteria", async () => {
     const selectMod = await import("../app/adapter/select");
     const adapter = selectMod.selectAdapter(process.env);

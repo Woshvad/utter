@@ -215,4 +215,40 @@ describe("create action", () => {
     expect(createSpy).not.toHaveBeenCalled();
     createSpy.mockRestore();
   });
+
+  it("returns a prompt field error (no throw) when createResource throws on a valid submit", async () => {
+    // Live-shaped failure: a valid form passes validation and reaches createResource,
+    // which throws (an unbuildable prompt rejected by the four-gate validator). The action
+    // returns an inline prompt error rather than crashing. Driven by a STUB throw.
+    const selectMod = await import("../app/adapter/select");
+    const real = selectMod.selectAdapter(process.env);
+    const createSpy = vi
+      .spyOn(
+        Object.getPrototypeOf(real) as { createResource: () => unknown },
+        "createResource",
+      )
+      .mockRejectedValueOnce(new Error("generation failed the four-gate validator"));
+
+    const { action } = await import("../app/routes/create");
+    let result: unknown;
+    let threw = false;
+    try {
+      result = await action({
+        request: await postRequest(GOOD),
+        params: {},
+        context: {},
+      } as never);
+    } catch {
+      threw = true;
+    }
+
+    expect(threw).toBe(false);
+    const r = result as { ok: boolean; errors?: { prompt?: string } };
+    expect(r.ok).toBe(false);
+    expect(typeof r.errors?.prompt).toBe("string");
+    expect(r.errors?.prompt!.length).toBeGreaterThan(0);
+    // it reached createResource (validation passed first), then degraded on the throw
+    expect(createSpy).toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
 });

@@ -28,8 +28,10 @@ import { config as loadEnv } from "dotenv";
 import type Docker from "dockerode";
 import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { decodeEventLog, type Address, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -72,7 +74,17 @@ import {
   waitForUnpaid402,
   type DockerHandle,
 } from "./orchestrate";
+import { validateSlug } from "./traefik-config";
+import {
+  GENERATED_BUNDLE_KEYS,
+  writeBundleToDir,
+} from "./bundle-generated";
+import { gateGeneratedBundle } from "./gate-bundle";
 import { mintFacilitatorToken } from "./facilitator-token";
+// Self-namespace import so deployGeneratedBundle calls deployResource through the module
+// binding. That single indirection lets the adversarial gate-before-build test spy on
+// deployResource and assert it is called ZERO times when the bundle fails the gate.
+import * as self from "./live-deploy";
 
 // `quiet: true` keeps dotenv's stdout "injected env" banner off stdout. This module's
 // top-level load fires at IMPORT time, and @utter/deployer is reachable transitively from
@@ -145,6 +157,53 @@ export interface LiveDeployResult {
   toTreasury?: string;
 }
 
+/**
+ * A single step-boundary progress event emitted during a {@link deployResource} run.
+ *
+ * It carries the deploy phase, a running/ok/error status, and a plain-prose,
+ * NON-SECRET message describing the step state. The terminal `done` event also
+ * carries the {@link LiveDeployResult}. No message ever interpolates a key, token,
+ * facilitator secret, or any other credential; it is safe to stream to an
+ * authenticated caller (the SSE seam increment B consumes).
+ */
+export interface DeployProgressEvent {
+  /** The deploy step this event reports on. */
+  phase: "register" | "build" | "launch" | "route" | "verify" | "probe" | "done" | "error";
+  /** Whether the step is starting, succeeded, or failed. */
+  status: "running" | "ok" | "error";
+  /** A plain-prose, NON-SECRET description of the step state. */
+  message: string;
+  /** Present only on the terminal `done` event: the deploy result. */
+  result?: LiveDeployResult;
+}
+
+/**
+ * The trusted control-plane spec a {@link deployResource} run is driven by.
+ *
+ * resourceId, slug, pricing, and maxTimeoutSeconds are TRUSTED operator/control-plane
+ * inputs - they NEVER come from an untrusted generated bundle. classifierSchema is the
+ * openapi the sidecar classifies declared-errors against (the ONE field a generated
+ * deploy reads FROM its bundle). handlerBundleDir (optional) is the ALREADY-GATED
+ * generated bundle dir the handler image is built from; absent, the echo gate-less
+ * handler is bundled.
+ */
+export interface DeployResourceSpec {
+  /** The resource being charged (bytes32 Hex) - the escrow payTo. TRUSTED. */
+  resourceId: Hex;
+  /** The resource slug; derives the container names + the Traefik route. TRUSTED. */
+  slug: string;
+  /** The per-resource metered pricing terms. TRUSTED. */
+  pricing: Pricing;
+  /** Max handler runtime before the gate times out (seconds). TRUSTED. */
+  maxTimeoutSeconds: number;
+  /** The JSON response schema the sidecar classifies against (the one bundle-sourced field). */
+  classifierSchema: string;
+  /** The EXACT discovery routes the sidecar bypasses the gate on (FREE_PATHS). */
+  freePaths: string[];
+  /** The ALREADY-GATED generated bundle dir for the handler image (absent -> echo handler). */
+  handlerBundleDir?: string;
+}
+
 /** Read a required env var or throw an operator-friendly error (never logs the value). */
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -181,10 +240,63 @@ function randomNonce(): Hex {
  *
  * This function is the operator entry point. It is NEVER invoked by the autonomous
  * suite (no provisioned host / cert), so it is exported but not auto-run on import.
+ *
+ * It now delegates to {@link deployResource}: it resolves the docker handle, applies
+ * the host-gate throw, builds the echo spec from the module constants (NO
+ * handlerBundleDir), and runs the generic deploy core. Its observable behavior is
+ * identical to before this extraction.
  */
 export async function liveDeployEcho(
   fetchImpl: typeof fetch = fetch,
 ): Promise<LiveDeployResult> {
+  // Resolve docker + apply the host gate BEFORE any on-chain step (it now fires here in
+  // the wrapper, not deep in the body): off-host this fails fast before gas. The echo
+  // spec is built from the trusted module constants - NO handlerBundleDir (the echo
+  // handler is bundled). classifierSchema is the public echo openapi (declared-errors
+  // free). Then delegate to the generic deploy core.
+  const docker: DockerHandle | undefined = resolveDockerHandle();
+  if (!docker) {
+    throw new Error(
+      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
+        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
+    );
+  }
+  const echoSpec: DeployResourceSpec = {
+    resourceId: RESOURCE_ID,
+    slug: SLUG,
+    pricing: PRICING,
+    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    classifierSchema: readFileSync(ECHO_OPENAPI_PATH, "utf8"),
+    // The echo's ONLY free route is its A2A discovery card; everything else is gated.
+    freePaths: ["/.well-known/agent-card.json"],
+  };
+  // Pass NO opts: the echo wrapper's observable behavior + every console.log stay
+  // byte-for-byte unchanged (the off-progress path is a no-op).
+  return deployResource(docker, echoSpec, fetchImpl);
+}
+
+/**
+ * The generic live HTTPS deploy core (the former liveDeployEcho body, now parameterized).
+ *
+ * It takes a resolved docker handle + a TRUSTED {@link DeployResourceSpec} + a fetch
+ * impl and runs the full deploy: ensure the buyer's escrow deposit, register the
+ * resource on-chain, build+run the sidecar+handler pair (threading spec.handlerBundleDir
+ * into launchResourcePair only when present), write the Traefik route, prove
+ * 402(unpaid)->200(paid) over HTTPS, verify the on-chain Debited split, and run the
+ * PRX-02 egress probe. Returns the same LiveDeployResult shape.
+ *
+ * The host gate lives in the WRAPPERS (liveDeployEcho / deployGeneratedBundle): this
+ * core assumes a live docker handle. It is NEVER run end-to-end by the autonomous suite.
+ */
+export async function deployResource(
+  docker: DockerHandle,
+  spec: DeployResourceSpec,
+  fetchImpl: typeof fetch = fetch,
+  opts?: { onProgress?: (e: DeployProgressEvent) => void },
+): Promise<LiveDeployResult> {
+  // An absent callback makes every emit below a no-op, so the off-progress path
+  // (liveDeployEcho passes no opts) is observably unchanged.
+  const emit = (e: DeployProgressEvent): void => opts?.onProgress?.(e);
   // (0) Operator inputs from .env.local ONLY. DEPLOY_DOMAIN + the buyer key are
   // REQUIRED (requireEnv fails closed with an operator-friendly error). ARC_RPC_URL
   // is deliberately OPTIONAL (WR-07): createArcPublicClient/createArcWalletClient
@@ -293,6 +405,7 @@ export async function liveDeployEcho(
   // never reads a key itself. creator defaults to the admin address unless
   // RESOURCE_CREATOR overrides it (the creator/admin/treasury roles may collapse on
   // testnet). The step is idempotent: a redeploy of the same label is a no-op.
+  emit({ phase: "register", status: "running", message: "registering the resource on-chain" });
   const adminAccount = privateKeyToAccount(adminKey);
   const adminWallet = createArcWalletClient(adminAccount, rpcUrl);
   const creator = (process.env.RESOURCE_CREATOR?.trim() || adminAccount.address) as Address;
@@ -305,35 +418,37 @@ export async function liveDeployEcho(
       admin: adminWallet as unknown as RegistryAdminWriter,
       reader: publicClient as unknown as RegistryReader,
     },
-    { resourceId: RESOURCE_ID, creator, treasury, creatorBps },
+    { resourceId: spec.resourceId, creator, treasury, creatorBps },
   );
   if (registration.registered) {
-    console.log(`[live-deploy] registered resource ${RESOURCE_ID} (tx ${registration.registrationTx})`);
+    console.log(`[live-deploy] registered resource ${spec.resourceId} (tx ${registration.registrationTx})`);
   } else if (registration.alreadyActive) {
-    console.log(`[live-deploy] resource ${RESOURCE_ID} already active (registration skipped, idempotent redeploy)`);
+    console.log(`[live-deploy] resource ${spec.resourceId} already active (registration skipped, idempotent redeploy)`);
   } else if (registration.registeredButPaused) {
     console.warn(
-      `[live-deploy] resource ${RESOURCE_ID} is registered but PAUSED; not auto-unpausing. ` +
+      `[live-deploy] resource ${spec.resourceId} is registered but PAUSED; not auto-unpausing. ` +
         "Unpause it via the registry owner before expecting a debit to succeed.",
     );
   }
+  // Note registered vs already-active without ever naming a key or tx secret.
+  emit({
+    phase: "register",
+    status: "ok",
+    message: registration.alreadyActive
+      ? "resource already active on-chain (registration skipped)"
+      : "resource registered on-chain",
+  });
 
   // (0c) BUILD + RUN the sidecar+handler PAIR as hardened runsc services. This is
   // the genuine launch the curl needs: without the running containers the URL serves
-  // nothing. It is HOST-GATED (UTTER_SANDBOX_HOST=1): resolveDockerHandle returns
-  // undefined off-host, so refuse loudly rather than curling a dead URL.
+  // nothing. The host gate (UTTER_SANDBOX_HOST=1) already ran in the WRAPPER before any
+  // on-chain step, so `docker` here is a live handle.
   //
   // NOTE: the pair's live path now REQUIRES wave BD's six-network compose to be
   // applied on the host first - the default proxynet/ingress/controlplane networks
   // must exist or the launch (and the post-create extra-net attach) fail. Apply BD,
   // then run this; see infrastructure/RUNBOOK.md.
-  const docker: DockerHandle | undefined = resolveDockerHandle();
-  if (!docker) {
-    throw new Error(
-      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
-        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
-    );
-  }
+  //
   // Resolve the facilitator URL the SIDECAR (only) will POST verify/settle/release
   // to. An explicit FACILITATOR_URL env override still wins (a non-default deploy);
   // otherwise we auto-resolve the facilitator's on-network IP. The IP (not the name)
@@ -347,6 +462,8 @@ export async function liveDeployEcho(
   // we inspect. `utter_appnet` was the legacy single-container default and is no longer
   // where the facilitator lives. FACILITATOR_NETWORK overrides the network we inspect;
   // FACILITATOR_URL overrides the whole resolution.
+  emit({ phase: "build", status: "running", message: "building the handler + sidecar images" });
+  emit({ phase: "launch", status: "running", message: "launching the sidecar+handler pair under runsc" });
   const facilitatorNetwork = process.env.FACILITATOR_NETWORK?.trim() || "controlplane";
   const facilitatorUrl =
     process.env.FACILITATOR_URL?.trim() ||
@@ -354,34 +471,39 @@ export async function liveDeployEcho(
   console.log(`[live-deploy] facilitator resolved to ${facilitatorUrl}`);
 
   // Mint the per-resource caller-auth token the SIDECAR presents to the facilitator
-  // (C1). It is bound to RESOURCE_ID; the untrusted handler NEVER receives it. NEVER
-  // logged. The classifier schema is the public echo openapi (declared-errors free).
+  // (C1). It is bound to spec.resourceId; the untrusted handler NEVER receives it. NEVER
+  // logged. The classifier schema comes from the spec (the public openapi the sidecar
+  // classifies declared-errors against - the one bundle-sourced field for a generated
+  // deploy; the echo wrapper reads the echo openapi).
   const facilitatorToken = mintFacilitatorToken({
-    resourceId: RESOURCE_ID,
+    resourceId: spec.resourceId,
     secret: facilitatorAuthSecret,
   });
-  const classifierSchema = readFileSync(ECHO_OPENAPI_PATH, "utf8");
+  const classifierSchema = spec.classifierSchema;
 
-  const { handlerName, sidecarName } = pairNames(SLUG);
+  const { handlerName, sidecarName } = pairNames(spec.slug);
   const launched = await launchResourcePair(docker, {
-    resourceId: RESOURCE_ID,
-    slug: SLUG,
+    resourceId: spec.resourceId,
+    slug: spec.slug,
     cap,
-    pricing: PRICING,
-    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    pricing: spec.pricing,
+    maxTimeoutSeconds: spec.maxTimeoutSeconds,
     facilitatorUrl,
     facilitatorToken,
     classifierSchema,
-    // The echo's ONLY free route is its A2A discovery card; everything else is gated.
-    // Explicit here to document intent (this is also buildSidecarServiceEnv's default).
-    // PRICING.maxResponseBytes already flows via `pricing` above, so fix F2's
-    // MAX_RESPONSE_BYTES now reaches the sidecar's metering + bounded proxy read.
-    freePaths: ["/.well-known/agent-card.json"],
+    // The free routes the sidecar bypasses the gate on (spec-driven; the echo wrapper
+    // passes only the A2A discovery card). pricing.maxResponseBytes flows via `pricing`,
+    // so fix F2's MAX_RESPONSE_BYTES reaches the sidecar's metering + bounded proxy read.
+    freePaths: spec.freePaths,
+    // Build the handler image from the ALREADY-GATED generated bundle dir when present;
+    // absent, launchResourcePair bundles the echo gate-less handler (back-compat).
+    ...(spec.handlerBundleDir ? { handlerBundleDir: spec.handlerBundleDir } : {}),
   });
   console.log(
     `[live-deploy] pair running under runsc: handler ${handlerName} (image ` +
       `${launched.handlerImage}), sidecar ${sidecarName} (image ${launched.sidecarImage})`,
   );
+  emit({ phase: "launch", status: "ok", message: "sidecar+handler pair running under runsc" });
 
   // (1) WRITE the live Traefik route to disk (atomically) so the file provider
   // hot-loads a router for Host(<slug>.resources.<domain>) -> the SIDECAR container.
@@ -389,13 +511,14 @@ export async function liveDeployEcho(
   // points at the sidecar (not the handler): the 402->200 flows Traefik -> sidecar
   // -> handler, and the sidecar serves /echo and proxies it to the gate-less handler.
   const apex = `resources.${domain}`;
-  const url = `https://${SLUG}.${apex}/echo`;
+  const url = `https://${spec.slug}.${apex}/echo`;
   const routePath = await writeTraefikDynamicFile({
-    slug: SLUG,
+    slug: spec.slug,
     domain,
-    containerUrl: sidecarContainerUrl(SLUG),
+    containerUrl: sidecarContainerUrl(spec.slug),
   });
   console.log(`[live-deploy] deploying echo at ${url} (Traefik route written to ${routePath})`);
+  emit({ phase: "route", status: "ok", message: "Traefik route written for the resource host" });
 
   const reqInit = {
     method: "POST",
@@ -406,6 +529,7 @@ export async function liveDeployEcho(
   // (2) Unpaid call over HTTPS -> expect 402 with the accepts quote. Poll until the
   // paywall is live: a fresh deploy needs the container to boot + the first-time
   // ACME wildcard cert to issue, during which the URL transiently throws/404s/502s.
+  emit({ phase: "verify", status: "running", message: "verifying the live 402(unpaid)->200(paid) paywall" });
   const unpaid = await waitForUnpaid402(url, fetchImpl);
   // Belt-and-braces: waitForUnpaid402 only resolves on a real 402, but keep the
   // explicit assertion so the contract is obvious at the call site.
@@ -417,10 +541,10 @@ export async function liveDeployEcho(
   // (3) Sign a real DebitAuthorization under the locked UtterEscrow/1 domain and
   // re-call with X-PAYMENT -> expect 200 over HTTPS (the live paywall releases).
   const nonce = randomNonce();
-  const validBefore = computeValidBefore(MAX_TIMEOUT_SECONDS, SETTLE_BUFFER_SECONDS);
+  const validBefore = computeValidBefore(spec.maxTimeoutSeconds, SETTLE_BUFFER_SECONDS);
   const signed = await signDebitAuthorization(buyerWallet, {
     buyer,
-    resourceId: RESOURCE_ID,
+    resourceId: spec.resourceId,
     maxAmount: cap,
     nonce,
     validBefore,
@@ -431,7 +555,7 @@ export async function liveDeployEcho(
     network: "eip155:5042002",
     authorization: {
       buyer,
-      resourceId: RESOURCE_ID,
+      resourceId: spec.resourceId,
       maxAmount: cap.toString(),
       nonce,
       validBefore: validBefore.toString(),
@@ -508,6 +632,7 @@ export async function liveDeployEcho(
     `[live-deploy] on-chain Debited verified: debit ${debitAmount} <= cap ${cap}; ` +
       `creator ${toCreator} / treasury ${toTreasury} (platformFeeBps ${platformFeeBps}) split holds.`,
   );
+  emit({ phase: "verify", status: "ok", message: "paywall verified: 402 unpaid, 200 paid, on-chain split holds" });
 
   // (4) PRX-02: confirm a non-allowlisted host is unreachable from inside the
   // gVisor container netns, using the REAL blocked-host probe-runner the RUNBOOK
@@ -524,7 +649,7 @@ export async function liveDeployEcho(
     // reachability of a blocked host. This is runtime-agnostic (works whether the
     // handler runs under runc or runsc); it does NOT share the handler's netns,
     // which a runc probe cannot reliably observe across a runsc userspace netstack.
-    nonAllowlistedUnreachable = await runEgressProbe(docker, pairnetName(SLUG));
+    nonAllowlistedUnreachable = await runEgressProbe(docker, pairnetName(spec.slug));
   } else {
     console.log(
       "[live-deploy] PRX-02 SKIPPED (Phase 1): set UTTER_RUN_EGRESS_PROBE=1 to run the " +
@@ -532,8 +657,15 @@ export async function liveDeployEcho(
         "increment; recorded as a skip, NOT a pass.",
     );
   }
+  emit({
+    phase: "probe",
+    status: "ok",
+    message: nonAllowlistedUnreachable
+      ? "PRX-02 egress probe ran: every blocked host unreachable"
+      : "PRX-02 egress probe skipped (operator-gated; recorded as a skip, not a pass)",
+  });
 
-  return {
+  const result: LiveDeployResult = {
     url,
     unpaidStatus: unpaid.status,
     paidStatus: paid.status,
@@ -545,6 +677,169 @@ export async function liveDeployEcho(
     toCreator: toCreator.toString(),
     toTreasury: toTreasury.toString(),
   };
+  emit({ phase: "done", status: "ok", message: "deploy complete", result });
+  return result;
+}
+
+/**
+ * Deploy a GENERATED (untrusted) bundle from an on-disk dir through the same proven
+ * deploy core liveDeployEcho uses.
+ *
+ * SECURITY (untrusted-code handling):
+ *   1. Load the on-disk bundle into an in-memory Record.
+ *   2. GATE FIRST, FAIL CLOSED: run gateGeneratedBundle over the in-memory bundle BEFORE
+ *      any write or build. A violation throws BundleGateError and stops here (zero
+ *      downstream writeBundleToDir / deployResource calls).
+ *   3. Build the TRUSTED control-plane spec: slug / on-chain resourceId / pricing come
+ *      from operator ENV, NEVER from the untrusted bundle. ONLY openapi.json is read FROM
+ *      the bundle (the classifier schema). The handler stays gate-less + token-less
+ *      (deployResource -> launchResourcePair builds buildResourceServiceSpec for the
+ *      handler; the trusted sidecar alone holds FACILITATOR_URL + the rid-bound token).
+ *   4. Write the bundle to a fresh work dir and hand it to deployResource as the
+ *      handlerBundleDir (bundleGeneratedHandler re-gates it structurally before esbuild).
+ *
+ * It is HOST-GATED exactly like liveDeployEcho (UTTER_SANDBOX_HOST=1) and is NEVER run
+ * end-to-end by the autonomous suite. deployResource is called through the module
+ * namespace (`self.deployResource`) so the adversarial test can assert it is NOT reached
+ * when the gate rejects the bundle.
+ */
+export async function deployGeneratedBundle(
+  bundlePath: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<LiveDeployResult> {
+  // (1) Load the on-disk bundle into an in-memory Record. Only GENERATED_BUNDLE_KEYS are
+  // read; a per-key ENOENT is swallowed (an absent optional file is fine). handler.ts is
+  // REQUIRED to bundle: a missing/empty one throws a clear error naming the path.
+  const bundle: Record<string, string> = {};
+  for (const key of GENERATED_BUNDLE_KEYS) {
+    try {
+      bundle[key] = readFileSync(join(bundlePath, key), "utf8");
+    } catch {
+      // ENOENT (or another read miss) for an optional key: skip it.
+    }
+  }
+  const handler = bundle["handler.ts"];
+  if (!handler || handler.trim().length === 0) {
+    throw new Error(
+      `[live-deploy] generated bundle at '${bundlePath}' is missing handler.ts (required to deploy).`,
+    );
+  }
+
+  // (2) Derive the TRUSTED control-plane params from operator ENV (NOT the bundle):
+  // slug / resourceId / pricing are operator inputs; ONLY openapi.json is read FROM the
+  // bundle (the classifier schema). validateSlug rejects a path-traversing / non-dns slug.
+  const slug = validateSlug(requireEnv("DEPLOY_SLUG"));
+  const resourceId = resourceIdForLabel(process.env.DEPLOY_RESOURCE_LABEL?.trim() || slug);
+  // A generated bundle without an openapi still deploys with a permissive empty-paths
+  // classifier; we do NOT read any other bundle file as control-plane input.
+  const bundleOpenapi = bundle["openapi.json"];
+  const classifierSchema =
+    bundleOpenapi && bundleOpenapi.trim().length > 0
+      ? bundleOpenapi
+      : JSON.stringify({ openapi: "3.1.0", paths: {} });
+
+  // (3) Delegate to deployGatedBundle: it gates the in-memory bundle FIRST (fail closed,
+  // before any write or build), writes a work dir, host-gates docker, and runs the deploy
+  // core. The gate-before-write/build ordering + behavior stay identical to before this
+  // extraction (live-deploy.test.ts (a) + the bundle-generated structural test stay green).
+  return deployGatedBundle(
+    {
+      bundle,
+      resourceId,
+      slug,
+      // Reuse the SAME PRICING the echo path uses (TRUSTED operator input, never the
+      // bundle's choosing).
+      pricing: PRICING,
+      maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+      freePaths: ["/.well-known/agent-card.json"],
+      classifierSchema,
+    },
+    fetchImpl,
+  );
+}
+
+/**
+ * The trusted params a {@link deployGatedBundle} run is driven by.
+ *
+ * resourceId / slug / pricing / maxTimeoutSeconds / freePaths are TRUSTED control-plane
+ * inputs (from the authenticated request, NEVER the untrusted bundle). classifierSchema is
+ * the one bundle-sourced field (its openapi). `bundle` is the in-memory generated bundle
+ * the gate runs over before any write or build.
+ */
+export interface DeployGatedBundleParams {
+  /** The in-memory generated (untrusted) bundle: POSIX-key -> file contents. */
+  bundle: Record<string, string>;
+  /** The on-chain resource id (bytes32 Hex). TRUSTED. */
+  resourceId: Hex;
+  /** The resource slug. TRUSTED. */
+  slug: string;
+  /** The per-resource metered pricing. TRUSTED. */
+  pricing: Pricing;
+  /** Max handler runtime before the gate times out (seconds). TRUSTED. */
+  maxTimeoutSeconds: number;
+  /** The free routes the sidecar bypasses the gate on. TRUSTED. */
+  freePaths: string[];
+  /** The JSON response schema the sidecar classifies against (the one bundle-sourced field). */
+  classifierSchema: string;
+}
+
+/**
+ * Gate, then deploy a GENERATED (untrusted) in-memory bundle through the same proven
+ * deploy core liveDeployEcho uses. This is the shared helper deployGeneratedBundle (the
+ * ENV/disk path) and the increment B SSE seam both call.
+ *
+ * SECURITY (untrusted-code handling), IN THIS ORDER:
+ *   1. GATE FIRST, FAIL CLOSED: run gateGeneratedBundle over the in-memory bundle BEFORE
+ *      any write or build. A violation throws BundleGateError and stops here (zero
+ *      downstream writeBundleToDir / deployResource calls).
+ *   2. Write the bundle to a fresh work dir.
+ *   3. Host-gate docker (UTTER_SANDBOX_HOST=1) exactly like liveDeployEcho.
+ *   4. Run the deploy core with the work dir as the handlerBundleDir, forwarding the
+ *      progress opts. slug / resourceId / pricing come ONLY from params (the authenticated
+ *      caller's choosing); ONLY the bundle's openapi is read (classifierSchema).
+ *
+ * deployResource is called through the module namespace (`self.deployResource`) so the
+ * adversarial test can assert it is NOT reached when the gate rejects the bundle.
+ */
+export async function deployGatedBundle(
+  params: DeployGatedBundleParams,
+  fetchImpl: typeof fetch = fetch,
+  opts?: { onProgress?: (e: DeployProgressEvent) => void },
+): Promise<LiveDeployResult> {
+  // (1) GATE FIRST, FAIL CLOSED. A violation throws BundleGateError here, before any work
+  // dir is written and before deployResource is ever reached.
+  gateGeneratedBundle(params.bundle);
+
+  // (2) Write the gated bundle to a fresh work dir.
+  const workDir = await mkdtemp(join(tmpdir(), "utter-generated-bundle-"));
+  await writeBundleToDir(params.bundle, workDir);
+
+  // (3) Host-gate docker exactly like liveDeployEcho.
+  const docker: DockerHandle | undefined = resolveDockerHandle();
+  if (!docker) {
+    throw new Error(
+      "[live-deploy] must run on the provisioned gVisor host with UTTER_SANDBOX_HOST=1 " +
+        "(it builds + runs the sidecar+handler pair under runsc). See infrastructure/RUNBOOK.md.",
+    );
+  }
+
+  // (4) Run the deploy core with the work dir as the handlerBundleDir. Call through the
+  // module namespace so the adversarial test can spy + assert ZERO calls. Forward opts so
+  // progress events flow through.
+  return self.deployResource(
+    docker,
+    {
+      resourceId: params.resourceId,
+      slug: params.slug,
+      pricing: params.pricing,
+      maxTimeoutSeconds: params.maxTimeoutSeconds,
+      classifierSchema: params.classifierSchema,
+      freePaths: params.freePaths,
+      handlerBundleDir: workDir,
+    },
+    fetchImpl,
+    opts,
+  );
 }
 
 // `resolveDockerHandle` + the `DockerHandle` type now live in orchestrate.ts (the
@@ -709,7 +1004,11 @@ export async function runEgressProbe(
 // and POSIX alike (server.ts uses the same cross-platform pattern);
 // import.meta.main is a Bun-ism that is always undefined on Node.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  liveDeployEcho()
+  // DEPLOY_BUNDLE_PATH selects the GENERATED-bundle deploy; absent, the echo deploy runs.
+  // Both return a LiveDeployResult and share the same logging + exit-1 chain.
+  const bundlePath = process.env.DEPLOY_BUNDLE_PATH?.trim();
+  const run = bundlePath ? deployGeneratedBundle(bundlePath) : liveDeployEcho();
+  run
     .then((r) => {
       console.log(`[live-deploy] OK: ${r.url} 402(unpaid)->200(paid); PRX-02 unreachable=${r.nonAllowlistedUnreachable}`);
       if (r.settleTx) {

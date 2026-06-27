@@ -21,7 +21,7 @@
 // LiveDeps is imported TYPE-ONLY from live-deps.server.js so the class never bundles
 // the server module (T-mdx-01); the deps are injected by select.ts (production) or a
 // test (offline). All money is base-unit bigint; there is NO 1e6/6/18 literal here.
-import { resourceIdForLabel } from "@utter/x402-arc";
+import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { filterResources, type IndexRecord } from "@utter/marketplace";
 import { readUsdcBalance } from "@utter/chain";
 import type { Address } from "viem";
@@ -244,17 +244,65 @@ export class LiveAdapter implements StudioDataAdapter {
     };
     await deps.indexStore.upsert(record);
 
+    // The conservative pricing the deployer is POSTed. The studio captures only the base
+    // price today, so perKB and computeMultiplier are "0" (the deployer applies no
+    // surprise per-KB or per-compute charge) and maxResponseBytes is 1048576 (1 MiB,
+    // mirroring the echo's MAX_RESPONSE_BYTES). Richer pricing capture is a follow-up.
+    // base is already a base-unit string and 1048576 is a byte count, so there is no
+    // 1e6/decimals money literal here.
+    const deployerPricing: Pricing = {
+      model: "metered",
+      base: spec.basePrice.toString(),
+      perKB: "0",
+      computeMultiplier: "0",
+      maxResponseBytes: 1048576,
+    };
+
     // 5. Kick off the build-stage stream into the per-resource channel WITHOUT blocking
-    //    the return: emit the scripted stages with small awaited gaps, then complete the
-    //    channel so a draining reader terminates. The emit is guarded so an unexpected
-    //    error still completes the channel rather than leaking it (T-1g-02).
+    //    the return, then complete the channel so a draining reader terminates. When the
+    //    real deployer seam is bound (DEPLOYER_URL + DEPLOYER_AUTH_SECRET set) the
+    //    Deploy/Verify/Mint stages come from the deployer's stream; otherwise the local-
+    //    sim LOCAL_REAL_BUILD_EVENTS script is emitted verbatim. Generate/Publish/Live
+    //    stay studio-side. The finally ALWAYS completes the channel so a throw or a never-
+    //    done stream still terminates a draining reader (no hang/leak, T-1g-02).
     const channel = deps.buildChannel;
+    const deployBundle = deps.deployBundle;
     void (async () => {
       try {
-        for (const event of LOCAL_REAL_BUILD_EVENTS) {
-          channel.emit(resourceId, event);
-          await delay(1);
+        if (deployBundle) {
+          // Generation already ran in steps 2-3; mark it done, then stream the real deploy.
+          channel.emit(resourceId, { stage: "Generate", status: "running", log: "generating handler bundle" });
+          channel.emit(resourceId, { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" });
+          // The resourceLabel is utter:resource:<slug> so the deployer-derived resourceId
+          // (resourceIdForLabel(resourceLabel)) equals the studio resourceId from step 4
+          // (the escrow/payTo keystone). The conservative pricing avoids any overcharge.
+          for await (const ev of deployBundle({
+            bundle,
+            slug,
+            resourceLabel: labelForSlug(slug),
+            pricing: deployerPricing,
+          })) {
+            channel.emit(resourceId, ev);
+          }
+          // Publish + Live remain studio-side (the deployer covers register/build/launch/
+          // route/verify/probe -> Mint/Deploy/Verify).
+          channel.emit(resourceId, { stage: "Publish", status: "ok", log: "listed for discovery (shared local index)" });
+          channel.emit(resourceId, { stage: "Live", status: "ok", log: "resource is live" });
+        } else {
+          for (const event of LOCAL_REAL_BUILD_EVENTS) {
+            channel.emit(resourceId, event);
+            await delay(1);
+          }
         }
+      } catch (err) {
+        // A deployer failure surfaces a Deploy(error) into the channel. streamDeploy's
+        // errors are already bearer-free, so the message is safe to surface as a log. The
+        // finally below still completes the channel so a draining reader terminates.
+        channel.emit(resourceId, {
+          stage: "Deploy",
+          status: "error",
+          log: (err as Error).message,
+        });
       } finally {
         channel.complete(resourceId);
       }

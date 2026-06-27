@@ -85,6 +85,45 @@ describe("dashboard loader (read-through revenue)", () => {
     // a malformed resource param does not throw; it falls back to the canonical id
     expect(bad.revenue).toBeTruthy();
   });
+
+  it("canonicalizes a non-bytes32 ?resource= (e.g. echo) to the canonical id without throwing", async () => {
+    const { loader } = await import("../app/routes/dashboard");
+    const data = await loader({
+      params: {},
+      request: await authedGet("http://x/dashboard?resource=echo"),
+      context: {},
+    } as never);
+    // ?resource=echo is not bytes32, so the single summary reads the canonical id; no
+    // non-bytes32 id reaches the facilitator (no 400 path), and the loader returns.
+    expect(data.revenue).toBeTruthy();
+    expect(typeof data.revenue.calls).toBe("number");
+  });
+
+  it("throws a 503 Response (not a plain Error) when getRevenue throws", async () => {
+    // The dashboard is revenue-primary: a facilitator failure must surface the branded
+    // status page, so the loader throws a Response with status 503. Driven by a STUB throw.
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const spy = vi
+      .spyOn(Object.getPrototypeOf(adapter) as { getRevenue: () => unknown }, "getRevenue")
+      .mockRejectedValue(new Error("facilitator unreachable"));
+
+    const { loader } = await import("../app/routes/dashboard");
+    let thrown: unknown;
+    try {
+      await loader({
+        params: {},
+        request: await authedGet("http://x/dashboard"),
+        context: {},
+      } as never);
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(Response);
+    expect((thrown as Response).status).toBe(503);
+    spy.mockRestore();
+  });
 });
 
 describe("dashboard loader (aggregates + per-resource rows)", () => {

@@ -23,10 +23,12 @@ import {
   type ResourceSpec,
   type ValidationResult,
 } from "@utter/ai-runtime";
+import type { Pricing } from "@utter/x402-arc";
 import { runPlaygroundHarness, type PlaygroundHarnessResult } from "./playground-harness.js";
 import { BuildEventChannel } from "./build-channel.js";
+import { streamDeploy } from "./deployer-client.server.js";
 import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
-import type { Hex, RevenueSummary } from "./types.js";
+import type { BuildEvent, Hex, RevenueSummary } from "./types.js";
 
 /**
  * The injectable LiveAdapter read dependencies. Tests construct these directly with a
@@ -70,6 +72,20 @@ export interface LiveDeps {
    * URL is local-dev-shaped when DEPLOY_DOMAIN is unset (the example.com fallback).
    */
   buildCardUrl: (slug: string) => string;
+  /**
+   * Stream a real deploy of a generated bundle through the increment-A deployer
+   * (POST DEPLOYER_URL/deploy). Bound ONLY when both DEPLOYER_URL and DEPLOYER_AUTH_SECRET
+   * are present; left undefined otherwise so createResource keeps its local-sim build
+   * stream. createResource iterates the returned BuildEvents into the build channel; the
+   * resourceLabel it passes is `utter:resource:<slug>` so the deployer-derived resourceId
+   * equals the studio resourceId (the escrow/payTo keystone).
+   */
+  deployBundle?: (params: {
+    bundle: Bundle;
+    slug: string;
+    resourceLabel: string;
+    pricing: Pricing;
+  }) => AsyncIterable<BuildEvent>;
 }
 
 /**
@@ -259,6 +275,18 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     ? env.FACILITATOR_URL.trim()
     : DEFAULT_FACILITATOR_URL;
 
+  // Bind the real deploy seam ONLY when both the deployer URL and the bearer are set and
+  // non-empty. Both must be present to enable real deploys; unset -> local-sim build
+  // stream. The bearer is passed straight into streamDeploy's Authorization header and is
+  // NEVER logged here (no console line includes authSecret).
+  const deployerUrl = env.DEPLOYER_URL?.trim();
+  const authSecret = env.DEPLOYER_AUTH_SECRET?.trim();
+  const deployBundle =
+    deployerUrl && authSecret
+      ? (p: { bundle: Bundle; slug: string; resourceLabel: string; pricing: Pricing }) =>
+          streamDeploy(p, { deployerUrl, authSecret })
+      : undefined;
+
   return {
     publicClient,
     indexStore: getSharedIndexStore(env),
@@ -273,5 +301,7 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     // Bind the cardUrl builder to this env so live.ts stays free of process.env. The
     // builder reads DEPLOY_DOMAIN (example.com only as the local-dev fallback).
     buildCardUrl: (slug) => resolveCardUrl(slug, env),
+    // Real deploy seam: bound only when DEPLOYER_URL + DEPLOYER_AUTH_SECRET are both set.
+    deployBundle,
   };
 }

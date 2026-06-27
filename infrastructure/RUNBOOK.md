@@ -269,6 +269,119 @@ reachable host (the topology or nftables is not enforcing the deny), or the
 
 ---
 
+## Generated (untrusted) bundle deploy - DEPLOY_BUNDLE_PATH + studio end to end
+
+> This section BUILDS ON the Phase 2 pair deploy above. It assumes the SAME
+> six-network compose full-stack recreate (no single-service filter), the SAME host
+> nftables denylist, and Acceptances 1-3 already passing on the provisioned gVisor
+> host. It does NOT re-document those steps; do the Phase 2 section first, then apply
+> only the deltas below.
+
+**Goal:** deploy a GENERATED (untrusted) bundle through the SAME proven sidecar/handler
+pair path, selected by `DEPLOY_BUNDLE_PATH`, then run the same flow end to end from the
+studio. The untrusted handler.ts is gated before any build; the trusted sidecar holds the
+money path. A committed sample bundle lives at
+`services/deployer/examples/generated-sample` so this section has a real, deployable
+target.
+
+### Part A - prereqs (deltas over the Phase 2 pair section)
+
+This uses the SAME `.env.local` keys as the Phase 2 pair deploy: `DEPLOY_DOMAIN`,
+`TEST_BUYER_PRIVATE_KEY`, `REGISTRY_ADMIN_PRIVATE_KEY`, `PLATFORM_TREASURY`,
+`FACILITATOR_AUTH_SECRET`, `DEPLOY_BASE_IMAGE_NODE`, and optional `ARC_RPC_URL`. No new
+key is required for the standalone CLI deploy.
+
+The untrusted bundle NEVER sets the slug, the on-chain resourceId, or the pricing. The
+OPERATOR sets those via ENV: `DEPLOY_SLUG` (required), optional `DEPLOY_RESOURCE_LABEL`
+(derives the resourceId; defaults to the slug), and the `PRICE_*` / `MAX_RESPONSE_BYTES`
+terms. ONLY `openapi.json` is read FROM the bundle (the classifier schema the sidecar
+compiles). Everything else is trusted control-plane input.
+
+### Part B - standalone CLI deploy of the sample (from the repo root)
+
+```bash
+DEPLOY_BUNDLE_PATH=services/deployer/examples/generated-sample DEPLOY_SLUG=gen-sample \
+  UTTER_SANDBOX_HOST=1 UTTER_RUN_EGRESS_PROBE=1 node \
+  --import ./scripts/ts-resolver.mjs --experimental-strip-types \
+  services/deployer/src/live-deploy.ts
+```
+
+Setting `DEPLOY_BUNDLE_PATH` selects `deployGeneratedBundle` (absent, `liveDeployEcho`
+runs the echo deploy instead). The generated path GATES FIRST, fail-closed: it runs
+`gateGeneratedBundle` over the in-memory bundle before any file is written or built. It
+then builds the handler image from the bundle (the esbuild-shim path,
+`bundleGeneratedHandler`, which re-gates the bundle structurally before esbuild) plus the
+trusted sidecar; registers the resource on-chain (the resourceId derives from
+`DEPLOY_RESOURCE_LABEL`, or `DEPLOY_SLUG` when the label is unset); proves 402 -> 200
+THROUGH the sidecar; asserts the on-chain `Debited` split; and runs PRX-02 against the
+GENERATED handler because `UTTER_RUN_EGRESS_PROBE=1` is set.
+
+**Expected:** the gate passes, the handler + sidecar images build, the resource registers
+(or logs "already active" on a redeploy), 402 then 200 with the receipt, the PRINTED
+settle tx + its ArcScan link, and PRX-02 `unreachable=true`.
+
+**Fail:** any assertion throws - the gate, the build, the live paywall, the on-chain
+split, or the egress probe is not holding.
+
+### Part C - adversarial gate proof (MUST run, fail-closed)
+
+```bash
+DEPLOY_BUNDLE_PATH=services/sandbox/test/fixtures/malicious DEPLOY_SLUG=gen-malicious \
+  UTTER_SANDBOX_HOST=1 node --import ./scripts/ts-resolver.mjs --experimental-strip-types \
+  services/deployer/src/live-deploy.ts
+```
+
+**Expected:** a `BundleGateError` naming the disallowed `net` import and the `process.env`
+enumeration (the malicious fixture's two static violations), exit 1, and NO image built /
+NO container launched. The gate runs before any build, so `deployResource` is never
+reached.
+
+**Fail:** the run produces ANY artifact or reaches the build - the fail-closed gate is not
+holding. A malicious bundle MUST be rejected before any artifact is produced.
+
+### Part D - studio end to end
+
+Set `DEPLOYER_AUTH_SECRET` (`openssl rand -hex 32`, at least 32 chars) in `.env.local`
+(gitignored, NEVER committed). Use the SAME value on the deployer server AND the studio.
+
+Run the deployer server with the host gate + the chain env. It serves `POST /deploy` on
+`:8788`:
+
+```bash
+DEPLOYER_AUTH_SECRET=... UTTER_SANDBOX_HOST=1 node \
+  --import ./scripts/ts-resolver.mjs --experimental-strip-types \
+  services/deployer/src/server.ts
+```
+
+Run the studio live, pointed at the deployer:
+
+```bash
+STUDIO_DATA_ADAPTER=live DEPLOYER_URL=http://localhost:8788 DEPLOYER_AUTH_SECRET=... \
+  FACILITATOR_URL=... DEPLOY_DOMAIN=... pnpm -C apps/studio dev
+```
+
+In the UI: utter -> Create -> the build stream shows Generate -> Deploy / Verify / Mint
+(streamed from the real deployer SSE) -> Publish -> Live; the resource goes live (402 ->
+200) and a paid call settles on-chain. The KEYSTONE: the studio passes
+`resourceLabel = utter:resource:<slug>`, so the deployer's derived resourceId equals the
+studio's escrow / payTo id (a single source of truth).
+
+**Acceptance:** (1) the benign sample -> the gate passes, the images build, 402 -> 200, an
+on-chain `Debited`, PRX-02 `unreachable=true`; (2) the malicious bundle -> a
+`BundleGateError` before any build; (3) studio create -> the SSE stream reaches Live, the
+resource is live, and a paid call settles. Container-only: NO host firewall changes beyond
+the Phase 2 denylist.
+
+**Fail:** any of the three does not hold - the gate, the build, the SSE stream, the live
+paywall, or the on-chain settle.
+
+Security notes: `DEPLOYER_AUTH_SECRET` and all keys live ONLY in `.env.local` (gitignored)
+and are NEVER logged. `POST /deploy` is Bearer-authed and fail-closed: a 503 when the
+secret is unset, a 401 on a bad bearer. The gate runs before any build. The handler stays
+gate-less and token-less; only the trusted sidecar holds the facilitator token.
+
+---
+
 ## Phase 2 known limitations - NOT yet safe for untrusted MULTI-TENANT
 
 The sidecar/handler pair above contains the untrusted handler well enough for a
@@ -378,3 +491,43 @@ Once all three acceptances pass on the provisioned host, update the three
 to "Verified live", and tick the `## Manual-Only Verifications` rows in
 `.planning/phases/03-sandbox-deploy/03-VALIDATION.md`. Until then they remain
 Deferred Items - the autonomous logic is already proven by the Plans 02-05 suite.
+
+---
+
+## Host the studio at app.utter.technology (no tunnel)
+
+These steps put the Utter studio behind the existing Traefik at
+https://app.utter.technology with automatic TLS and no SSH tunnel. The studio is
+a trusted control-plane service placed on ingress/controlplane/upstreamnet only;
+it never joins edge, proxynet, or redisnet, so it does not weaken the resource or
+money-path isolation.
+
+1. DNS. Create a DNS A record `app.utter.technology` pointing at the host public
+   IP. Traefik derives the cert domain from the router Host rule, so a single A
+   record is enough; no wildcard SAN is needed for this host.
+
+2. Secrets in .env.local. Ensure `.env.local` (gitignored, never committed) has:
+   - `SESSION_SECRET` at least 32 chars, for example `openssl rand -hex 32`. The
+     production studio fails closed without it: session.server.ts refuses to start
+     with a short or missing secret rather than fall back to the dev key.
+   - `DEPLOYER_AUTH_SECRET` the Bearer the studio presents to the host deployer.
+   - `DEPLOY_DOMAIN` the deploy domain the agent-card URLs are built from.
+   - `ARC_RPC_URL` the Arc RPC endpoint (optional; the chain default is used when
+     blank).
+   - `NAMECHEAP_API_USER` and `NAMECHEAP_API_KEY` the same DNS-01 credentials the
+     wildcard cert already uses, so the le resolver can issue the studio cert.
+
+3. Host deployer. Make sure the deployer host process is running on :8788 and that
+   8788 is NOT open to the public internet (host firewall). The studio reaches it
+   only over the docker bridge via host.docker.internal; POST /deploy is
+   Bearer-authed by DEPLOYER_AUTH_SECRET regardless.
+
+4. Build and bring up only the studio:
+   `docker compose -f infrastructure/docker-compose.yml --env-file .env.local up -d --build studio`
+   Traefik picks up `dynamic/studio.yml` through the file provider with no restart
+   and issues the cert on the first request, which can take a few seconds.
+
+5. Verify. Browse https://app.utter.technology and run
+   `curl -I https://app.utter.technology`, expecting a 200 or 302 with a valid
+   Let's Encrypt cert. The very first request may briefly 404 or show a
+   cert-pending state while ACME completes; retry after a few seconds.

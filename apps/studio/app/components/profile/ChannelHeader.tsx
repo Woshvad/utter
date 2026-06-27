@@ -29,6 +29,10 @@ export interface ChannelHeaderProps {
   totalEarnings: bigint;
   /** Decimals from a runtime read - the ONLY source of money scale. */
   decimals: number;
+  /** False means a revenue read failed: the TOTAL CALLS and EARNINGS cells render a dash
+   *  because the totals are unknown (never a fabricated zero). Defaults to true so the
+   *  available path is byte-identical to before. */
+  revenueAvailable?: boolean;
 }
 
 /** A truncated mono address handle (e.g. 0x1111…1111) used as the display name. */
@@ -68,6 +72,7 @@ export function ChannelHeader({
   totalCalls,
   totalEarnings,
   decimals,
+  revenueAvailable = true,
 }: ChannelHeaderProps): React.ReactElement {
   // Clamp the score and derive the count of filled meter segments (0..10).
   const score = Math.max(0, Math.min(100, Math.round(repScore)));
@@ -159,15 +164,19 @@ export function ChannelHeader({
           </StatCell>
           <StatCell label="TOTAL CALLS">
             <div className="font-mono text-[22px] font-bold text-blue tabular-nums">
-              {compactCount(totalCalls)}
+              {revenueAvailable ? compactCount(totalCalls) : "-"}
             </div>
           </StatCell>
           <StatCell label="EARNINGS">
-            <UsdcAmount
-              baseUnits={totalEarnings}
-              decimals={decimals}
-              className="text-[22px] font-bold text-yellow"
-            />
+            {revenueAvailable ? (
+              <UsdcAmount
+                baseUnits={totalEarnings}
+                decimals={decimals}
+                className="text-[22px] font-bold text-yellow"
+              />
+            ) : (
+              <div className="font-mono text-[22px] font-bold text-yellow tabular-nums">-</div>
+            )}
           </StatCell>
           <StatCell label={`REPUTATION · ${score}/100`}>
             <div

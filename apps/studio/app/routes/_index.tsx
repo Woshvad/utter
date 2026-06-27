@@ -12,6 +12,7 @@ import * as React from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
+import { tryGetRevenue } from "../adapter/revenue.js";
 import type { ResourceCardData } from "../adapter/types.js";
 import { Hero, HowItWorks, MarketplaceStrip } from "../components/landing/index.js";
 
@@ -42,15 +43,19 @@ export async function loader({ request: _request }: LoaderFunctionArgs): Promise
   const all = await adapter.listMarketplace({});
   const cards = all.slice(0, 4);
 
-  // Real calls per card, sourced THROUGH the adapter getRevenue (fixture-backed by
-  // default) - the legitimate data path, never a hash-fabricated figure.
+  // Real calls per card, sourced THROUGH the display-only tryGetRevenue wrapper. A failed
+  // (live-mode) facilitator read yields null for that card, which is OMITTED from
+  // callsById so the strip shows no figure for it rather than crashing or inventing one.
+  // The fixture success path never throws, so callsById is identical to before.
   const callsEntries = await Promise.all(
     cards.map(async (card) => {
-      const revenue = await adapter.getRevenue(card.resourceId);
-      return [card.resourceId, revenue.calls] as const;
+      const revenue = await tryGetRevenue(adapter, card.resourceId);
+      return [card.resourceId, revenue ? revenue.calls : null] as const;
     }),
   );
-  const callsById: Record<string, number> = Object.fromEntries(callsEntries);
+  const callsById: Record<string, number> = Object.fromEntries(
+    callsEntries.filter(([, c]) => c !== null) as [string, number][],
+  );
 
   return { cards, decimals, callsById };
 }

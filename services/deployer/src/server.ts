@@ -7,38 +7,155 @@
 // composes a MINIMAL control plane over the in-memory stores. Boot is side-effect
 // free against live deps: it reads no secrets, opens no dockerode connection, and
 // starts NO reconcile loop (the reconcile loop calls dockerode and is operator-gated
-// and live). It only surfaces the desired-state deployment records read-through.
+// and live). It surfaces the desired-state deployment records read-through AND the
+// authenticated, gate-first SSE POST /deploy seam the studio control plane (increment
+// B) pushes a GENERATED (untrusted) bundle through.
+//
+// SECURITY (POST /deploy is a NEW authenticated remote attack surface that runs
+// UNTRUSTED bundles):
+//   - Auth FAILS CLOSED: an unset/blank DEPLOYER_AUTH_SECRET -> 503 (deploy disabled,
+//     never an open endpoint); a missing/wrong Bearer -> 401. The token is compared in
+//     constant time (node:crypto timingSafeEqual over equal-length Buffers; a length
+//     mismatch short-circuits to unauthorized, never calling timingSafeEqual on
+//     unequal lengths, which throws). The secret/token is NEVER logged.
+//   - The bundle's slug / on-chain resourceId / pricing are NEVER taken from the
+//     bundle; they are TRUSTED fields off the authenticated request. ONLY openapi.json
+//     is read FROM the bundle (the classifier schema; empty-paths fallback when absent).
+//   - gateGeneratedBundle runs PRE-STREAM: a rejected bundle returns 400 and NEVER
+//     starts a stream or calls deploy.
+//   - The SSE error frame carries err.message ONLY (no stack, no secret).
 import { config as loadEnv } from "dotenv";
 import { pathToFileURL } from "node:url";
+import { timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
+import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { createInMemoryStores } from "./stores/memory";
 import type { DeployerStores } from "./stores/memory";
+import {
+  deployGatedBundle,
+  type DeployProgressEvent,
+  type LiveDeployResult,
+} from "./live-deploy";
+import { validateSlug } from "./traefik-config";
+import { gateGeneratedBundle, BundleGateError } from "./gate-bundle";
 
 loadEnv({ path: ".env.local" });
+
+/**
+ * The POST /deploy request body. The bundle's handler.ts is UNTRUSTED generated code;
+ * slug / resourceLabel / pricing / maxTimeoutSeconds / freePaths are TRUSTED fields the
+ * authenticated caller chooses, NEVER taken from the bundle. ONLY openapi.json is read
+ * FROM the bundle.
+ */
+export interface DeployRequest {
+  /** The generated (untrusted) bundle: POSIX-key -> file contents. */
+  bundle: Record<string, string>;
+  /** The resource slug (derives the route + container names). TRUSTED. */
+  slug: string;
+  /** The on-chain resource-id label (defaults to slug). TRUSTED. */
+  resourceLabel?: string;
+  /** The per-resource metered pricing. TRUSTED. */
+  pricing: Pricing;
+  /** Max handler runtime before the gate times out (seconds; default 30). TRUSTED. */
+  maxTimeoutSeconds?: number;
+  /** The free routes the sidecar bypasses the gate on (default the A2A card). TRUSTED. */
+  freePaths?: string[];
+}
 
 /** The route deps for the deployer control plane. */
 export interface DeployerAppDeps {
   stores: DeployerStores;
+  /**
+   * The deploy function POST /deploy drives. INJECTABLE (tests pass a fake; the real
+   * deploy only runs on the gVisor host). Absent -> the default impl that maps a
+   * DeployRequest to deployGatedBundle.
+   */
+  deploy?: (
+    req: DeployRequest,
+    onProgress: (e: DeployProgressEvent) => void,
+  ) => Promise<LiveDeployResult>;
+  /**
+   * The shared-secret Bearer the POST /deploy route checks. Read from
+   * DEPLOYER_AUTH_SECRET in buildDepsFromEnv; absent/blank -> the route fails closed
+   * (503). NEVER logged.
+   */
+  authSecret?: string;
+}
+
+/**
+ * The default POST /deploy impl: map a DeployRequest to deployGatedBundle params. slug /
+ * resourceId / pricing come ONLY from the request; ONLY the bundle's openapi.json is read
+ * (the classifier schema; empty-paths fallback when absent). The real deploy runs ONLY on
+ * the gVisor host (deployGatedBundle host-gates docker); off-host it fails loud.
+ */
+function defaultDeploy(
+  req: DeployRequest,
+  onProgress: (e: DeployProgressEvent) => void,
+): Promise<LiveDeployResult> {
+  const slug = validateSlug(req.slug);
+  const resourceId = resourceIdForLabel(req.resourceLabel?.trim() || req.slug);
+  const bundleOpenapi = req.bundle["openapi.json"];
+  const classifierSchema =
+    bundleOpenapi && bundleOpenapi.trim().length > 0
+      ? bundleOpenapi
+      : JSON.stringify({ openapi: "3.1.0", paths: {} });
+  return deployGatedBundle(
+    {
+      bundle: req.bundle,
+      resourceId,
+      slug,
+      pricing: req.pricing,
+      maxTimeoutSeconds: req.maxTimeoutSeconds ?? 30,
+      freePaths: req.freePaths ?? ["/.well-known/agent-card.json"],
+      classifierSchema,
+    },
+    fetch,
+    { onProgress },
+  );
+}
+
+/**
+ * Constant-time Bearer check. Reads the token off the Authorization header, strips the
+ * `Bearer ` prefix, and compares it to the secret with timingSafeEqual over equal-length
+ * Buffers. A length mismatch (or a missing header) short-circuits to false WITHOUT calling
+ * timingSafeEqual (which throws on unequal lengths). The secret/token is never logged.
+ */
+function bearerMatches(authHeader: string | undefined, secret: string): boolean {
+  if (!authHeader) return false;
+  const prefix = "Bearer ";
+  if (!authHeader.startsWith(prefix)) return false;
+  const token = authHeader.slice(prefix.length);
+  const tokenBuf = Buffer.from(token, "utf8");
+  const secretBuf = Buffer.from(secret, "utf8");
+  // Length-mismatch short-circuit: timingSafeEqual throws on unequal-length Buffers.
+  if (tokenBuf.length !== secretBuf.length) return false;
+  return timingSafeEqual(tokenBuf, secretBuf);
 }
 
 /**
  * Build the deployer route deps from the environment. The autonomous/dev default is
  * the in-memory stores (no Redis, no dockerode, no secrets) - the SAME contract the
- * future Redis adapter implements, so this swaps by env without touching routes.
+ * future Redis adapter implements, so this swaps by env without touching routes. The
+ * deploy function is left undefined so the route uses defaultDeploy; authSecret reads
+ * DEPLOYER_AUTH_SECRET (never hardcoded; absent -> POST /deploy fails closed).
  */
 export function buildDepsFromEnv(): DeployerAppDeps {
   return {
     stores: createInMemoryStores(),
+    authSecret: process.env.DEPLOYER_AUTH_SECRET,
   };
 }
 
 /**
- * Build the minimal deployer control-plane Hono app. Two read-only routes:
- *   GET /health      -> { ok: true, service: "deployer" }
- *   GET /deployments -> the desired-state deployment records (read-through)
- * No route touches a live/operator-gated dep; the dockerode reconcile loop is NOT
- * started here.
+ * Build the deployer control-plane Hono app:
+ *   GET  /health      -> { ok: true, service: "deployer" }
+ *   GET  /deployments -> the desired-state deployment records (read-through)
+ *   POST /deploy      -> authenticated, gate-first SSE deploy of a GENERATED bundle
+ * The GET routes touch no live/operator-gated dep. POST /deploy authenticates, validates,
+ * gates PRE-STREAM, then streams DeployProgressEvent frames; the real deploy runs only on
+ * the gVisor host (tests inject a fake).
  */
 export function createDeployerApp(deps: DeployerAppDeps): Hono {
   const app = new Hono();
@@ -54,6 +171,111 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       cap: r.cap !== undefined ? r.cap.toString() : undefined,
     }));
     return c.json(safe);
+  });
+
+  app.post("/deploy", async (c) => {
+    // (a) AUTH FAIL-CLOSED, before body parse / gate / deploy.
+    const secret = deps.authSecret?.trim();
+    if (!secret) {
+      return c.json({ error: "deploy disabled: DEPLOYER_AUTH_SECRET unset" }, 503);
+    }
+    if (!bearerMatches(c.req.header("authorization"), secret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+
+    // (b) Parse + validate the body. ALL failures are pre-stream JSON 400s.
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const b = body as Partial<DeployRequest> | null;
+    if (
+      !b ||
+      typeof b.bundle !== "object" ||
+      b.bundle === null ||
+      typeof b.bundle["handler.ts"] !== "string" ||
+      b.bundle["handler.ts"].trim().length === 0
+    ) {
+      return c.json({ error: "missing handler.ts" }, 400);
+    }
+    if (typeof b.slug !== "string") {
+      return c.json({ error: "invalid slug" }, 400);
+    }
+    try {
+      validateSlug(b.slug);
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : "invalid slug" }, 400);
+    }
+    const pricing = b.pricing;
+    if (
+      !pricing ||
+      typeof pricing.base !== "string" ||
+      typeof pricing.perKB !== "string" ||
+      typeof pricing.computeMultiplier !== "string"
+    ) {
+      return c.json({ error: "invalid pricing" }, 400);
+    }
+
+    // (c) PRE-STREAM GATE. A rejected bundle returns 400 and NEVER starts a stream or
+    // calls deploy. (Defense in depth: deployGatedBundle re-gates before any write/build.)
+    try {
+      gateGeneratedBundle(b.bundle);
+    } catch (e) {
+      if (e instanceof BundleGateError) {
+        return c.json(
+          { error: "bundle rejected", violations: e.violations.map((v) => v.rule) },
+          400,
+        );
+      }
+      throw e;
+    }
+
+    // The validated, TRUSTED request. slug / resourceLabel / pricing come from the
+    // authenticated caller; ONLY the bundle's openapi is read downstream.
+    const req: DeployRequest = {
+      bundle: b.bundle,
+      slug: b.slug,
+      resourceLabel: b.resourceLabel,
+      pricing,
+      maxTimeoutSeconds: b.maxTimeoutSeconds,
+      freePaths: b.freePaths,
+    };
+
+    // (d) STREAM the progress events. The error frame carries err.message ONLY (no stack,
+    // no secret). streamSSE closes the stream when the callback returns.
+    //
+    // onProgress is a SYNCHRONOUS callback, but stream.writeSSE is async. We chain the
+    // writes through a serial promise queue so they flush IN ORDER, then await the tail
+    // of the queue before the callback returns (and the stream closes). Awaiting the tail
+    // is what guarantees every queued frame is written before close - a fire-and-forget
+    // write would be silently dropped when the writer closes underneath it.
+    const deploy = deps.deploy ?? defaultDeploy;
+    return streamSSE(c, async (stream) => {
+      let writeQueue: Promise<void> = Promise.resolve();
+      const enqueue = (e: DeployProgressEvent): void => {
+        writeQueue = writeQueue.then(() => stream.writeSSE({ data: JSON.stringify(e) }));
+      };
+      let sawDone = false;
+      try {
+        const result = await deploy(req, (e) => {
+          if (e.phase === "done") sawDone = true;
+          enqueue(e);
+        });
+        if (!sawDone) {
+          enqueue({ phase: "done", status: "ok", message: "deploy complete", result });
+        }
+      } catch (err) {
+        enqueue({
+          phase: "error",
+          status: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // Drain the queue before returning so streamSSE does not close mid-flush.
+      await writeQueue;
+    });
   });
 
   return app;

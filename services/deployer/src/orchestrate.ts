@@ -28,6 +28,7 @@ import {
   type RunLimits,
 } from "@utter/sandbox";
 import { bundleEcho, bundleEchoHandler, bundleSidecar } from "./bundle-echo";
+import { bundleGeneratedHandler } from "./bundle-generated";
 import { buildResourceImage } from "./build";
 import {
   buildTraefikDynamicConfig,
@@ -743,6 +744,19 @@ export interface LaunchResourcePairOpts {
   sidecarNetwork?: string;
   /** Dev-only override for the sidecar's EXTRA networks (default: [controlplane, pairnet]). */
   sidecarExtraNetworks?: string[];
+  /**
+   * The GENERATED (untrusted) bundle dir to build the HANDLER image from. When set, the
+   * handler image is built from this dir via bundleGeneratedHandler: the dir already has
+   * handler.ts written by writeBundleToDir and has ALREADY passed the pre-build gate
+   * (gateGeneratedBundle, fail-closed), and bundleGeneratedHandler structurally re-gates
+   * it again at its top (defense in depth). When ABSENT (the default / back-compat), the
+   * echo gate-less handler is bundled via bundleEchoHandler.
+   *
+   * The trusted SIDECAR is ALWAYS bundled via bundleSidecar and is untouched by this
+   * option. The untrusted bundle NEVER influences slug, on-chain resourceId, or pricing:
+   * those come from the typed opts fields above (trusted control-plane inputs).
+   */
+  handlerBundleDir?: string;
 }
 
 /** The result of a pair launch: both handles + both image tags. */
@@ -799,10 +813,17 @@ export async function launchResourcePair(
   // (1) Bundle + build BOTH images. A docker handle was provided, so each build MUST
   // run; if it does not we cannot serve the pair, so fail loud rather than curling a
   // dead URL (same guard as launchEchoContainer).
-  const handlerBundle = await bundleEchoHandler({
-    outDir: join(tmpdir(), "utter-handler-bundle"),
-    port: PAIR_PORT,
-  });
+  //
+  // When a GENERATED bundle dir is given, build the handler image from it (the dir was
+  // written by writeBundleToDir + already gated; bundleGeneratedHandler re-gates it
+  // structurally at its top). Otherwise bundle the echo gate-less handler as before
+  // (default / back-compat). The sidecar path below is unchanged either way.
+  const handlerBundle = opts.handlerBundleDir
+    ? await bundleGeneratedHandler(opts.handlerBundleDir, { port: PAIR_PORT })
+    : await bundleEchoHandler({
+        outDir: join(tmpdir(), "utter-handler-bundle"),
+        port: PAIR_PORT,
+      });
   const handlerBuild = await buildResourceImage(handlerBundle.bundleDir, {
     runtime: "node",
     tag: handlerImage,

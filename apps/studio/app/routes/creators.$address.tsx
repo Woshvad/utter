@@ -19,6 +19,7 @@ import * as React from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
+import { tryGetRevenue } from "../adapter/revenue.js";
 import type { Hex, ResourceCardData } from "../adapter/types.js";
 import { CardGrid } from "../components/discover/CardGrid.js";
 import { ChannelHeader } from "../components/profile/ChannelHeader.js";
@@ -55,6 +56,9 @@ export interface CreatorProfileData {
   totalEarnings: bigint;
   /** An honest 0-100 reputation score = round(avg(card.uptime) * 100), 0 when no cards. */
   repScore: number;
+  /** False when any owned card's revenue read failed: the header shows a dash for TOTAL
+   *  CALLS and EARNINGS rather than a partial/zero sum. Vacuously true with zero cards. */
+  revenueAvailable: boolean;
 }
 
 /** The empty-creator payload (unknown/bad address): zero totals, no cards, honest decimals. */
@@ -68,6 +72,8 @@ function emptyPayload(address: string, decimals: number): CreatorProfileData {
     totalCalls: 0,
     totalEarnings: 0n,
     repScore: 0,
+    // The malformed/unknown-address branch is vacuously available with zero totals.
+    revenueAvailable: true,
   };
 }
 
@@ -99,11 +105,15 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<CreatorPro
   // reputation: sum of the filtered cards' projected feedbackCount.
   const reputation = cards.reduce((sum, c) => sum + c.reputation, 0n);
 
-  // calls + earnings: read getRevenue per filtered card and sum .calls (count) and
-  // .creatorShare (the projected creator earnings in base units; the split is not recomputed).
-  const revenues = await Promise.all(cards.map((c) => adapter.getRevenue(c.resourceId)));
-  const totalCalls = revenues.reduce((sum, r) => sum + r.calls, 0);
-  const totalEarnings = revenues.reduce((sum, r) => sum + r.creatorShare, 0n);
+  // calls + earnings: read getRevenue per filtered card via the display-only tryGetRevenue
+  // wrapper and sum .calls (count) and .creatorShare (the projected creator earnings in
+  // base units; the split is not recomputed). A failed (live-mode) revenue read flips
+  // revenueAvailable to false so the header shows a dash instead of a partial/zero sum;
+  // the sums run over the non-null reads only ([].every() is vacuously true with no cards).
+  const revenues = await Promise.all(cards.map((c) => tryGetRevenue(adapter, c.resourceId)));
+  const revenueAvailable = revenues.every((r) => r !== null);
+  const totalCalls = revenues.reduce((sum, r) => sum + (r ? r.calls : 0), 0);
+  const totalEarnings = revenues.reduce((sum, r) => sum + (r ? r.creatorShare : 0n), 0n);
 
   // An honest 0-100 reputation score derived from the owned cards' real uptime
   // (0..1). No fabricated score exists on-chain; this is round(avg(uptime) * 100).
@@ -121,12 +131,22 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<CreatorPro
     totalCalls,
     totalEarnings,
     repScore,
+    revenueAvailable,
   };
 }
 
 export default function CreatorProfileRoute(): React.ReactElement {
-  const { address, cards, decimals, apiCount, reputation, totalCalls, totalEarnings, repScore } =
-    useLoaderData<typeof loader>();
+  const {
+    address,
+    cards,
+    decimals,
+    apiCount,
+    reputation,
+    totalCalls,
+    totalEarnings,
+    repScore,
+    revenueAvailable,
+  } = useLoaderData<typeof loader>();
 
   return (
     // The banner is full-bleed within the 1280px container (no horizontal padding here);
@@ -140,6 +160,7 @@ export default function CreatorProfileRoute(): React.ReactElement {
         totalCalls={totalCalls}
         totalEarnings={totalEarnings}
         decimals={decimals}
+        revenueAvailable={revenueAvailable}
       />
 
       {/* published apis: aligned with the header content via the same 32px gutter. */}

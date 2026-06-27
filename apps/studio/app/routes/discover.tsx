@@ -17,6 +17,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import type { FilterCriteria } from "@utter/marketplace";
 import { selectAdapter } from "../adapter/select.js";
+import { tryGetRevenue } from "../adapter/revenue.js";
 import type { ResourceCardData } from "../adapter/types.js";
 import { CardGrid } from "../components/discover/CardGrid.js";
 import { CategoryChips } from "../components/discover/CategoryChips.js";
@@ -138,16 +139,19 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<DiscoverD
   const sort = parseSort(sp.get("sort"));
   cards = sortCards(cards, sort);
 
-  // Real calls per card, sourced THROUGH the adapter getRevenue (fixture-backed by
-  // default). This replaces the old hash-fabricated card figure with a legitimate
-  // adapter-sourced count; a card with no revenue read simply omits the figure.
+  // Real calls per card, sourced THROUGH the display-only tryGetRevenue wrapper. A failed
+  // (live-mode) facilitator read yields null for that card, which is OMITTED from
+  // callsById so the card shows no figure rather than crashing or inventing one. The
+  // fixture success path never throws, so callsById is identical to before.
   const callsEntries = await Promise.all(
     cards.map(async (card) => {
-      const revenue = await adapter.getRevenue(card.resourceId);
-      return [card.resourceId, revenue.calls] as const;
+      const revenue = await tryGetRevenue(adapter, card.resourceId);
+      return [card.resourceId, revenue ? revenue.calls : null] as const;
     }),
   );
-  const callsById: Record<string, number> = Object.fromEntries(callsEntries);
+  const callsById: Record<string, number> = Object.fromEntries(
+    callsEntries.filter(([, c]) => c !== null) as [string, number][],
+  );
 
   return { cards, decimals, criteria, query, sort, categories, callsById };
 }

@@ -593,6 +593,43 @@ describe("loadSidecarConfig", () => {
     expect(resolved.classifier?.(JSON.stringify({ error: "bad" }))).toBe("declared_error");
   });
 
+  it("compiles a generated ResourceSuccess/ResourceError CLASSIFIER_SCHEMA (the live studio->deployer path)", () => {
+    // The scaffold-shaped openapi a generated bundle ships: no explicit refs, no
+    // Echo* schemas. buildClassifier discovers the *Success/*Error refs by suffix so
+    // loadSidecarConfig loads without throwing and maps { result, length } -> success.
+    const generatedSchema = JSON.stringify({
+      $id: "openapi.json",
+      openapi: "3.1.0",
+      info: { title: "Resource", version: "1.0.0" },
+      paths: {},
+      components: {
+        schemas: {
+          ResourceSuccess: {
+            type: "object",
+            additionalProperties: false,
+            required: ["result", "length"],
+            properties: {
+              result: { type: "string" },
+              length: { type: "integer", minimum: 0 },
+            },
+          },
+          ResourceError: {
+            type: "object",
+            additionalProperties: false,
+            required: ["error"],
+            properties: { error: { type: "string" }, code: { type: "string" } },
+          },
+        },
+      },
+    });
+    const resolved = loadSidecarConfig(env({ CLASSIFIER_SCHEMA: generatedSchema }));
+    expect(typeof resolved.classifier).toBe("function");
+    expect(resolved.classifier?.(JSON.stringify({ result: "hi", length: 2 }))).toBe("success");
+    expect(resolved.classifier?.(JSON.stringify({ error: "bad", code: "X" }))).toBe(
+      "declared_error",
+    );
+  });
+
   it("parses MAX_RESPONSE_BYTES into pricing.maxResponseBytes when a positive integer (#2-read)", () => {
     const resolved = loadSidecarConfig(env({ MAX_RESPONSE_BYTES: "65536" }));
     expect(resolved.pricing.maxResponseBytes).toBe(65536);

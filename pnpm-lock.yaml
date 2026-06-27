@@ -102,6 +102,12 @@ importers:
       '@utter/x402-arc':
         specifier: workspace:*
         version: link:../../packages/x402-arc
+      docker-modem:
+        specifier: 5.0.7
+        version: 5.0.7
+      dockerode:
+        specifier: 5.0.0
+        version: 5.0.0
       isbot:
         specifier: ^5
         version: 5.1.43
@@ -117,6 +123,9 @@ importers:
       siwe:
         specifier: 3.0.0
         version: 3.0.0(ethers@6.17.0(bufferutil@4.1.0)(utf-8-validate@5.0.10))
+      ssh2:
+        specifier: 1.17.0
+        version: 1.17.0
       viem:
         specifier: 2.52.2
         version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)

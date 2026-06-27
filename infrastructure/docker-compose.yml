@@ -111,6 +111,56 @@ services:
       - ARC_RPC_URL=${ARC_RPC_URL:-}
       - PORT=8787
 
+  # The trusted control-plane studio UI (HOST-STUDIO). A first-party platform
+  # service, NOT the gVisor untrusted boundary. It joins ingress (Traefik routes
+  # to it over the shared ingress net via dynamic/studio.yml), controlplane (where
+  # it reaches the facilitator at facilitator:8787 for revenue reads), and
+  # upstreamnet (the only net giving it internet egress for Arc RPC and an
+  # optional model API). It is NEVER on edge, proxynet, or redisnet, so it cannot
+  # weaken the resource-plane or money-path isolation, and it publishes no host
+  # port (Traefik fronts it). It reaches the host deployer process via
+  # host.docker.internal:8788; that deployer port must be firewalled off the
+  # public internet on the host and is Bearer-authed by DEPLOYER_AUTH_SECRET
+  # regardless. All secret-bearing env defaults to empty here; real values are
+  # supplied via --env-file .env.local.
+  studio:
+    build:
+      context: ..
+      dockerfile: apps/studio/Dockerfile
+    restart: unless-stopped
+    networks: [ingress, controlplane, upstreamnet]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - facilitator
+    environment:
+      # Production forces session.server.ts to require a >=32-char SESSION_SECRET.
+      - NODE_ENV=production
+      # Use the live data adapter (real reads through the StudioDataAdapter seam).
+      - STUDIO_DATA_ADAPTER=live
+      # Session cookie signing key. EMPTY here; real value in .env.local only.
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      # Revenue reads cross controlplane to the facilitator service.
+      - FACILITATOR_URL=http://facilitator:8787
+      # The host deployer process, reached via the docker bridge host-gateway.
+      - DEPLOYER_URL=${DEPLOYER_URL:-http://host.docker.internal:8788}
+      # Bearer secret for POST /deploy. EMPTY here; real value in .env.local only.
+      - DEPLOYER_AUTH_SECRET=${DEPLOYER_AUTH_SECRET:-}
+      # The deploy domain the agent-card URLs are built from.
+      - DEPLOY_DOMAIN=${DEPLOY_DOMAIN:-}
+      # SIWE anti-phishing domain bind. The browser signs a SiweMessage declaring the
+      # host it is served from, and siwe.server.ts verifies against this value, so it
+      # MUST equal the public studio host or every sign-in 401s (it otherwise falls back
+      # to "localhost"). Defaults to the Traefik studio router host; override in
+      # .env.local if the studio is hosted at a different domain.
+      - SIWE_DOMAIN=${SIWE_DOMAIN:-app.utter.technology}
+      # Optional Arc RPC override; falls back to the chain default when blank.
+      - ARC_RPC_URL=${ARC_RPC_URL:-}
+      - PORT=3000
+      # Optional model API passthrough for live AI generation. Uncomment and set
+      # in .env.local to enable real generation; absent keeps the scaffold path.
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
   # Internal pull-through npm registry mirror (SBX-05). DEV-ONLY build tooling: it
   # stays OFF all six networks (it is on the compose default project net), so it is
   # unreachable from any resource container. The prod no-network-at-build property

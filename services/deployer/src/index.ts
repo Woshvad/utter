@@ -134,7 +134,18 @@ export {
 // HTTPS + assert non-allowlisted unreachability. WRITTEN + type-checks, NEVER run
 // in the autonomous suite (needs the provisioned host + *.resources.<domain> cert);
 // recorded as a Deferred Item in STATE.md (Plan 06).
-export { liveDeployEcho, runEgressProbe, type LiveDeployResult, type DockerHandle } from "./live-deploy";
+export {
+  liveDeployEcho,
+  deployResource,
+  deployGeneratedBundle,
+  deployGatedBundle,
+  runEgressProbe,
+  type DeployResourceSpec,
+  type DeployGatedBundleParams,
+  type DeployProgressEvent,
+  type LiveDeployResult,
+  type DockerHandle,
+} from "./live-deploy";
 
 // Node-entry bundlers (deploy plane B): esbuild a workspace entrypoint into a single
 // self-contained server.js + a prebundled Dockerfile (FROM the resolved digest, CMD
@@ -145,6 +156,7 @@ export {
   bundleEcho,
   bundleEchoHandler,
   bundleSidecar,
+  bundleNodeEntry,
   buildEchoDockerfile,
   buildNodeBundleDockerfile,
   type BundleOpts,
@@ -152,6 +164,26 @@ export {
   type BundleEchoOpts,
   type BundleEchoResult,
 } from "./bundle-echo";
+
+// GENERATED (untrusted) bundle build core (deploy plane B): write a generated bundle to
+// a dir using POSIX keys verbatim, then esbuild a TRUSTED gate-less shim (which imports
+// the generated ./handler) into a self-contained server.js behind the SAME no-install
+// Dockerfile echo uses. NEVER the generated npm-ci Dockerfile. The pre-build static gate
+// (gate-bundle.ts) MUST run before this.
+export {
+  writeBundleToDir,
+  bundleGeneratedHandler,
+  GENERATED_BUNDLE_KEYS,
+} from "./bundle-generated";
+
+// Pre-build fail-closed static gate (deploy plane B, security-critical): run the
+// @utter/sandbox prepublish static checks over the in-memory generated bundle and throw
+// BundleGateError on ANY violation (or if the check itself errors) BEFORE any build runs.
+export {
+  gateGeneratedBundle,
+  BundleGateError,
+  runStaticChecksForGate,
+} from "./gate-bundle";
 
 // Deployer-side per-resource caller-auth token mint (C1): reuse the facilitator's
 // mintResourceAuthToken to mint ONE rid-bound token per deploy for the SIDECAR

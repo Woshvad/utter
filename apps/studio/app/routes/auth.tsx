@@ -15,7 +15,7 @@
 // signature never reach a log line.
 import * as React from "react";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useNavigate } from "react-router";
 import { getSession, commitSession } from "../auth/session.server.js";
 import { issueNonce, verifySiwe, SIWE_NONCE_KEY } from "../auth/siwe.server.js";
 import { SiweModal } from "../components/auth/SiweModal.js";
@@ -87,6 +87,20 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
 export default function AuthRoute(): React.ReactElement {
   const { nonce } = useLoaderData<typeof loader>() as { nonce: string };
   const fetcher = useFetcher();
+  const navigate = useNavigate();
+
+  // After a successful verify the action returns { ok: true, address }; navigate to the
+  // dashboard so the modal does not sit on "signed - verifying…" forever. This is a
+  // cosmetic client navigation only; the action JSON contract and session handling are
+  // unchanged.
+  React.useEffect(() => {
+    if (
+      fetcher.state === "idle" &&
+      (fetcher.data as { ok?: boolean } | undefined)?.ok === true
+    ) {
+      navigate("/dashboard");
+    }
+  }, [fetcher.state, fetcher.data, navigate]);
 
   // Full-bleed centered auth card (comp lines 35-64); the SIWE connect->sign flow
   // is unchanged - SiweModal signs in the browser and hands back {message, signature}

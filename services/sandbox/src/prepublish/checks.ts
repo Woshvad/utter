@@ -29,12 +29,30 @@ export interface PrePublishResult {
 export function runPrePublishStaticChecks(bundle: Bundle): PrePublishResult {
   const violations: PrePublishViolation[] = [];
 
-  // (a) Secret scan over the whole bundle.
-  for (const v of scanSecrets(bundle)) {
+  // (a) Secret scan. Declarative JSON artifacts (openapi.json / agent-card.json /
+  // test-cases.json) legitimately carry PUBLIC high-entropy constants - the payTo /
+  // resourceId / USDC addresses - which the generic Shannon-entropy pass would
+  // false-positive on (every generated bundle would otherwise fail the gate on the
+  // agent-card payTo address). Scan those with the NAMED provider rules only (entropy
+  // off); a real embedded key (sk-/AKIA/gh_/slack/0x<64hex> private key/api-key=...)
+  // is still caught there. The executable + config files (handler.ts, Dockerfile) get
+  // the FULL scan including the entropy pass, since untrusted code is the real
+  // secret-exfil surface. This mirrors the scanSecrets({ entropy:false }) contract and
+  // the runner's KNOWN_PUBLIC_CONSTANT allowance for the same public on-chain values.
+  const codeBundle: Bundle = {};
+  const declarativeBundle: Bundle = {};
+  for (const [file, source] of Object.entries(bundle)) {
+    if (file.endsWith(".json")) declarativeBundle[file] = source;
+    else codeBundle[file] = source;
+  }
+  for (const v of scanSecrets(codeBundle)) {
+    violations.push({ kind: "secret", ...v });
+  }
+  for (const v of scanSecrets(declarativeBundle, { entropy: false })) {
     violations.push({ kind: "secret", ...v });
   }
 
-  // (b) Dangerous-import / dangerous-API AST scan, per file.
+  // (b) Dangerous-import / dangerous-API AST scan, per file (over the whole bundle).
   for (const [file, source] of Object.entries(bundle)) {
     for (const v of scanImports(source, file)) {
       violations.push({ kind: "import", file, ...v });

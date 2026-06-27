@@ -23,7 +23,16 @@
 
 # Build output / generated dirs.
 **/dist
-**/build
+# Build OUTPUT only. A bare `**/build` also matches the studio SOURCE directory
+# apps/studio/app/components/build (Composer, BuildStream, BuildStepBlock), which strips
+# it from the Docker build context and breaks the in-image `pnpm -C apps/studio build`
+# (Rollup: could not resolve ../components/build/Composer.js). The only generated build
+# dir in this monorepo is apps/studio/build (react-router build); other packages run TS
+# directly or emit dist (already excluded). Anchor to a single package segment so nested
+# source dirs named build survive the context copy. Do not revert this to `**/build`.
+apps/*/build
+services/*/build
+packages/*/build
 **/out
 **/.cache
 **/.react-router

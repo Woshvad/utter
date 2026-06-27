@@ -1,0 +1,6 @@
+{
+  "name": "generated-sample",
+  "version": "1.0.0",
+  "description": "The sample untrusted generated resource for the operator host runbook: a benign echo-shape endpoint that returns the input text with its length.",
+  "route": "/echo"
+}

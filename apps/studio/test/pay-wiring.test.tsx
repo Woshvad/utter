@@ -156,7 +156,7 @@ describe("selectSubmitPayment (fixture routes through the action; live is fail-l
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
-    expect(url).toBe("/resources/0xres");
+    expect(url).toBe("/resources/0xres/run");
     expect(init.method).toBe("POST");
     const headers = init.headers as Record<string, string>;
     // the signed cap rides the X-PAYMENT header; the idemKey is carried explicitly

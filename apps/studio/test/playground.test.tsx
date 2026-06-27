@@ -79,6 +79,28 @@ describe("PlaygroundPlayer (Run drives runPlayground via the frozen gate)", () =
     );
   });
 
+  it("leaves the response pane out of running… and shows the error when onRun rejects", async () => {
+    // FIX 1b backstop: a rejecting onRun (e.g. a failed fetch/json against a hosted run)
+    // must land in the done-with-error state, not hang the pane on "running…" forever.
+    const onRun = vi.fn().mockRejectedValue(new Error("client boom"));
+    render(
+      <PlaygroundPlayer
+        resourceId="0xabc"
+        decimals={6}
+        pricing={METERED_PRICING}
+        cap={50000n}
+        onRun={onRun}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("playground-run"));
+
+    await waitFor(() => {
+      const pane = screen.getByTestId("playground-response");
+      expect(pane.textContent).not.toContain("running…");
+      expect(pane.textContent).toContain("client boom");
+    });
+  });
+
   it("shows the 402 paywall beat when the result reports an unfunded buyer", async () => {
     const onRun = vi.fn().mockResolvedValue({
       paid: false,

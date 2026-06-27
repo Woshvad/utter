@@ -47,6 +47,15 @@ export interface BundleOpts {
   outDir: string;
   /** The port the container EXPOSEs and the server listens on (default 8080). */
   port?: number;
+  /**
+   * Extra node_modules roots esbuild resolves BARE imports (hono, @hono/node-server)
+   * from. The workspace entrypoints (echo/handler/sidecar) live inside the monorepo so
+   * esbuild walks up to the workspace node_modules on its own; a GENERATED shim entry
+   * written into a tmp bundle dir does NOT, so the generated path passes the deployer's
+   * node_modules here. Relative imports (the shim's `./handler`) always resolve from the
+   * entry file's own dir regardless of this.
+   */
+  nodePaths?: string[];
 }
 
 /** Back-compat alias: the original echo bundler option name. */
@@ -95,13 +104,17 @@ export function buildEchoDockerfile(port: number): string {
 }
 
 /**
- * Bundle a single workspace node entrypoint into `<outDir>/server.js` (one
- * self-contained CJS file: viem/hono/gate/handler/openapi.json all inlined) and write
- * the prebundled `<outDir>/Dockerfile`. Returns the dir + Dockerfile path. The shared
- * internal core every public bundler (echo, handler, sidecar) routes through - only
- * the entry file differs.
+ * Bundle ANY node entry file into `<outDir>/server.js` (one self-contained CJS file:
+ * all deps inlined) and write the prebundled no-install `<outDir>/Dockerfile`. Returns
+ * the dir + Dockerfile path. This is the shared core every node-entry bundler routes
+ * through - the EXACT esbuild options + Dockerfile body, only the entry file differs.
+ *
+ * Exported so the GENERATED-bundle path (bundle-generated.ts) reuses the identical
+ * esbuild options and no-install Dockerfile rather than re-authoring them. The echo /
+ * handler / sidecar bundlers below keep their unchanged signatures by routing through
+ * here with a fixed workspace entry.
  */
-async function bundleNodeEntry(entry: string, opts: BundleOpts): Promise<BundleResult> {
+export async function bundleNodeEntry(entry: string, opts: BundleOpts): Promise<BundleResult> {
   const port = opts.port ?? DEFAULT_BUNDLE_PORT;
   const bundleDir = resolve(opts.outDir);
   await mkdir(bundleDir, { recursive: true });
@@ -117,6 +130,7 @@ async function bundleNodeEntry(entry: string, opts: BundleOpts): Promise<BundleR
     format: "cjs",
     target: "node22",
     logLevel: "silent",
+    ...(opts.nodePaths && opts.nodePaths.length > 0 ? { nodePaths: opts.nodePaths } : {}),
   });
 
   const dockerfilePath = join(bundleDir, "Dockerfile");

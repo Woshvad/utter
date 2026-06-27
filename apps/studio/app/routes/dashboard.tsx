@@ -28,16 +28,6 @@ import {
   type ResourceRow,
 } from "../components/dashboard/ResourceTable.js";
 
-/** A bounded, safe resourceId param (decode-before-use, ASVS V5). */
-function isSafeParam(value: string | undefined): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 96 &&
-    /^[A-Za-z0-9._-]+$/.test(value)
-  );
-}
-
 /**
  * Resolve the ArcScan explorer base: the ARC_EXPLORER env (the repo-wide ArcScan
  * source) if set, else the @utter/chain arcTestnet block-explorer URL. We never
@@ -90,38 +80,59 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
   const adapter = selectAdapter(process.env);
 
   // The settlements disclosure reads a single resource's receipts; the resourceId
-  // comes from the query string (?resource=...). Default to the canonical resource
-  // when absent so the autonomous loader test has a deterministic target.
+  // comes from the query string (?resource=...). The facilitator revenue read expects a
+  // canonical bytes32 id, so the param must match /^0x[0-9a-fA-F]{64}$/ exactly. A param
+  // that is absent or not bytes32 (e.g. ?resource=echo) falls back to the canonical
+  // resource id; this stops a non-bytes32 id from reaching the facilitator as a 400.
   const url = new URL(request.url);
   const resourceParam = url.searchParams.get("resource") ?? undefined;
-  const resourceId = isSafeParam(resourceParam)
+  const isBytes32 = (v: string | undefined): v is string =>
+    typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
+  const resourceId = isBytes32(resourceParam)
     ? resourceParam
-    : // fall back to the fixture/canonical resource id (validated shape)
+    : // fall back to the fixture/canonical resource id (canonical bytes32 shape)
       "0x00000000000000000000000000000000000000000000000000000000000000a1";
 
-  // Read-through aggregation: the single-resource summary (calls/gross/creator+platform
-  // /refunds + receipts) backs the settlements disclosure. The split is the projected
-  // aggregate, never recomputed here.
-  const revenue = await adapter.getRevenue(resourceId);
+  // The dashboard leads with money, so it is revenue-PRIMARY: a facilitator failure must
+  // surface the branded status page, not the something-broke screen. Read every revenue
+  // figure inside a single try; on ANY throw re-throw a 503 Response (the root
+  // ErrorBoundary renders a thrown Response via its status branch). Do NOT degrade to
+  // fake zero rows here - the dashboard fails loud-but-branded.
+  let revenue: RevenueSummary;
+  let rows: ResourceRow[];
+  try {
+    // Read-through aggregation: the single-resource summary (calls/gross/creator+platform
+    // /refunds + receipts) backs the settlements disclosure. The split is the projected
+    // aggregate, never recomputed here.
+    revenue = await adapter.getRevenue(resourceId);
 
-  // Per-resource rows: join each listed card with its read-through revenue. Calls and
-  // revenue are the projected getRevenue figures; uptime/bond/active come from the card.
-  const cards = await adapter.listMarketplace({});
-  const rows: ResourceRow[] = await Promise.all(
-    cards.map(async (card) => {
-      const rev = await adapter.getRevenue(card.resourceId);
-      return {
-        resourceId: card.resourceId,
-        slug: card.slug,
-        calls: rev.calls,
-        // The projected creator share, never recomputed.
-        revenue: rev.creatorShare,
-        uptime: card.uptime,
-        bond: card.bond,
-        active: card.active,
-      };
-    }),
-  );
+    // Per-resource rows: join each listed card with its read-through revenue. Calls and
+    // revenue are the projected getRevenue figures; uptime/bond/active come from the card.
+    const cards = await adapter.listMarketplace({});
+    rows = await Promise.all(
+      cards.map(async (card) => {
+        const rev = await adapter.getRevenue(card.resourceId);
+        return {
+          resourceId: card.resourceId,
+          slug: card.slug,
+          calls: rev.calls,
+          // The projected creator share, never recomputed.
+          revenue: rev.creatorShare,
+          uptime: card.uptime,
+          bond: card.bond,
+          active: card.active,
+        };
+      }),
+    );
+  } catch (err) {
+    // Re-throw an already-Response unchanged (e.g. a thrown redirect/status); otherwise
+    // surface a branded 503 so the page shows the status page, not the crash screen.
+    if (err instanceof Response) throw err;
+    throw new Response(JSON.stringify({ error: "revenue_unavailable" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
   // Runtime money scale read through the adapter (no 6/1e6 literal in the render).
   const { decimals } = await adapter.getEscrowBalance(
