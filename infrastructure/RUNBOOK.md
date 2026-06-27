@@ -531,3 +531,41 @@ money-path isolation.
    `curl -I https://app.utter.technology`, expecting a 200 or 302 with a valid
    Let's Encrypt cert. The very first request may briefly 404 or show a
    cert-pending state while ACME completes; retry after a few seconds.
+
+## Enable real AI generation
+
+This turns the studio Generate step from the deterministic scaffold generator into
+a real Claude model call. It assumes the studio is already hosted per the section
+above. Real generation is purely opt-in: with no key set the studio keeps using
+the deterministic scaffold generator and reaches no model or network path, so you
+can run the platform without it and switch it on later with no code change.
+
+1. API key in .env.local. Put a real Anthropic API key in `.env.local` as
+   `ANTHROPIC_API_KEY`. It must be a real API key from the Anthropic console, in
+   the `sk-ant-...` format. A Claude Code OAuth token is NOT an API key and will
+   401 for SDK use; the Agent SDK needs a real API key. The key is never baked into
+   the image or logged; it is supplied at runtime through the empty compose default.
+
+2. Model, optional. The default model is `claude-haiku-4-5-20251001`, the cheapest
+   model proven to pass all four bundle gates. To trade cost for higher-quality
+   generation, set `DEFAULT_MODEL` in `.env.local` to `claude-sonnet-4-6` or
+   `claude-opus-4-8`.
+
+3. Config dir, normally untouched. `CLAUDE_CONFIG_DIR` defaults to
+   `/tmp/utter-claude` inside the container, an empty writable dir so the Agent SDK
+   uses the API key and never a stray host OAuth token. The operator normally does
+   not set it.
+
+4. Rebuild only the studio:
+   `docker compose -f infrastructure/docker-compose.yml --env-file .env.local up -d --build studio`
+
+5. Verify by a real create in the browser. Open the studio, describe an endpoint,
+   and run Generate. It now produces a real handler from the model. Safety invariant:
+   the generated bundle still passes the four-gate validateBundle plus the deployer
+   gate plus gVisor isolation, exactly as before. Non-conforming model output is
+   rejected and never deployed; this work does not change any of those gates.
+
+Cost note. Each create spends Anthropic tokens. The studio reaches
+api.anthropic.com over upstreamnet, its only egress network. Larger models cost
+more per create, so leave the default haiku model in place unless you need the
+extra quality.
