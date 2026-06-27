@@ -18,6 +18,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import type { AcceptsEntry } from "@utter/x402-arc";
 import { selectAdapter } from "../adapter/select.js";
+import { tryGetRevenue } from "../adapter/revenue.js";
 import type { PlaygroundResult, ResourceDetail } from "../adapter/types.js";
 import { usePayPerCall } from "../wallet/usePayPerCall.js";
 import { selectSubmitPayment } from "../wallet/submit-payment.js";
@@ -59,8 +60,9 @@ export interface ResourceDetailData {
   decimals: number;
   /** Real settled-calls count sourced from the adapter getRevenue (the legitimate data
    *  path; fixture-backed by default). The title-block calls stat renders from this,
-   *  never from a hash. */
-  calls: number;
+   *  never from a hash. Null means the revenue read failed (a transient/unreachable
+   *  facilitator in live mode); the title-block renders a dash, never a fabricated zero. */
+  calls: number | null;
   /**
    * The client pay-submission mode (260622-wlu). "live" selects the operator-gated
    * fail-loud submitter; anything else (the autonomous default) routes the signed cap
@@ -110,11 +112,19 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
   }
 
   // Runtime money scale read through the adapter (no 6/1e6 literal in the render).
-  const { decimals } = await adapter.getEscrowBalance(detail.payout);
-  // Real settled-calls count sourced THROUGH the adapter getRevenue (fixture-backed by
-  // default). This replaces the old hash-fabricated title-block figure with a legitimate
-  // adapter-sourced count.
-  const { calls } = await adapter.getRevenue(detail.resourceId);
+  // Decimals come from the zero-address probe, NOT detail.payout. detail.payout is a
+  // bytes32 resourceId (66-char keccak), not a 20-byte address, so passing it to the
+  // escrow balance read throws via viem isAddress(); the zero address is the same safe
+  // decimals probe the other loaders use. detail.payout stays the escrow/payTo target
+  // everywhere else (the card and wallet-sign paths keep it).
+  const { decimals } = await adapter.getEscrowBalance(
+    "0x0000000000000000000000000000000000000000",
+  );
+  // Real settled-calls count sourced THROUGH the display-only tryGetRevenue wrapper. A
+  // failed (live-mode) facilitator read yields null here, so the title-block renders a
+  // dash rather than crashing or fabricating a zero.
+  const revenue = await tryGetRevenue(adapter, detail.resourceId);
+  const calls = revenue ? revenue.calls : null;
   // The client pay-submission mode inherits the same fixture/live boundary the adapter
   // uses (selectAdapter): live -> the fail-loud live submitter; anything else -> the
   // deterministic fixture path through this action.
@@ -397,12 +407,16 @@ export default function ResourceDetailRoute(): React.ReactElement {
   // adapter-sourced settled-calls count (getRevenue), uptime is the rolling health
   // score. The old hash-fabricated p50 latency is dropped (no real telemetry source).
   const uptimeLabel = repScore !== null ? `${(detail.health.score! * 100).toFixed(2)}%` : "—";
+  // A null calls (the revenue read failed) renders a dash, never a fabricated zero. The
+  // compact branches apply only when a real count is present.
   const callsLabel =
-    calls >= 1_000_000
-      ? `${(calls / 1_000_000).toFixed(2)}M`
-      : calls >= 1_000
-        ? `${(calls / 1_000).toFixed(1)}K`
-        : `${calls}`;
+    calls === null
+      ? "-"
+      : calls >= 1_000_000
+        ? `${(calls / 1_000_000).toFixed(2)}M`
+        : calls >= 1_000
+          ? `${(calls / 1_000).toFixed(1)}K`
+          : `${calls}`;
 
   return (
     <div className="flex max-w-[1320px]" data-testid="resource-detail">

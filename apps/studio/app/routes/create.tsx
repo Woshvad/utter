@@ -82,8 +82,20 @@ export async function action({ request }: ActionFunctionArgs): Promise<CreateAct
     return { ok: false, errors: validation.errors };
   }
 
-  const { resourceId, eventsUrl } = await adapter.createResource(validation.spec);
-  return { ok: true, resourceId, eventsUrl };
+  // createResource runs the four-gate validator and throws BEFORE any publish on a gate
+  // failure, so nothing partial is created. A throw (an unbuildable prompt in live mode)
+  // surfaces an inline prompt field error rather than the something-broke screen.
+  try {
+    const { resourceId, eventsUrl } = await adapter.createResource(validation.spec);
+    return { ok: true, resourceId, eventsUrl };
+  } catch {
+    return {
+      ok: false,
+      errors: {
+        prompt: "could not generate a valid endpoint from that prompt, try rephrasing",
+      },
+    };
+  }
 }
 
 /** A short, slug-like name derived from a free-text prompt (preview-only label). */
