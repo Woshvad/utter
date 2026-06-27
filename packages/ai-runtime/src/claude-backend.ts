@@ -27,6 +27,7 @@ import { generateDockerfile, PINNED_BASE_IMAGES } from "@utter/deployer";
 import { DEFAULT_MAX_RESPONSE_BYTES } from "@utter/sandbox";
 import type { Generator } from "./generator.js";
 import { buildAgentCard } from "./agent-card.js";
+import { validateBundle, type ValidationViolation } from "./validate.js";
 import { BUNDLE_KEYS, type Bundle, type ResourceSpec } from "./types.js";
 
 /**
@@ -130,6 +131,70 @@ export function buildRepairPrompt(missing: string[]): string {
 }
 
 /**
+ * The hard cap on validation-driven repair passes (PART of the bounded-loop
+ * guarantee). The first pass plus the one missing-file repair already ran; this bounds
+ * the EXTRA model passes the four-gate validator may trigger. At most two, so the whole
+ * generation is at most: first pass + 1 missing-file repair + 2 validation repairs. An
+ * un-repaired bundle then falls through to the caller's validateBundle (the final
+ * authority), which rejects it fail-closed. NEVER an unbounded loop.
+ */
+const MAX_VALIDATION_REPAIRS = 2;
+
+/**
+ * Pure predicate: is this validation violation something the MODEL authored and can
+ * fix by rewriting its files? True only for the model-authored gates (g1 shape, g2
+ * static, g4 serve), EXCLUDING:
+ *  - any g3 violation: g3 is the platform build spec (digest-pinned Dockerfile +
+ *    lockfile) which the model never authors, so re-prompting cannot fix it.
+ *  - "skipped-shape-failed": a g4 meta-violation that only means g1 failed; the real
+ *    g1 violation is already in the list and will be repaired, so this is noise.
+ *  - "agent-card-invalid": agent-card.json is platform-overwritten on every assembly
+ *    (buildAgentCard), so it cannot actually fail post-assembly; excluding it is
+ *    defensive and avoids a wasted repair of a file the model does not own.
+ * Anything else on g1/g2/g4 (a malformed test-cases.json, an uncompilable openapi, a
+ * smuggled secret, a misclassified case) is genuinely the model's to fix.
+ */
+export function isModelRepairable(v: ValidationViolation): boolean {
+  if (v.gate === "g3") return false;
+  if (v.kind === "skipped-shape-failed") return false;
+  if (v.kind === "agent-card-invalid") return false;
+  return v.gate === "g1" || v.gate === "g2" || v.gate === "g4";
+}
+
+/**
+ * Pure helper: build the validation repair prompt from the gate violations. Lists each
+ * problem as `- [file] detail` using the validator's own human-readable `detail` so the
+ * model fixes the exact failure (e.g. "each test-cases case must carry `response` and
+ * `expectedClass`"). Restates the handler export signature when any violation touches
+ * handler.ts. Dependency-free (reads no skill file) so it is unit-testable. It NEVER
+ * embeds the api key, the model's prior output, or the original spec prompt - only the
+ * gate findings. (The `detail` of a g2 secret violation may contain a preview fragment;
+ * that is fed back ONLY to the model that authored it, never logged - see generate().)
+ */
+export function buildValidationRepairPrompt(violations: ValidationViolation[]): string {
+  const lines = [
+    "Your previous bundle FAILED the platform validator and must be fixed.",
+    "",
+    "Problems to fix:",
+    ...violations.map((v) => (v.file ? `- [${v.file}] ${v.detail}` : `- ${v.detail}`)),
+  ];
+  const touchesHandler = violations.some(
+    (v) => v.file === "handler.ts" || v.detail.includes("handler.ts"),
+  );
+  if (touchesHandler) {
+    lines.push(
+      "",
+      "handler.ts must export `async function handler(c: Context): Promise<Response>`.",
+    );
+  }
+  lines.push(
+    "",
+    "Rewrite ONLY the files needed to fix these problems. Keep the exact five-file contract and stop.",
+  );
+  return lines.join("\n");
+}
+
+/**
  * Normalize the UNTRUSTED model temp-dir file tree into a Bundle with POSIX-style
  * relative keys (RESEARCH Pitfall 3: a Windows backslash key would fail the static
  * gate "missing file" check). Reads regular files under `dir` recursively, but
@@ -169,6 +234,28 @@ function readBundleFromDir(dir: string): Bundle {
     }
   };
   walk(dir);
+  return bundle;
+}
+
+/**
+ * Assemble the final Bundle from the untrusted model temp dir: the bounded read
+ * (readBundleFromDir) plus the two PLATFORM overwrites that the model never owns. The
+ * Dockerfile is replaced with the digest-pinned generateDockerfile output (SBX-05, the
+ * model's FROM line is discarded) and agent-card.json with the canonical A2A v0.3.0
+ * card (the SAME buildAgentCard the scaffold uses, scaffold.ts:181). Factored out so
+ * the generate() repair loop can RE-assemble after each repair pass: both overwrites
+ * MUST run on every assembly so a re-validated bundle always carries the platform
+ * Dockerfile + card, never the model placeholders (without this the model's placeholder
+ * card fails G1 and every bundle is rejected).
+ */
+function assembleBundle(tmpDir: string, spec: ResourceSpec): Bundle {
+  const bundle = readBundleFromDir(tmpDir);
+  bundle["Dockerfile"] = generateDockerfile({
+    runtime: spec.runtime,
+    baseImage: PINNED_BASE_IMAGES[spec.runtime],
+    registryUrl: process.env.REGISTRY_MIRROR_URL ?? "",
+  });
+  bundle["agent-card.json"] = JSON.stringify(buildAgentCard(spec), null, 2);
   return bundle;
 }
 
@@ -249,24 +336,32 @@ export class ClaudeGenerator implements Generator {
         await runAgent(buildRepairPrompt(missing), 12);
       }
 
-      const bundle = readBundleFromDir(tmpDir);
-
-      // OVERWRITE the Dockerfile with the platform-produced, digest-pinned output -
-      // exactly as the scaffold does. The model never authors the FROM line (SBX-05).
-      bundle["Dockerfile"] = generateDockerfile({
-        runtime: spec.runtime,
-        baseImage: PINNED_BASE_IMAGES[spec.runtime],
-        registryUrl: process.env.REGISTRY_MIRROR_URL ?? "",
-      });
-
-      // OVERWRITE agent-card.json with the canonical A2A v0.3.0 card. The contract
-      // (system-prompt.md / bundle-contract.md) tells the model to emit a minimal
-      // PLACEHOLDER card because the platform owns the real one - exactly as it owns
-      // the Dockerfile. buildAgentCard is the SAME builder the scaffold uses
-      // (scaffold.ts:181), so the live and scaffold paths produce an identical,
-      // G1-valid card. Without this the model's placeholder fails the 04-03 G1 A2A
-      // validation and every live bundle is rejected.
-      bundle["agent-card.json"] = JSON.stringify(buildAgentCard(spec), null, 2);
+      // Validation-driven repair. Assemble the bundle and run the SAME four-gate
+      // validateBundle the caller (live.ts) uses. If it fails on something the MODEL
+      // authored (g1 shape / g2 static / g4 serve - not the platform-owned g3), feed
+      // the EXACT gate violations back and let the model fix them, then re-assemble +
+      // re-validate. Bounded by MAX_VALIDATION_REPAIRS so it NEVER loops: an
+      // unrepairable bundle falls through to the caller's validateBundle (the FINAL
+      // authority), which rejects it fail-closed. This does NOT weaken any gate - it
+      // runs the gate MORE, never less, and the repair passes reuse the identical
+      // sandboxed runAgent closure. This is what lets a model-fixable failure (e.g.
+      // g1/test-cases-invalid) self-correct instead of dying at the first gate.
+      let bundle = assembleBundle(tmpDir, spec);
+      for (let attempt = 1; attempt <= MAX_VALIDATION_REPAIRS; attempt++) {
+        const result = await validateBundle(bundle, spec);
+        if (result.pass) break;
+        const fixable = result.violations.filter(isModelRepairable);
+        if (fixable.length === 0) break;
+        // Log ONLY gate/kind ids - NEVER v.detail (a g2 secret detail carries a
+        // preview), never the prompt, the model output, or the ANTHROPIC_API_KEY.
+        console.error(
+          "claude generation: validation failed, running repair pass",
+          attempt,
+          fixable.map((v) => `${v.gate}/${v.kind}`),
+        );
+        await runAgent(buildValidationRepairPrompt(fixable), 12);
+        bundle = assembleBundle(tmpDir, spec);
+      }
 
       return bundle;
     } finally {

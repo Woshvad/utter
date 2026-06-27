@@ -18,7 +18,14 @@ names, and no others. Write `handler.ts` FIRST, then the other four.
    component schema and a documented-error component schema (both with
    `additionalProperties: false` and `required`).
 3. `test-cases.json` - `{ description, cases: [...] }` with AT LEAST one case each
-   of `expectedClass: "success"`, `"declared_error"`, and `"malfunction"`.
+   of `expectedClass: "success"`, `"declared_error"`, and `"malfunction"`. Each case
+   object MUST use EXACTLY these four keys, with NO renames: `label` (a string),
+   `input` (the request body), `response` (the EXACT JSON body your handler returns
+   for that input), and `expectedClass` (EXACTLY one of the strings `"success"`,
+   `"declared_error"`, `"malfunction"`). Do NOT rename them: it is `response` (NOT
+   `output`, NOT `expected`, NOT `result`) and `expectedClass` (NOT `class`, NOT
+   `expected_class`). The bundle is REJECTED if any case is missing `response` or
+   `expectedClass`.
 4. `agent-card.json` - leave a minimal placeholder; the platform overwrites it with
    the canonical A2A v0.3.0 card.
 5. `Dockerfile` - leave a minimal placeholder; the platform OVERWRITES it with a
