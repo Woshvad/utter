@@ -8,6 +8,7 @@
 //   /metrics                 -> the OBS-01 Prometheus exposition      [token/session]
 //   /resources/:id           -> the resource-detail loader + screen (STU-03)
 //   /resources/:id/events    -> the SSE build-stream resource route (STU-02)
+//   /resources/:id/run       -> the playground Run resource route (STU-03)
 //   /creators/:address       -> the public creator channel profile (loader + screen)
 //   /auth                    -> the SIWE handshake (GET nonce / POST verify, STU-05)
 //
@@ -27,6 +28,7 @@ export default [
   // build-stream. They carry no shell and sit at distinct path segments.
   route("metrics", "routes/metrics.ts"),
   route("resources/:id/events", "routes/resources.$id.events.ts"),
+  route("resources/:id/run", "routes/resources.$id.run.ts"),
   // Every in-app screen renders INSIDE the persistent app shell (sidebar + top bar),
   // exactly as the comp does (comp lines 166-234). The pathless _shell layout adds no
   // URL segment; the gate stays in each child loader/action (the shell never gates).

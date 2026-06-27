@@ -5,8 +5,8 @@
 // supplies that seam for the studio screen, mirroring the established selectAdapter /
 // RequiresLive* boundary EXACTLY:
 //
-//   - The FIXTURE/default submitter routes the signed cap BACK through the existing
-//     resources.$id server action (the in-process facilitator that action already drives:
+//   - The FIXTURE/default submitter routes the signed cap BACK through the resources.$id
+//     run resource route (the in-process facilitator that route already drives:
 //     reserve-before-run + the validation gate + settle min(computed, cap) + exactly-once
 //     stay SERVER-SIDE). The browser submits a cap only; it never runs a handler against
 //     an unreserved authorization. The autonomous suite stays deterministic.
@@ -76,14 +76,14 @@ function decodePaymentReceipt(headerValue: string): { amount?: string; tx?: stri
 
 /**
  * The fixture/default submitter: route the signed X-PAYMENT header BACK through the
- * existing resources.$id server action (the in-process facilitator). The header is carried
+ * resources.$id run resource route (the in-process facilitator). The header is carried
  * in an `X-PAYMENT` request header (the wire convention) so the server side can pick the
- * paying beat; the action still drives reserve-before-run + the gate server-side. The
- * bigint debitAmount is re-read from the string the action serializes.
+ * paying beat; the run route still drives reserve-before-run + the gate server-side. The
+ * bigint debitAmount is re-read from the string the run route serializes.
  */
 export function fixtureSubmitPayment(resourceId: string): SubmitPayment {
   return async (header: string, idemKey: Hex): Promise<PlaygroundResult> => {
-    const res = await fetch(`/resources/${resourceId}`, {
+    const res = await fetch(`/resources/${resourceId}/run`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -92,8 +92,8 @@ export function fixtureSubmitPayment(resourceId: string): SubmitPayment {
         "X-PAYMENT": header,
         "X-IDEM-KEY": idemKey,
       },
-      // The action reads the request body for the run; the paying beat is signaled by the
-      // X-PAYMENT header. Send the prior benign body so the handler has input.
+      // The run route reads the request body for the run; the paying beat is signaled by
+      // the X-PAYMENT header. Send the prior benign body so the handler has input.
       body: JSON.stringify({ pay: true }),
     });
     const data = (await res.json()) as Omit<PlaygroundResult, "debitAmount"> & {

@@ -14,7 +14,7 @@
 // SAME bigint divmod UsdcAmount uses, off the runtime decimals) so no bigint crosses
 // the JSON wire while the projected price stays exact (never recomputed).
 import * as React from "react";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import type { AcceptsEntry } from "@utter/x402-arc";
 import { selectAdapter } from "../adapter/select.js";
@@ -153,59 +153,6 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
 }
 
 /**
- * The playground Run seam (STU-03): the client onRun POSTs the request body here and
- * the action drives adapter.runPlayground, which reuses the FROZEN escrow gate
- * (reserve-before-run, T-06-FREECOMPUTE). The component NEVER calls a handler against
- * an unreserved authorization - the only run path is through this adapter seam. The
- * bigint debitAmount is serialized as a string for the JSON wire.
- */
-export async function action({ params, request }: ActionFunctionArgs) {
-  if (!isSafeParam(params.id)) {
-    throw new Response(JSON.stringify({ error: "bad_resource" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  const adapter = selectAdapter(process.env);
-  let req: unknown = null;
-  try {
-    const text = await request.text();
-    req = text ? (JSON.parse(text) as unknown) : null;
-  } catch {
-    req = null;
-  }
-  let result: PlaygroundResult;
-  try {
-    result = await adapter.runPlayground(params.id, req);
-  } catch (err) {
-    // Error path: a rejected hosted run (a live deployer/sandbox failure) returns an
-    // error-shaped 200 JSON the client can render, rather than a non-Response throw that
-    // becomes a 500 the client fetch cannot parse and that hangs the response pane. The
-    // debitAmount is the wire string "0" (this route serializes the debit as a string).
-    // console.error logs the failure server-side only; a playground run error carries no
-    // secret. The escrow gate is untouched: this is purely the rejection branch.
-    console.error("playground run failed", err);
-    return {
-      paid: false,
-      debitAmount: "0",
-      body: { error: err instanceof Error ? err.message : "playground run failed" },
-      bodyBytes: 0,
-      handlerMs: 0,
-      paywall: null,
-    };
-  }
-  // Serialize the bigint debit for the wire; the client re-reads it as a string.
-  return {
-    paid: result.paid,
-    debitAmount: result.debitAmount.toString(),
-    body: result.body,
-    bodyBytes: result.bodyBytes,
-    handlerMs: result.handlerMs,
-    paywall: result.paywall,
-  };
-}
-
-/**
  * Derive the resource origin from the projected cardUrl by stripping the
  * /.well-known/agent-card.json suffix. The cardUrl is the only URL the detail
  * projection exposes; the resource URL is read from it, never invented.
@@ -268,15 +215,15 @@ export default function ResourceDetailRoute(): React.ReactElement {
   const lastReqRef = React.useRef<unknown>(null);
   const getRequestBody = React.useCallback(() => lastReqRef.current, []);
 
-  // The Run seam: POST the body to this route's action, which drives
+  // The Run seam: POST the body to this resource's run route, which drives
   // adapter.runPlayground (reserve-before-run inside the adapter). The component never
-  // calls a handler directly. The action serializes debitAmount as a string; re-read
+  // calls a handler directly. The run route serializes debitAmount as a string; re-read
   // it as a bigint here so the metered render path stays base-unit bigint.
   const onRun = React.useCallback(
     async (req: unknown): Promise<PlaygroundResult> => {
       // Capture the body so a subsequent wallet pay submits the SAME body that hit the 402.
       lastReqRef.current = req;
-      const res = await fetch(`/resources/${detail.resourceId}`, {
+      const res = await fetch(`/resources/${detail.resourceId}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req ?? null),
