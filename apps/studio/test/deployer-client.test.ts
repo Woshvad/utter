@@ -211,4 +211,27 @@ describe("streamDeploy (offline, stubbed fetch SSE)", () => {
     const gen = streamDeploy(makeParams(), { deployerUrl: DEPLOYER_URL, authSecret: SECRET });
     await expect(collect(gen)).rejects.toThrow(/no stream body/);
   });
+
+  it("surfaces a network-level fetch failure with the URL + cause code, bearer-free", async () => {
+    // The deployer-unreachable case: undici throws TypeError "fetch failed" with the
+    // real reason in err.cause.code. The opaque "fetch failed" is what the operator saw;
+    // streamDeploy must rethrow a diagnostic naming the URL + code + the actionable hint.
+    globalThis.fetch = (async () => {
+      const e = new TypeError("fetch failed");
+      (e as unknown as { cause: { code: string } }).cause = { code: "ECONNREFUSED" };
+      throw e;
+    }) as typeof fetch;
+
+    let caught: Error | undefined;
+    try {
+      await collect(streamDeploy(makeParams(), { deployerUrl: DEPLOYER_URL, authSecret: SECRET }));
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.message).toContain("ECONNREFUSED");
+    expect(caught?.message).toContain(`${DEPLOYER_URL}/deploy`);
+    expect(caught?.message).toMatch(/host\.docker\.internal/);
+    expect(caught?.message).not.toContain(SECRET);
+  });
 });

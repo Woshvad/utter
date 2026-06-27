@@ -69,7 +69,11 @@ schema:
 
 ## test-cases.json
 
-At least one case each of success / declared_error / malfunction:
+At least one case each of success / declared_error / malfunction. Every case object
+uses EXACTLY these four keys with no renames: `label`, `input`, `response` (the exact
+JSON body the handler returns for that input), and `expectedClass` (one of `"success"`,
+`"declared_error"`, `"malfunction"`). The bundle is rejected if a case is missing
+`response` or `expectedClass`:
 
 ```jsonc
 {

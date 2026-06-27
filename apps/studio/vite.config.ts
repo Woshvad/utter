@@ -19,7 +19,20 @@ export default defineConfig({
   // hide these transitive deps from the studio server bundle, so the root .npmrc
   // public-hoist-pattern hoists them into the root node_modules to make the runtime
   // resolution succeed.
+  //
+  // @anthropic-ai/claude-agent-sdk is externalized for the SAME reason as the
+  // docker/ssh cluster: its query() spawns the Claude Code CLI as a subprocess and
+  // resolves that bundled CLI by __dirname, which a bundled ESM server breaks, so it
+  // stays external and loads as a runtime require. It is a direct studio dependency
+  // (pinned to match @utter/ai-runtime) so pnpm's isolated layout resolves it.
   ssr: {
-    external: ["dockerode", "docker-modem", "ssh2", "cpu-features", "cpufeatures"],
+    external: [
+      "dockerode",
+      "docker-modem",
+      "ssh2",
+      "cpu-features",
+      "cpufeatures",
+      "@anthropic-ai/claude-agent-sdk",
+    ],
   },
 });

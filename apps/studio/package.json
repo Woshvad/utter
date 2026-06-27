@@ -9,6 +9,7 @@
     "build": "react-router build"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.183",
     "@radix-ui/react-dialog": "1.1.17",
     "@radix-ui/react-dropdown-menu": "^2.1",
     "@radix-ui/react-tabs": "^1.1",

@@ -9,7 +9,7 @@
 // come from the stub publicClient's runtime decimals() read (6), never a literal.
 // runPlayground reuses runPlaygroundHarness verbatim, keeping the reserve-before-run
 // escrow gate intact (the gate reserves the cap BEFORE the handler runs).
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { PublicClient } from "viem";
 import { InMemoryIndexStore, type IndexRecord } from "@utter/marketplace";
 import {
@@ -147,6 +147,15 @@ function makeComposeSpec(overrides: Partial<ComposeSpec> = {}): ComposeSpec {
   };
 }
 
+/** Drain the per-resource build channel to completion. The publish/upsert now runs in the
+ *  background IIFE after generation, so a post-create read must wait for the channel to
+ *  complete (the loop terminates when the channel completes - it cannot hang here). */
+async function drainBuild(adapter: LiveAdapter, resourceId: string): Promise<void> {
+  for await (const _ev of adapter.subscribeBuildEvents(resourceId)) {
+    // drain - we only need the stream to terminate (channel.complete after Live)
+  }
+}
+
 describe("LiveAdapter read path (injected offline deps)", () => {
   it("getEscrowBalance returns {raw, decimals} from the runtime decimals() read", async () => {
     const adapter = await makeLiveAdapter();
@@ -240,6 +249,11 @@ describe("LiveAdapter getRevenue (real pass-through to the injected seam)", () =
 });
 
 describe("LiveAdapter create flow (local-real, injected deps)", () => {
+  /** The slug derived from the standard makeComposeSpec prompt (kebab of the prompt text),
+   *  pinned by the deterministic-id test below. The canonical id is the shared-helper
+   *  keccak over utter:resource:<slug>. */
+  const EXPECTED_SLUG = "echo-the-caller-s-text-back-with-its-length";
+
   it("createResource(spec) returns { resourceId(bytes32), eventsUrl }", async () => {
     const adapter = await makeLiveAdapter();
     const { resourceId, eventsUrl } = await adapter.createResource(makeComposeSpec());
@@ -247,9 +261,37 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(eventsUrl).toBe(`/resources/${resourceId}/events`);
   });
 
+  it("returns immediately WITHOUT awaiting generation (the never-resolving generate case)", async () => {
+    // The regression this locks: generation moved off the blocking POST and into the
+    // background IIFE. A generate stub that NEVER resolves must NOT hang createResource -
+    // the method derives the identity up front and returns before generation runs.
+    const indexStore = new InMemoryIndexStore();
+    for (const rec of seedRecords()) await indexStore.upsert(rec);
+    const adapter = new LiveAdapter({
+      publicClient: makeStubPublicClient(),
+      indexStore,
+      buildChannel: new BuildEventChannel(),
+      // Never resolves: if createResource awaited this, the test would time out.
+      generate: () => new Promise<Bundle>(() => {}),
+      validate: validateBundle,
+      runPlayground: runPlaygroundHarness,
+      getRevenue: async () => ({ ...STUB_REVENUE, receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })) }),
+      buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
+    });
+
+    // Resolves quickly with the deterministic identity (no hang). Do NOT drain the channel
+    // for this case - the background IIFE never completes (the generate never resolves).
+    const { resourceId, eventsUrl } = await adapter.createResource(makeComposeSpec());
+    expect(resourceId).toBe(resourceIdForLabel(`utter:resource:${EXPECTED_SLUG}`));
+    expect(eventsUrl).toBe(`/resources/${resourceId}/events`);
+  });
+
   it("the created resource is visible in listMarketplace + getResourceDetail (shared store)", async () => {
     const adapter = await makeLiveAdapter();
     const { resourceId } = await adapter.createResource(makeComposeSpec());
+    // The upsert now happens in the background IIFE (after generate + the gate passes), so
+    // drain the build channel to completion first - that guarantees the publish ran.
+    await drainBuild(adapter, resourceId);
 
     // Visible in discovery: the SAME singleton-shaped store backs both reads and the
     // create publish, so the new id appears alongside the seeded cards.
@@ -263,10 +305,10 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(detail.pricing.base).toBeTruthy();
   });
 
-  it("subscribeBuildEvents(newId) drains Generate..Live and terminates (no throw/hang)", async () => {
+  it("subscribeBuildEvents(newId) streams the success sequence with NO duplicate Generate/Publish/Live", async () => {
     const adapter = await makeLiveAdapter();
-    // createResource emits the stages fire-and-forget, so await it first; the channel
-    // buffers earlier events, so a slightly-late subscriber still sees Generate.
+    // createResource emits the stages fire-and-forget, so await its quick return first; the
+    // channel buffers earlier events, so a slightly-late subscriber still sees Generate.
     const { resourceId } = await adapter.createResource(makeComposeSpec());
 
     const collected: { stage: string; status: string }[] = [];
@@ -277,16 +319,23 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     }
 
     const stages = collected.map((e) => e.stage);
-    // The full ordered sequence is present, starting at Generate and ending at Live.
+    // The full ordered sequence is present, starting at Generate and ending at Live, with
+    // the local-sim Deploy/Verify/Mint contributed in the middle.
     expect(stages[0]).toBe("Generate");
     expect(stages.at(-1)).toBe("Live");
     expect(stages).toContain("Deploy");
     expect(stages).toContain("Verify");
     expect(stages).toContain("Mint");
     expect(stages).toContain("Publish");
-    // Exactly one terminal Live(ok) event.
-    const liveOk = collected.filter((e) => e.stage === "Live" && e.status === "ok");
-    expect(liveOk.length).toBe(1);
+    // No duplicate Generate/Publish/Live: exactly one running + one ok Generate, exactly
+    // one Publish, exactly one Live. The local-sim branch must not re-emit them.
+    expect(collected.filter((e) => e.stage === "Generate" && e.status === "running").length).toBe(1);
+    expect(collected.filter((e) => e.stage === "Generate" && e.status === "ok").length).toBe(1);
+    expect(stages.filter((s) => s === "Publish").length).toBe(1);
+    expect(stages.filter((s) => s === "Live").length).toBe(1);
+
+    // The record IS upserted (publish happened after the gate passed).
+    await expect(adapter.getResourceDetail(resourceId)).resolves.toBeDefined();
   });
 
   it("the created resource is playable through runPlayground", async () => {
@@ -299,9 +348,11 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(res.debitAmount).toBeGreaterThan(0n);
   });
 
-  it("a validation failure rejects WITHOUT publishing the resource", async () => {
-    // Force a validation failure via an injected validate stub on a SEPARATE adapter so
-    // the other cases keep the real four-gate validator.
+  it("a validation failure streams a Generate:error and publishes nothing (no Publish/Live, no upsert)", async () => {
+    // Generation moved into the background IIFE, so a four-gate failure no longer rejects
+    // synchronously - createResource RESOLVES and the failure streams as a Generate:error.
+    // Force a validation failure via an injected validate stub on a SEPARATE adapter so the
+    // other cases keep the real four-gate validator.
     const failingValidate = async (): Promise<ValidationResult> => ({
       pass: false,
       gates: {
@@ -314,11 +365,70 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     });
     const adapter = await makeLiveAdapter(failingValidate);
 
-    const before = (await adapter.listMarketplace({})).map((c) => c.resourceId);
-    await expect(adapter.createResource(makeComposeSpec())).rejects.toThrow(/forced/);
-    // Reject-before-publish: no new card was added to the store.
-    const after = (await adapter.listMarketplace({})).map((c) => c.resourceId);
-    expect(after).toEqual(before);
+    // createResource now RESOLVES (does not throw) and returns the deterministic identity.
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string; log: string }[] = [];
+    // The channel still completes after the gate fail, so this loop terminates (no hang).
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status, log: ev.log });
+    }
+
+    const stages = collected.map((e) => e.stage);
+    expect(stages[0]).toBe("Generate");
+    const genError = collected.find((e) => e.stage === "Generate" && e.status === "error");
+    expect(genError).toBeDefined();
+    // The streamed reason contains the gate, kind, and detail strings (the same reason the
+    // old synchronous throw built).
+    expect(genError?.log).toContain("g1");
+    expect(genError?.log).toContain("forced");
+    expect(genError?.log).toContain("forced failure for the test");
+    // Reject-without-publish: NO Publish, NO Live, and the record was NOT upserted.
+    expect(stages).not.toContain("Publish");
+    expect(stages).not.toContain("Live");
+    await expect(adapter.getResourceDetail(resourceId)).rejects.toThrow();
+  });
+
+  it("a generate THROW streams a Generate:error with the message + console.errors it (no upsert)", async () => {
+    // A real generate throw (e.g. the live ClaudeGenerator failing) must stream the REAL
+    // reason as a Generate:error and be logged server-side, never swallowed.
+    const indexStore = new InMemoryIndexStore();
+    for (const rec of seedRecords()) await indexStore.upsert(rec);
+    const adapter = new LiveAdapter({
+      publicClient: makeStubPublicClient(),
+      indexStore,
+      buildChannel: new BuildEventChannel(),
+      generate: async () => {
+        throw new Error("model unavailable");
+      },
+      validate: validateBundle,
+      runPlayground: runPlaygroundHarness,
+      getRevenue: async () => ({ ...STUB_REVENUE, receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })) }),
+      buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
+    });
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+      const collected: { stage: string; status: string; log: string }[] = [];
+      for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+        collected.push({ stage: ev.stage, status: ev.status, log: ev.log });
+      }
+
+      const genError = collected.find((e) => e.stage === "Generate" && e.status === "error");
+      expect(genError).toBeDefined();
+      expect(genError?.log).toBe("model unavailable");
+      // No Publish/Live and the record was NOT upserted.
+      const stages = collected.map((e) => e.stage);
+      expect(stages).not.toContain("Publish");
+      expect(stages).not.toContain("Live");
+      await expect(adapter.getResourceDetail(resourceId)).rejects.toThrow();
+      // The real error was surfaced server-side.
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("getRevenue reads through the injected revenue seam (real pass-through)", async () => {
@@ -343,6 +453,8 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
   it("a created resource's detail payout equals the canonical resourceId and the cardUrl is real-shaped", async () => {
     const adapter = await makeLiveAdapter();
     const { resourceId } = await adapter.createResource(makeComposeSpec());
+    // The upsert now happens in the background IIFE; drain to completion so the publish ran.
+    await drainBuild(adapter, resourceId);
     const detail = await adapter.getResourceDetail(resourceId);
     // payout is the bytes32 escrow target (the wallet signs this), == the resourceId.
     expect(detail.payout).toBe(resourceId);

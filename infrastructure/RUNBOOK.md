@@ -531,3 +531,75 @@ money-path isolation.
    `curl -I https://app.utter.technology`, expecting a 200 or 302 with a valid
    Let's Encrypt cert. The very first request may briefly 404 or show a
    cert-pending state while ACME completes; retry after a few seconds.
+
+### Troubleshooting: the Deploy step shows "fetch failed"
+
+When Generate reaches "done" (bundle generated and four-gate validated) but Deploy
+fails, the build stream now names the cause, for example
+`deployer POST http://host.docker.internal:8788/deploy could not be reached
+(ECONNREFUSED): ...`. "fetch failed" is a connection-level error: the studio
+container could not reach the deployer host process at all. Work through:
+
+1. Is the deployer host process running and listening on :8788? Start it on the host
+   (not in a container - it needs the host Docker daemon + runsc). Confirm with
+   `curl -s http://localhost:8788/health` on the host, expecting
+   `{"ok":true,"service":"deployer"}`.
+
+2. Can the studio CONTAINER reach it? The container reaches the host over the docker
+   bridge via host.docker.internal, not localhost. Test from inside the container:
+   `docker compose -f infrastructure/docker-compose.yml exec studio \
+     wget -qO- http://host.docker.internal:8788/health`
+   - ECONNREFUSED: the deployer is not listening on all interfaces. It now binds
+     0.0.0.0 by default; if you set HOST, make sure it is not 127.0.0.1.
+   - timeout: a host firewall is dropping the docker subnet -> host:8788. Allow the
+     docker bridge subnet to reach the host on 8788 (keep 8788 closed to the public
+     internet). The /deploy endpoint is Bearer-authed and gate-first regardless.
+   - ENOTFOUND host.docker.internal: the `host.docker.internal:host-gateway`
+     extra_host is missing; it is set on the studio service in the compose file.
+
+3. Is DEPLOYER_URL correct? Inside the container localhost is the container itself,
+   not the host. Leave DEPLOYER_URL unset to use the
+   `http://host.docker.internal:8788` default, or set it explicitly to that. Do NOT
+   set it to http://localhost:8788.
+
+4. Is DEPLOYER_AUTH_SECRET set on BOTH sides? The same value must be in the studio
+   env and the deployer host process env, or POST /deploy returns 401/503 (that
+   shows as an HTTP error in the stream, not "fetch failed").
+
+## Enable real AI generation
+
+This turns the studio Generate step from the deterministic scaffold generator into
+a real Claude model call. It assumes the studio is already hosted per the section
+above. Real generation is purely opt-in: with no key set the studio keeps using
+the deterministic scaffold generator and reaches no model or network path, so you
+can run the platform without it and switch it on later with no code change.
+
+1. API key in .env.local. Put a real Anthropic API key in `.env.local` as
+   `ANTHROPIC_API_KEY`. It must be a real API key from the Anthropic console, in
+   the `sk-ant-...` format. A Claude Code OAuth token is NOT an API key and will
+   401 for SDK use; the Agent SDK needs a real API key. The key is never baked into
+   the image or logged; it is supplied at runtime through the empty compose default.
+
+2. Model, optional. The default model is `claude-haiku-4-5-20251001`, the cheapest
+   model proven to pass all four bundle gates. To trade cost for higher-quality
+   generation, set `DEFAULT_MODEL` in `.env.local` to `claude-sonnet-4-6` or
+   `claude-opus-4-8`.
+
+3. Config dir, normally untouched. `CLAUDE_CONFIG_DIR` defaults to
+   `/tmp/utter-claude` inside the container, an empty writable dir so the Agent SDK
+   uses the API key and never a stray host OAuth token. The operator normally does
+   not set it.
+
+4. Rebuild only the studio:
+   `docker compose -f infrastructure/docker-compose.yml --env-file .env.local up -d --build studio`
+
+5. Verify by a real create in the browser. Open the studio, describe an endpoint,
+   and run Generate. It now produces a real handler from the model. Safety invariant:
+   the generated bundle still passes the four-gate validateBundle plus the deployer
+   gate plus gVisor isolation, exactly as before. Non-conforming model output is
+   rejected and never deployed; this work does not change any of those gates.
+
+Cost note. Each create spends Anthropic tokens. The studio reaches
+api.anthropic.com over upstreamnet, its only egress network. Larger models cost
+more per create, so leave the default haiku model in place unless you need the
+extra quality.

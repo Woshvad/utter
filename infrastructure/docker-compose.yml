@@ -157,9 +157,16 @@ services:
       # Optional Arc RPC override; falls back to the chain default when blank.
       - ARC_RPC_URL=${ARC_RPC_URL:-}
       - PORT=3000
-      # Optional model API passthrough for live AI generation. Uncomment and set
-      # in .env.local to enable real generation; absent keeps the scaffold path.
-      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Anthropic API key for live AI generation. EMPTY here; real value in
+      # .env.local only. When set, selectGenerator returns the real ClaudeGenerator;
+      # when absent the deterministic scaffold path is used (the load-bearing default).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Empty writable config dir so the Agent SDK uses ANTHROPIC_API_KEY, never a
+      # stray interactive Claude Code OAuth token. Operator normally does not set it.
+      - CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-/tmp/utter-claude}
+      # Model used for generation. Defaults to the cheapest proven-to-pass-the-gates
+      # model; override to claude-sonnet-4-6 or claude-opus-4-8 in .env.local.
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-claude-haiku-4-5-20251001}
 
   # Internal pull-through npm registry mirror (SBX-05). DEV-ONLY build tooling: it
   # stays OFF all six networks (it is on the compose default project net), so it is
