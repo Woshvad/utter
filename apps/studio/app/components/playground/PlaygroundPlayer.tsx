@@ -108,7 +108,24 @@ export function PlaygroundPlayer({
           parsed = requestBody;
         }
       }
-      const result = await onRun(parsed, opts);
+      let result: PlaygroundResult;
+      try {
+        result = await onRun(parsed, opts);
+      } catch (err) {
+        // Client-side backstop: if the run fetch or its json() rejects, land in the
+        // done-with-error state so the response pane always leaves "running…" rather than
+        // hanging forever. debitAmount is a bigint in the client PlaygroundResult, so 0n.
+        setState({
+          phase: "done",
+          result: {
+            paid: false,
+            debitAmount: 0n,
+            body: { error: err instanceof Error ? err.message : "run failed" },
+          },
+          latencyMs: 0,
+        });
+        return;
+      }
       const ended = typeof performance !== "undefined" ? performance.now() : Date.now();
       const latencyMs = result.handlerMs ?? Math.max(0, Math.round(ended - started));
 

@@ -174,7 +174,26 @@ export async function action({ params, request }: ActionFunctionArgs) {
   } catch {
     req = null;
   }
-  const result = await adapter.runPlayground(params.id, req);
+  let result: PlaygroundResult;
+  try {
+    result = await adapter.runPlayground(params.id, req);
+  } catch (err) {
+    // Error path: a rejected hosted run (a live deployer/sandbox failure) returns an
+    // error-shaped 200 JSON the client can render, rather than a non-Response throw that
+    // becomes a 500 the client fetch cannot parse and that hangs the response pane. The
+    // debitAmount is the wire string "0" (this route serializes the debit as a string).
+    // console.error logs the failure server-side only; a playground run error carries no
+    // secret. The escrow gate is untouched: this is purely the rejection branch.
+    console.error("playground run failed", err);
+    return {
+      paid: false,
+      debitAmount: "0",
+      body: { error: err instanceof Error ? err.message : "playground run failed" },
+      bodyBytes: 0,
+      handlerMs: 0,
+      paywall: null,
+    };
+  }
   // Serialize the bigint debit for the wire; the client re-reads it as a string.
   return {
     paid: result.paid,
