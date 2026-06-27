@@ -296,6 +296,92 @@ describe("resource-detail tabs (real adapter content)", () => {
   });
 });
 
+describe("resources.$id action (playground run error path)", () => {
+  // The action drives adapter.runPlayground. A rejected hosted run must NOT throw a
+  // non-Response Error (which the client fetch sees as an unparseable 500 and hangs the
+  // response pane); it must return an error-shaped 200 JSON. console.error on this path is
+  // expected, so it is silenced to keep the suite output clean (restored after).
+  it("returns an error-shaped object (NOT a thrown Response) when runPlayground rejects", async () => {
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const spy = vi
+      .spyOn(
+        Object.getPrototypeOf(adapter) as { runPlayground: () => unknown },
+        "runPlayground",
+      )
+      .mockRejectedValueOnce(new Error("hosted boom"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { action } = await import("../app/routes/resources.$id");
+    const result = (await action({
+      params: { id: ID },
+      request: new Request("http://x/", {
+        method: "POST",
+        body: JSON.stringify({ text: "hi" }),
+      }),
+      context: {},
+    } as never)) as {
+      paid: boolean;
+      debitAmount: string;
+      body: { error: string };
+      bodyBytes: number;
+      handlerMs: number;
+      paywall: unknown;
+    };
+
+    // No throw, and the result is a plain object, never a Response.
+    expect(result).not.toBeInstanceOf(Response);
+    expect(result.paid).toBe(false);
+    // debitAmount is the wire string "0" here (the action serializes the debit as a string).
+    expect(result.debitAmount).toBe("0");
+    expect(result.body.error).toBe("hosted boom");
+    expect(result.bodyBytes).toBe(0);
+    expect(result.handlerMs).toBe(0);
+    expect(result.paywall).toBeNull();
+
+    errSpy.mockRestore();
+    spy.mockRestore();
+  });
+
+  it("returns the serialized result unchanged on a successful run (bigint debit -> string)", async () => {
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const spy = vi
+      .spyOn(
+        Object.getPrototypeOf(adapter) as { runPlayground: () => unknown },
+        "runPlayground",
+      )
+      .mockResolvedValueOnce({
+        paid: true,
+        debitAmount: 12000n,
+        body: { echo: "hi", length: 2 },
+        bodyBytes: 20,
+        handlerMs: 5,
+      });
+
+    const { action } = await import("../app/routes/resources.$id");
+    const result = (await action({
+      params: { id: ID },
+      request: new Request("http://x/", {
+        method: "POST",
+        body: JSON.stringify({ text: "hi" }),
+      }),
+      context: {},
+    } as never)) as {
+      paid: boolean;
+      debitAmount: string;
+      body: { echo: string; length: number };
+    };
+
+    expect(result.paid).toBe(true);
+    // the bigint debit is serialized to a string for the wire, unchanged
+    expect(result.debitAmount).toBe("12000");
+    expect(result.body).toEqual({ echo: "hi", length: 2 });
+
+    spy.mockRestore();
+  });
+});
+
 describe("resource-detail render path (no money literal)", () => {
   it("contains no 1e6/10**6//1000000/6n/18n money-scale literal in the route", () => {
     const forbidden = [/1e6/i, /10\s*\*\*\s*6/, /\/\s*1000000/, /\b6n\b/, /\b18n\b/, /BigInt\(\s*6\s*\)/, /BigInt\(\s*18\s*\)/];
