@@ -13,9 +13,12 @@ import { afterEach, describe, it, expect } from "vitest";
 import {
   ClaudeGenerator,
   buildRepairPrompt,
+  buildValidationRepairPrompt,
   findMissingModelFiles,
+  isModelRepairable,
 } from "../src/claude-backend.js";
 import { generate } from "../src/index.js";
+import type { ValidationViolation } from "../src/validate.js";
 import { BUNDLE_KEYS } from "../src/types.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -86,6 +89,26 @@ describe("claude-backend.ts source discipline (static assertions, no runtime cal
     expect(src).toContain("runAgent(");
     expect(src).toContain("maxTurns");
   });
+
+  it("runs the four-gate validateBundle inside generate, bounded, before returning", () => {
+    // The validation-driven repair loop self-corrects a model-fixable gate failure.
+    // It runs the SAME validateBundle the caller uses (gate is never weakened) and is
+    // bounded by MAX_VALIDATION_REPAIRS so it can never loop unbounded.
+    expect(src).toContain("validateBundle(bundle, spec)");
+    expect(src).toContain("MAX_VALIDATION_REPAIRS");
+    expect(src).toContain("isModelRepairable");
+    expect(src).toContain("buildValidationRepairPrompt");
+    // The repair loop must reassemble through assembleBundle so the platform Dockerfile
+    // + agent-card overwrites run on every pass.
+    expect(src).toContain("assembleBundle(tmpDir, spec)");
+  });
+
+  it("logs only gate/kind ids in the validation loop, never the violation detail", () => {
+    // A g2 secret violation's detail carries a preview fragment; the log must use
+    // `${v.gate}/${v.kind}` only - never v.detail, the prompt, output, or the api key.
+    expect(src).toContain("`${v.gate}/${v.kind}`");
+    expect(src).not.toContain("fixable.map((v) => v.detail");
+  });
 });
 
 describe("generate() barrel (autonomous: scaffold-only, no key)", () => {
@@ -147,5 +170,87 @@ describe("findMissingModelFiles (pure, temp dir, no model call)", () => {
     writeFileSync(join(dir, "openapi.json"), "{}");
     writeFileSync(join(dir, "test-cases.json"), "{}");
     expect(findMissingModelFiles(dir)).toEqual([]);
+  });
+});
+
+describe("isModelRepairable (pure, no model call)", () => {
+  const v = (gate: ValidationViolation["gate"], kind: string): ValidationViolation => ({
+    gate,
+    kind,
+    detail: `${gate}/${kind}`,
+  });
+
+  it("is true for model-authored g1/g2/g4 failures the model can fix", () => {
+    expect(isModelRepairable(v("g1", "test-cases-invalid"))).toBe(true);
+    expect(isModelRepairable(v("g1", "openapi-invalid"))).toBe(true);
+    expect(isModelRepairable(v("g1", "missing-file"))).toBe(true);
+    expect(isModelRepairable(v("g2", "secret"))).toBe(true);
+    expect(isModelRepairable(v("g2", "import"))).toBe(true);
+    expect(isModelRepairable(v("g4", "misclassified"))).toBe(true);
+    expect(isModelRepairable(v("g4", "classifier-build-failed"))).toBe(true);
+  });
+
+  it("is false for the platform-owned g3 build spec (the model cannot fix it)", () => {
+    expect(isModelRepairable(v("g3", "base-not-pinned"))).toBe(false);
+    expect(isModelRepairable(v("g3", "lockfile-missing"))).toBe(false);
+    expect(isModelRepairable(v("g3", "dockerfile-missing"))).toBe(false);
+  });
+
+  it("is false for the g4 skipped-shape-failed meta-violation (its cause is a g1 failure)", () => {
+    expect(isModelRepairable(v("g4", "skipped-shape-failed"))).toBe(false);
+  });
+
+  it("is false for agent-card-invalid (the platform overwrites the card on assembly)", () => {
+    expect(isModelRepairable(v("g1", "agent-card-invalid"))).toBe(false);
+  });
+});
+
+describe("buildValidationRepairPrompt (pure, no model call)", () => {
+  it("lists each violation's file + detail so the model fixes the exact failure", () => {
+    const prompt = buildValidationRepairPrompt([
+      {
+        gate: "g1",
+        kind: "test-cases-invalid",
+        detail: "each test-cases case must carry `response` and `expectedClass`",
+        file: "test-cases.json",
+      },
+    ]);
+    expect(prompt).toContain("test-cases.json");
+    expect(prompt).toContain("each test-cases case must carry `response` and `expectedClass`");
+    expect(prompt).toContain("FAILED the platform validator");
+    expect(prompt).toContain("Keep the exact five-file contract");
+  });
+
+  it("appends the handler signature hint when a violation touches handler.ts", () => {
+    const prompt = buildValidationRepairPrompt([
+      {
+        gate: "g1",
+        kind: "missing-file",
+        detail: 'bundle is missing required file "handler.ts"',
+        file: "handler.ts",
+      },
+    ]);
+    expect(prompt).toContain("Promise<Response>");
+  });
+
+  it("omits the handler hint when no violation touches handler.ts", () => {
+    const prompt = buildValidationRepairPrompt([
+      {
+        gate: "g1",
+        kind: "openapi-invalid",
+        detail: "openapi.json failed to parse/compile",
+        file: "openapi.json",
+      },
+    ]);
+    expect(prompt).not.toContain("Promise<Response>");
+  });
+
+  it("never embeds an api key, the model output, or the original prompt", () => {
+    // The repair prompt is built ONLY from gate findings - it must not carry secrets.
+    const prompt = buildValidationRepairPrompt([
+      { gate: "g2", kind: "secret", detail: 'secret-scan rule "x" fired', file: "handler.ts" },
+    ]);
+    expect(prompt).not.toContain("sk-ant");
+    expect(prompt).not.toContain("ANTHROPIC_API_KEY");
   });
 });
