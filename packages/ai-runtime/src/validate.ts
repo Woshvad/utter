@@ -596,37 +596,30 @@ function gatePricing(spec: ResourceSpec): Pricing {
 }
 
 /**
- * Mount an in-process Hono app whose `/` route reproduces the generated handler's
- * behavior (the echo-templated success body the scaffold/model emits). validate.ts
- * cannot import the untrusted handler.ts as a TS module at runtime, so G4 mirrors its
- * declared contract: a string `text` -> 200 { result, length } (the *Success shape);
- * a non-string `text` -> 400 { error, code } (the declared-error shape). This is the
- * WIRING proof (402 -> 200 behind the gate); the genuine isolated handler execution
- * is the operator-gated runsc deferral.
+ * Mount an in-process Hono app whose `/` route REPLAYS the resource's declared success
+ * body. validate.ts cannot import the untrusted handler.ts as a TS module at runtime, so
+ * G4 mirrors the resource's declared contract by returning a body the model marked
+ * `expectedClass: "success"` and the classifier already AGREED is a success (step (a) in
+ * gateServeBehindX402 proves this before the body is injected here). Returning that
+ * declared body verbatim makes the classifier behind the gate classify it success -> 200,
+ * which is the WIRING proof (402 -> 200 behind the gate). This generalizes the proof from
+ * the echo shape to ANY resource: a sentiment `{score,sentiment}` bundle injects its own
+ * declared success body instead of a hardcoded `{result,length}` body that a non-echo
+ * classifier would reject as a malfunction (502 -> the g4/paid-not-200 failure this fix
+ * removes).
  *
  * DEPLOY-PLANE CAVEAT (IN-03): on the CLAUDE path G4 therefore proves only that the
  * DECLARED contract serves behind x402, NOT that the model's own handler.ts does. A
- * model handler that diverges from the echo shape would still pass G4. Phase 5 /
- * deploy must NOT over-trust G4 for model output: the model handler's real runtime
- * behavior is validated only under the operator-gated sandbox (runsc) at deploy.
- * This is an inherent property of the autonomous gate (validate.ts cannot import the
- * untrusted handler.ts as a TS module), not a fixable defect this phase.
+ * model handler whose real output diverges from its declared success body would still
+ * pass G4 (and then correctly 502 under the real gate at runtime, never charging the
+ * buyer). Phase 5 / deploy must NOT over-trust G4 for model output: the model handler's
+ * real runtime behavior is validated only under the operator-gated sandbox (runsc) at
+ * deploy. This is an inherent property of the autonomous gate (validate.ts cannot import
+ * the untrusted handler.ts as a TS module), not a fixable defect this phase.
  */
-function buildResourceApp(): Hono {
+function buildResourceApp(successBody: unknown): Hono {
   const app = new Hono();
-  app.post("/", async (c: Context) => {
-    let body: { text?: unknown };
-    try {
-      body = (await c.req.json()) as { text?: unknown };
-    } catch {
-      return c.json({ error: "request body must be valid JSON", code: "BAD_JSON" }, 400);
-    }
-    const text = body?.text;
-    if (typeof text !== "string") {
-      return c.json({ error: "text must be a string", code: "BAD_INPUT" }, 400);
-    }
-    return c.json({ result: text, length: text.length }, 200);
-  });
+  app.post("/", (c: Context) => c.json(successBody as Record<string, unknown>, 200));
   return app;
 }
 
@@ -672,6 +665,32 @@ export async function gateServeBehindX402(
   // If the declared classes do not hold, do not bother mounting the gate.
   if (violations.length > 0) return gateResult(violations);
 
+  // Pick the resource's declared success case to drive the paid wiring proof. Step (a)
+  // above has ALREADY proven its response classifies as success, so injecting that body
+  // makes the gate return 200 for ANY resource shape (not just echo). A valid bundle has
+  // at least one success case (the contract requires it); without one G4 cannot prove the
+  // paid 200 path, so fail closed (a model can add one - a repairable g4 violation). This
+  // lookup MUST stay after the misclassified early-return above so a mutated test set with
+  // no success case surfaces as `misclassified`, not `no-success-case`.
+  const successCase = testCases.find((tc) => tc.expectedClass === "success");
+  if (!successCase) {
+    return gateResult([
+      {
+        gate: "g4",
+        kind: "no-success-case",
+        detail:
+          'test-cases.json must include at least one case with expectedClass "success" ' +
+          "so the serve gate can prove the paid 200 path",
+        file: "test-cases.json",
+      },
+    ]);
+  }
+  const successBody = successCase.response;
+  // The injected handler ignores the request body (it replays successBody), but the gate
+  // needs a valid JSON POST body; the declared input is the natural choice, {} as a
+  // fallback. JSON.stringify of either is always valid JSON.
+  const requestBodyJson = JSON.stringify(successCase.input ?? {});
+
   // (b) Mount the handler behind injectGate and prove 402 -> 200 + exactly one debit.
   const cap = 10_000n;
   const nonce: Hex = `0x${"a2".repeat(32)}`;
@@ -689,7 +708,7 @@ export async function gateServeBehindX402(
   });
 
   const pricing = gatePricing(spec);
-  const gated = injectGate(buildResourceApp(), {
+  const gated = injectGate(buildResourceApp(successBody), {
     facilitatorUrl: "http://facilitator.validate",
     resourceId: RESOURCE,
     cap,
@@ -703,7 +722,7 @@ export async function gateServeBehindX402(
   const unpaid = await gated.request("/", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: "hello" }),
+    body: requestBodyJson,
   });
   if (unpaid.status !== 402) {
     violations.push({
@@ -729,12 +748,12 @@ export async function gateServeBehindX402(
     });
   }
 
-  // Paid -> 200 with the echoed success body + exactly one debit <= cap.
+  // Paid -> 200 with the declared success body + exactly one debit <= cap.
   const header = await signedHeader({ pk, buyer, cap, nonce });
   const paid = await gated.request("/", {
     method: "POST",
     headers: { "content-type": "application/json", "X-PAYMENT": header },
-    body: JSON.stringify({ text: "hello" }),
+    body: requestBodyJson,
   });
   if (paid.status !== 200) {
     violations.push({
@@ -743,12 +762,16 @@ export async function gateServeBehindX402(
       detail: `a paid request returned ${paid.status}, expected 200`,
     });
   } else {
-    const echoed = (await paid.json()) as { result?: string; length?: number };
-    if (echoed.result !== "hello" || echoed.length !== 5) {
+    // The gate returns 200 ONLY when the classifier classified the body as success, so
+    // a 200 already proves the success path. This extra check proves the gate returned
+    // the declared body UNCHANGED (no corruption on the money path). Both sides
+    // serialize the SAME successBody object, so the key order matches.
+    const returned = (await paid.json()) as unknown;
+    if (JSON.stringify(returned) !== JSON.stringify(successBody)) {
       violations.push({
         gate: "g4",
         kind: "paid-body-mismatch",
-        detail: `the paid body was ${JSON.stringify(echoed)}, expected { result: "hello", length: 5 }`,
+        detail: `the paid body was ${JSON.stringify(returned)}, expected the declared success body ${JSON.stringify(successBody)}`,
       });
     }
     if (!paid.headers.get("X-PAYMENT-RESPONSE")) {
