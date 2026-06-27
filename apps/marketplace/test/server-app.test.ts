@@ -6,8 +6,15 @@
 // source the card route reads). The card route still re-validates before serving.
 import { describe, it, expect } from "vitest";
 import { buildAgentCard, validateAgentCard } from "@utter/ai-runtime";
-import { InMemoryIndexStore, InMemoryCardStore, type Hex } from "../src/index.js";
+import {
+  InMemoryIndexStore,
+  InMemoryCardStore,
+  InMemoryModerationStore,
+  createPublishPipeline,
+  type Hex,
+} from "../src/index.js";
 import { createMarketplaceApp } from "../src/server";
+import { createPublishPipelineDeps } from "../src/publish-deps";
 import type { CardSource } from "../src/card-route";
 
 const RESOURCE = `0x${"a7".repeat(32)}` as Hex;
@@ -32,12 +39,16 @@ function finalizedCard(): Record<string, unknown> {
 // finalized card from the CardStore (null -> 404 via the card route).
 function appWith(cardStore: InMemoryCardStore) {
   const indexStore = new InMemoryIndexStore();
+  const moderationStore = new InMemoryModerationStore();
   const cardSource: CardSource = {
     async getCard(resourceId) {
       return (await cardStore.get(resourceId as Hex)) ?? null;
     },
   };
-  return createMarketplaceApp({ indexStore, cardStore, cardSource });
+  const publishPipeline = createPublishPipeline(
+    createPublishPipelineDeps({}, { indexStore, cardStore, moderationStore }),
+  );
+  return createMarketplaceApp({ indexStore, cardStore, cardSource, publishPipeline });
 }
 
 describe("createMarketplaceApp - card route over a pre-seeded CardStore", () => {
