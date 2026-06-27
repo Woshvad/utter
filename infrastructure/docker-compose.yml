@@ -148,6 +148,12 @@ services:
       - DEPLOYER_AUTH_SECRET=${DEPLOYER_AUTH_SECRET:-}
       # The deploy domain the agent-card URLs are built from.
       - DEPLOY_DOMAIN=${DEPLOY_DOMAIN:-}
+      # SIWE anti-phishing domain bind. The browser signs a SiweMessage declaring the
+      # host it is served from, and siwe.server.ts verifies against this value, so it
+      # MUST equal the public studio host or every sign-in 401s (it otherwise falls back
+      # to "localhost"). Defaults to the Traefik studio router host; override in
+      # .env.local if the studio is hosted at a different domain.
+      - SIWE_DOMAIN=${SIWE_DOMAIN:-app.utter.technology}
       # Optional Arc RPC override; falls back to the chain default when blank.
       - ARC_RPC_URL=${ARC_RPC_URL:-}
       - PORT=3000
