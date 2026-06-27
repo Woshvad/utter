@@ -109,6 +109,25 @@ describe("claude-backend.ts source discipline (static assertions, no runtime cal
     expect(src).toContain("`${v.gate}/${v.kind}`");
     expect(src).not.toContain("fixable.map((v) => v.detail");
   });
+
+  it("wraps generation in a bounded fresh-regeneration loop with a fresh temp dir per attempt", () => {
+    // The model is stochastic; a clean restart (fresh tmpDir + fresh agent context) is the
+    // durable recovery for an intermittent skipped file. The loop is bounded by
+    // MAX_GENERATION_ATTEMPTS, and the temp dir is created INSIDE the loop (per attempt).
+    expect(src).toContain("MAX_GENERATION_ATTEMPTS");
+    expect(src).toContain("genAttempt <= MAX_GENERATION_ATTEMPTS");
+    // mkdtempSync must be inside the attempt loop, not once before it.
+    const loopIdx = src.indexOf("genAttempt = 1");
+    const mkIdx = src.indexOf("mkdtempSync(join(tmpdir()");
+    expect(loopIdx).toBeGreaterThan(0);
+    expect(mkIdx).toBeGreaterThan(loopIdx);
+  });
+
+  it("wraps the agent loop in try/catch and re-throws bearer-free context only", () => {
+    // A transient SDK/API throw must not leak the prompt/output/key, and must surface a
+    // safe reason so the attempt can retry fresh or propagate to the build stream.
+    expect(src).toContain("claude agent loop failed");
+  });
 });
 
 describe("generate() barrel (autonomous: scaffold-only, no key)", () => {
@@ -132,6 +151,9 @@ describe("buildRepairPrompt (pure, no model call)", () => {
     // The repair prompt restates the handler export signature when handler.ts is
     // missing, so the model re-emits the mandatory core with the right shape.
     expect(prompt).toContain("Promise<Response>");
+    // It also re-asserts the handler-first ordering (mirrors system-prompt.md) since the
+    // observed failure is the model skipping the mandatory core.
+    expect(prompt).toContain("handler.ts FIRST");
   });
 
   it("names all missing files when several are missing", () => {
@@ -231,6 +253,7 @@ describe("buildValidationRepairPrompt (pure, no model call)", () => {
       },
     ]);
     expect(prompt).toContain("Promise<Response>");
+    expect(prompt).toContain("handler.ts FIRST");
   });
 
   it("omits the handler hint when no violation touches handler.ts", () => {
