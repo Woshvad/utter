@@ -6,15 +6,19 @@ import { defineConfig } from "vite";
 // gate. Tests run via the package-local vitest.config.ts, not this file.
 export default defineConfig({
   plugins: [reactRouter()],
-  // Externalize the docker/ssh native cluster from the SSR bundle. The studio's
-  // live-deps.server.ts imports @utter/ai-runtime (selectGenerator/validateBundle),
-  // and @utter/ai-runtime depends on @utter/deployer + @utter/sandbox, which pull
-  // dockerode -> docker-modem -> ssh2 -> the optional cpu-features native addon
-  // (build/Release/cpufeatures.node). The SSR build noExternals workspace packages,
-  // so without this it tries to bundle that .node binary and fails to resolve it.
-  // The studio never executes dockerode/ssh2 at runtime, so they stay runtime
-  // requires here (cpu-features is optional and degrades gracefully if loaded).
+  // Keep ONLY the optional native CPU-feature addon out of the SSR bundle, and BUNDLE
+  // the pure-JS docker/ssh cluster. The studio's live-deps.server.ts imports
+  // @utter/ai-runtime (selectGenerator/validateBundle), and @utter/ai-runtime depends on
+  // @utter/deployer + @utter/sandbox, which pull dockerode -> docker-modem -> ssh2 -> the
+  // OPTIONAL cpu-features native addon (build/Release/cpufeatures.node). The SSR build
+  // noExternals the workspace packages, so dockerode/docker-modem/ssh2 are inlined into
+  // build/server/index.js; only cpu-features stays external so the bundler never tries to
+  // resolve the .node binary (ssh2 loads cpu-features lazily in a try/catch and degrades
+  // when it is absent). We must NOT externalize dockerode/ssh2 themselves: under pnpm's
+  // isolated node_modules the production server bundle cannot resolve a runtime
+  // `import "dockerode"` (a transitive dep the studio never executes - deploys go over HTTP
+  // to the deployer), which crashes the container at boot. Bundling them removes that import.
   ssr: {
-    external: ["dockerode", "docker-modem", "ssh2", "cpu-features", "cpufeatures"],
+    external: ["cpu-features", "cpufeatures"],
   },
 });
