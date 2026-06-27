@@ -122,6 +122,104 @@ describe("validateBundle (GEN-01/04): four-gate acceptance over the scaffold bun
     expect(g4.violations.some((v) => v.gate === "g4" && v.kind === "misclassified")).toBe(true);
   });
 
+  it("G4 passes a NON-echo resource by replaying its declared success body (the g4/paid-not-200 fix)", async () => {
+    // The case that used to fail: a sentiment-shaped resource. Its success schema is
+    // { sentiment, score }, so the old hardcoded echo body { result, length } classified
+    // as a malfunction -> 502 -> g4/paid-not-200. The fix replays the model's OWN declared
+    // success body, which the classifier agrees is a success -> 200.
+    const bundle = await scaffoldBundle();
+    bundle["openapi.json"] = JSON.stringify({
+      $id: "openapi.json",
+      openapi: "3.1.0",
+      info: { title: "sentiment", version: "1.0.0" },
+      paths: {
+        "/": {
+          post: {
+            responses: {
+              "200": {
+                description: "ok",
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/SentimentSuccess" },
+                  },
+                },
+              },
+              "400": {
+                description: "err",
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/SentimentError" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          SentimentSuccess: {
+            type: "object",
+            additionalProperties: false,
+            required: ["sentiment", "score"],
+            properties: { sentiment: { type: "string" }, score: { type: "number" } },
+          },
+          SentimentError: {
+            type: "object",
+            additionalProperties: false,
+            required: ["error"],
+            properties: { error: { type: "string" }, code: { type: "string" } },
+          },
+        },
+      },
+    });
+    bundle["test-cases.json"] = JSON.stringify({
+      description: "sentiment fixtures the gate classifies",
+      cases: [
+        {
+          label: "success",
+          input: { text: "i love it" },
+          response: { sentiment: "positive", score: 0.9 },
+          expectedClass: "success",
+        },
+        {
+          label: "declared_error",
+          input: { text: 123 },
+          response: { error: "text must be a string", code: "BAD_INPUT" },
+          expectedClass: "declared_error",
+        },
+        {
+          label: "malfunction",
+          input: { text: "x" },
+          response: { unexpected: "y" },
+          expectedClass: "malfunction",
+        },
+      ],
+    });
+    const { result: shapeResult, openapi, testCases } = gateShape(bundle);
+    expect(shapeResult.pass).toBe(true);
+    expect(openapi).toBeDefined();
+    expect(testCases).toBeDefined();
+    const g4 = await gateServeBehindX402(openapi!, testCases!, spec);
+    if (!g4.pass) {
+      throw new Error(`g4 failed for the non-echo bundle: ${JSON.stringify(g4.violations, null, 2)}`);
+    }
+    expect(g4.pass).toBe(true);
+  });
+
+  it("G4 fails closed when no test case declares success (cannot prove the paid 200 path)", async () => {
+    const bundle = await scaffoldBundle();
+    const { openapi, testCases } = gateShape(bundle);
+    // Drop the success case so only declared_error + malfunction remain. Step (a) still
+    // classifies those correctly (no misclassified), so the gate reaches the success-case
+    // lookup and must fail closed rather than prove a paid path it cannot demonstrate.
+    const noSuccess = testCases!.filter((c) => c.expectedClass !== "success");
+    expect(noSuccess.length).toBeGreaterThan(0);
+    const g4 = await gateServeBehindX402(openapi!, noSuccess, spec);
+    expect(g4.pass).toBe(false);
+    expect(g4.violations.some((v) => v.gate === "g4" && v.kind === "no-success-case")).toBe(true);
+  });
+
   it("the validator exercises exactly the five BUNDLE_KEYS (no extra file is required)", async () => {
     const bundle = await scaffoldBundle();
     expect(Object.keys(bundle).sort()).toEqual([...BUNDLE_KEYS].sort());
