@@ -14,7 +14,7 @@
 // (0x1111...1111) and getResourceDetail returns the SAME detail for every id, so the
 // loader associates BOTH listed fixture cards to FIXTURE_CREATOR.
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ChannelHeader } from "../app/components/profile/ChannelHeader";
 import { FIXTURE_CREATOR } from "../app/fixtures/index";
@@ -65,6 +65,27 @@ describe("creator-profile loader (read-through by creator)", () => {
 
     // The loader resolved each listed card's owner through the adapter seam (not invented).
     expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("flips revenueAvailable to false (no throw) when an owned card's getRevenue throws", async () => {
+    // Live-shaped failure: an owned card's facilitator read throws. The loader does not
+    // throw; it returns revenueAvailable false so the header shows a dash. Driven by a
+    // STUB throw (the fixture never throws).
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const spy = vi
+      .spyOn(Object.getPrototypeOf(adapter) as { getRevenue: () => unknown }, "getRevenue")
+      .mockRejectedValueOnce(new Error("facilitator unreachable"));
+
+    const { loader } = await import("../app/routes/creators.$address");
+    const data = await loader({
+      request: new Request(`http://x/creators/${FIXTURE_CREATOR}`),
+      params: { address: FIXTURE_CREATOR },
+      context: {},
+    } as never);
+
+    expect(data.revenueAvailable).toBe(false);
     spy.mockRestore();
   });
 
@@ -202,6 +223,37 @@ describe("creator-profile screen (channel header + apis grid)", () => {
 
     expect(screen.getByText(/nothing here yet\./i)).toBeInTheDocument();
     expect(screen.getByText(/utter the first one\./i)).toBeInTheDocument();
+  });
+});
+
+describe("ChannelHeader revenueAvailable", () => {
+  const BASE = {
+    address: FIXTURE_CREATOR,
+    repScore: 96,
+    reputation: 19n,
+    apiCount: 2,
+    totalCalls: 256,
+    totalEarnings: 1792000n,
+    decimals: 6,
+  };
+
+  it("renders a dash for TOTAL CALLS and EARNINGS when revenueAvailable is false", () => {
+    render(<ChannelHeader {...BASE} revenueAvailable={false} />);
+    const header = screen.getByTestId("channel-header");
+    // the calls + earnings money cells are unknown -> dashes, never a fabricated number
+    expect(within(header).queryByTestId("usdc-amount")).toBeNull();
+    expect(within(header).getAllByText("-").length).toBeGreaterThanOrEqual(2);
+    // the APIS count + the reputation meter still render (they do not depend on revenue)
+    expect(within(header).getByText(String(BASE.apiCount))).toBeInTheDocument();
+    expect(within(header).getByTestId("reputation-meter")).toBeInTheDocument();
+  });
+
+  it("renders the real numbers + UsdcAmount when revenueAvailable is omitted (default true)", () => {
+    render(<ChannelHeader {...BASE} />);
+    const header = screen.getByTestId("channel-header");
+    // earnings render through the single money surface; the calls figure is compacted
+    expect(within(header).getByTestId("usdc-amount")).toBeInTheDocument();
+    expect(within(header).getByText("256")).toBeInTheDocument();
   });
 });
 

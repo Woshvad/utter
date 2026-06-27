@@ -54,6 +54,60 @@ describe("resources.$id loader (read-through)", () => {
     expect((data as unknown as Record<string, unknown>).p50).toBeUndefined();
   });
 
+  it("test-it does not crash when the decimals probe throws for a bytes32 (uses the zero address)", async () => {
+    // The live-mode "test it" crash was getEscrowBalance(detail.payout) with payout a
+    // bytes32 (66-char keccak) -> readUsdcBalance throws via viem isAddress(). Stub
+    // getEscrowBalance to mimic that: THROW for a bytes32-shaped argument, SUCCEED for the
+    // zero address. If the loader still passed detail.payout it would throw; reading from
+    // the zero address proves the fix.
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const spy = vi
+      .spyOn(
+        Object.getPrototypeOf(adapter) as {
+          getEscrowBalance: (addr: string) => Promise<{ raw: bigint; decimals: number }>;
+        },
+        "getEscrowBalance",
+      )
+      .mockImplementation(async (addr: string) => {
+        if (/^0x[0-9a-fA-F]{64}$/.test(addr)) {
+          throw new Error("invalid address: not a 20-byte address");
+        }
+        return { raw: 0n, decimals: 6 };
+      });
+
+    const { loader } = await import("../app/routes/resources.$id");
+    const data = await loader({
+      params: { id: ID },
+      request: new Request("http://x/"),
+      context: {},
+    } as never);
+
+    // No throw, and a numeric decimals came back from the zero-address probe.
+    expect(typeof data.decimals).toBe("number");
+    expect(data.decimals).toBe(6);
+    spy.mockRestore();
+  });
+
+  it("returns calls null (no throw) when getRevenue throws", async () => {
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const spy = vi
+      .spyOn(Object.getPrototypeOf(adapter) as { getRevenue: () => unknown }, "getRevenue")
+      .mockRejectedValueOnce(new Error("facilitator unreachable"));
+
+    const { loader } = await import("../app/routes/resources.$id");
+    const data = await loader({
+      params: { id: ID },
+      request: new Request("http://x/"),
+      context: {},
+    } as never);
+
+    // a failed revenue read renders the calls stat as unknown, never a crash or zero
+    expect(data.calls).toBeNull();
+    spy.mockRestore();
+  });
+
   it("validates params.id and surfaces a 404 not-found path for a malformed id", async () => {
     const { loader } = await import("../app/routes/resources.$id");
     let thrown: unknown;
