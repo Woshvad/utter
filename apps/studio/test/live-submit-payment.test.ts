@@ -200,9 +200,9 @@ describe("selectSubmitPayment - live mode gating (260623-deq)", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
     const submit = selectSubmitPayment({ resourceId: "0xres", mode: "fixture" });
     const result = await submit("HEADER", IDEM);
-    // the fixture path POSTs back through the route action and carries X-IDEM-KEY
+    // the fixture path POSTs back through the run resource route and carries X-IDEM-KEY
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
-    expect(url).toBe("/resources/0xres");
+    expect(url).toBe("/resources/0xres/run");
     const headers = init.headers as Record<string, string>;
     expect(headers["X-IDEM-KEY"]).toBe(IDEM);
     expect(result.debitAmount).toBe(12000n);
