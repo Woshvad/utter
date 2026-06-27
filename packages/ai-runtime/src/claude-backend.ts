@@ -120,7 +120,9 @@ export function buildRepairPrompt(missing: string[]): string {
   if (missing.includes("handler.ts")) {
     lines.push(
       "",
-      "handler.ts must export `async function handler(c: Context): Promise<Response>`.",
+      "Write handler.ts FIRST, before any other file. It is the mandatory core and the",
+      "bundle is REJECTED without it. handler.ts must export",
+      "`async function handler(c: Context): Promise<Response>`.",
     );
   }
   lines.push(
@@ -139,6 +141,20 @@ export function buildRepairPrompt(missing: string[]): string {
  * authority), which rejects it fail-closed. NEVER an unbounded loop.
  */
 const MAX_VALIDATION_REPAIRS = 2;
+
+/**
+ * The hard cap on FRESH generation attempts. The model is stochastic: claude-opus-4-8
+ * intermittently skips handler.ts, and once it has skipped a file in a given context the
+ * in-context repairs (which reuse the SAME temp dir + accumulated agent context) tend to
+ * keep skipping it. A clean restart with a FRESH temp dir + fresh model context is the
+ * most reliable recovery for that run-to-run variance. This multiplies an already-bounded
+ * inner loop by a small constant, so the whole generation is still strictly bounded
+ * (NEVER an unbounded loop): at most MAX_GENERATION_ATTEMPTS x (first pass + 1 missing-file
+ * repair + MAX_VALIDATION_REPAIRS validation repairs) model calls. An attempt returns
+ * early the instant validateBundle passes; if all attempts are exhausted the best-effort
+ * bundle falls through to the caller's validateBundle (the final authority), fail-closed.
+ */
+const MAX_GENERATION_ATTEMPTS = 2;
 
 /**
  * Pure predicate: is this validation violation something the MODEL authored and can
@@ -184,7 +200,8 @@ export function buildValidationRepairPrompt(violations: ValidationViolation[]): 
   if (touchesHandler) {
     lines.push(
       "",
-      "handler.ts must export `async function handler(c: Context): Promise<Response>`.",
+      "Write handler.ts FIRST, before any other file - it is the mandatory core. It must",
+      "export `async function handler(c: Context): Promise<Response>`.",
     );
   }
   lines.push(
@@ -275,98 +292,154 @@ export class ClaudeGenerator implements Generator {
   }
 
   async generate(spec: ResourceSpec): Promise<Bundle> {
-    // Absolute temp cwd (ESM + Windows safe). The agent writes ONLY here. Cleaned up
-    // in the finally below (IN-05) so repeated live generations do not leak temp
-    // dirs full of untrusted model-authored source.
-    const tmpDir = mkdtempSync(join(tmpdir(), "utter-gen-"));
     const systemPrompt = readSkill("system-prompt.md");
 
-    try {
-      // Drive the agent loop. Tools are constrained to file Write/Read; Bash and the
-      // web are disallowed; no local Claude settings are inherited; the cwd is the
-      // absolute temp dir. The model emits the five files into tmpDir.
-      //
-      // The SDK's `env` REPLACES the subprocess environment, so we spread
-      // process.env (for PATH/HOME/etc) and inject the configured ANTHROPIC_API_KEY
-      // (WR-02). This makes selectGenerator(env)'s key authoritative: the executor
-      // honors the selector's key instead of silently depending on the ambient
-      // process env, so the selector and executor agree on the key source.
-      //
-      // The closure shares ONE options object across both passes; only `prompt` and
-      // `maxTurns` differ. The repair pass is NOT allowed to relax the sandbox:
-      // allowedTools/disallowedTools/settingSources/cwd/env are identical.
-      const runAgent = async (prompt: string, maxTurns: number): Promise<void> => {
-        for await (const _msg of query({
-          prompt,
-          options: {
-            model: this.config.model,
-            systemPrompt,
-            allowedTools: ["Write", "Read"],
-            disallowedTools: ["Bash", "WebFetch", "WebSearch"],
-            permissionMode: "acceptEdits",
-            cwd: tmpDir,
-            maxTurns,
-            settingSources: [],
-            env: { ...process.env, ANTHROPIC_API_KEY: this.config.apiKey },
-          },
-        })) {
-          // Drain the iterator to run the agent loop to completion - the model output
-          // is read back from the temp dir, never trusted from the message stream.
-          void _msg;
+    // The best-effort bundle from the most recent attempt. If every attempt ends on a
+    // model-repairable failure, this is returned so the CALLER's validateBundle (the
+    // final authority) rejects it fail-closed - generate() never publishes or deploys.
+    let lastBundle: Bundle | undefined;
+
+    // Bounded FRESH-regeneration loop. The model is stochastic: claude-opus-4-8
+    // intermittently skips a required file (observed live as g1/missing-file: handler.ts),
+    // and once it has skipped a file in a given context the in-context repairs (which
+    // reuse the SAME temp dir + accumulated agent context) tend to keep skipping it. A
+    // clean restart with a FRESH temp dir + fresh model context is the most reliable
+    // recovery. An attempt returns the instant validateBundle passes, so a good first run
+    // costs one model call; the loop is strictly bounded by MAX_GENERATION_ATTEMPTS times
+    // the already-bounded inner repairs (NEVER an unbounded loop).
+    for (let genAttempt = 1; genAttempt <= MAX_GENERATION_ATTEMPTS; genAttempt++) {
+      // Absolute temp cwd (ESM + Windows safe), one PER ATTEMPT. The agent writes ONLY
+      // here. Cleaned up in the finally below (IN-05) so repeated live generations do not
+      // leak temp dirs full of untrusted model-authored source.
+      const tmpDir = mkdtempSync(join(tmpdir(), "utter-gen-"));
+      try {
+        // Drive the agent loop. Tools are constrained to file Write/Read; Bash and the
+        // web are disallowed; no local Claude settings are inherited; the cwd is the
+        // absolute temp dir. The model emits the five files into tmpDir.
+        //
+        // The SDK's `env` REPLACES the subprocess environment, so we spread process.env
+        // (for PATH/HOME/etc) and inject the configured ANTHROPIC_API_KEY (WR-02). The
+        // closure shares ONE options object across every pass AND every attempt; only
+        // `prompt` and `maxTurns` differ. No pass or attempt is allowed to relax the
+        // sandbox: allowedTools/disallowedTools/settingSources/cwd/env are identical.
+        const runAgent = async (prompt: string, maxTurns: number): Promise<void> => {
+          try {
+            for await (const _msg of query({
+              prompt,
+              options: {
+                model: this.config.model,
+                systemPrompt,
+                allowedTools: ["Write", "Read"],
+                disallowedTools: ["Bash", "WebFetch", "WebSearch"],
+                permissionMode: "acceptEdits",
+                cwd: tmpDir,
+                maxTurns,
+                settingSources: [],
+                env: { ...process.env, ANTHROPIC_API_KEY: this.config.apiKey },
+              },
+            })) {
+              // Drain the iterator to run the agent loop to completion - the model output
+              // is read back from the temp dir, never trusted from the message stream.
+              void _msg;
+            }
+          } catch (err) {
+            // A transient SDK/API error (rate limit, timeout, subprocess) throws here.
+            // Re-throw with SAFE context only (maxTurns + the message) - NEVER the prompt,
+            // the model output, or the ANTHROPIC_API_KEY. The attempt's catch below decides
+            // retry-fresh vs propagate, so a transient blip does not hang the build stream.
+            throw new Error(
+              `claude agent loop failed (maxTurns ${maxTurns}): ${(err as Error).message}`,
+            );
+          }
+        };
+
+        // First pass (maxTurns 24: a five-file write plus reasoning regularly exceeds 8,
+        // and the model would otherwise stop having SKIPPED the hardest file, handler.ts).
+        await runAgent(buildPrompt(spec), 24);
+
+        // One-shot missing-file repair (cheap pre-check). If a required model-authored
+        // file is absent, re-enter the SAME constrained loop to write only the missing
+        // files. Logs ONLY the file-name array (never the prompt/output/key).
+        const missingFirst = findMissingModelFiles(tmpDir);
+        if (missingFirst.length > 0) {
+          console.error(
+            "claude generation: first pass missing files, repair pass",
+            genAttempt,
+            missingFirst,
+          );
+          await runAgent(buildRepairPrompt(missingFirst), 12);
         }
-      };
 
-      // First pass. maxTurns was 8, raised to 24: a five-file write plus reasoning
-      // regularly exceeds 8 turns, and the model would stop having SKIPPED the
-      // hardest file (handler.ts) - observed live as the g1/missing-file rejection.
-      await runAgent(buildPrompt(spec), 24);
+        // Validation-driven repair loop. Run the SAME four-gate validateBundle the caller
+        // (live.ts) uses; validate once per bundle state. On each repair: if a required
+        // file is STILL missing, use the stronger missing-file prompt (keeps handler.ts
+        // named across ALL passes, not just the one-shot above); else feed back the
+        // model-fixable gate violations. Return the instant the bundle passes. Bounded by
+        // MAX_VALIDATION_REPAIRS. This never weakens a gate - it runs the gate MORE, and
+        // every repair reuses the identical sandboxed runAgent closure.
+        let bundle = assembleBundle(tmpDir, spec);
+        let result = await validateBundle(bundle, spec);
+        for (let repair = 1; repair <= MAX_VALIDATION_REPAIRS && !result.pass; repair++) {
+          const fixable = result.violations.filter(isModelRepairable);
+          if (fixable.length === 0) break;
+          const stillMissing = findMissingModelFiles(tmpDir);
+          const repairPrompt =
+            stillMissing.length > 0
+              ? buildRepairPrompt(stillMissing)
+              : buildValidationRepairPrompt(fixable);
+          // Log ONLY gate/kind ids + the attempt/repair counters - NEVER v.detail (a g2
+          // secret detail carries a preview), the prompt, the model output, or the key.
+          console.error(
+            "claude generation: validation repair",
+            genAttempt,
+            repair,
+            fixable.map((v) => `${v.gate}/${v.kind}`),
+          );
+          await runAgent(repairPrompt, 12);
+          bundle = assembleBundle(tmpDir, spec);
+          result = await validateBundle(bundle, spec);
+        }
 
-      // One-shot repair pass. If any required model-authored file is absent, re-enter
-      // the SAME constrained loop ONCE to write only the missing files. This runs
-      // EXACTLY ONCE: still-missing files fall through to readBundleFromDir (bounded
-      // read) and the four 04-03 gates, which fail closed rather than looping. The
-      // diagnostic logs ONLY the file-name array - never the prompt, model output, or
-      // ANTHROPIC_API_KEY.
-      const missing = findMissingModelFiles(tmpDir);
-      if (missing.length > 0) {
+        if (result.pass) return bundle; // SUCCESS - this attempt converged.
+        lastBundle = bundle; // keep best-effort for the fail-closed fallthrough.
+        // A non-model-repairable failure will not be fixed by a fresh model run, so stop
+        // retrying and let the caller's validateBundle reject it (fail-closed).
+        if (!result.violations.some(isModelRepairable)) return bundle;
         console.error(
-          "claude generation: first pass missing files, running one repair pass",
-          missing,
+          "claude generation: attempt did not converge, regenerating fresh",
+          genAttempt,
+          result.violations.map((v) => `${v.gate}/${v.kind}`),
         );
-        await runAgent(buildRepairPrompt(missing), 12);
-      }
-
-      // Validation-driven repair. Assemble the bundle and run the SAME four-gate
-      // validateBundle the caller (live.ts) uses. If it fails on something the MODEL
-      // authored (g1 shape / g2 static / g4 serve - not the platform-owned g3), feed
-      // the EXACT gate violations back and let the model fix them, then re-assemble +
-      // re-validate. Bounded by MAX_VALIDATION_REPAIRS so it NEVER loops: an
-      // unrepairable bundle falls through to the caller's validateBundle (the FINAL
-      // authority), which rejects it fail-closed. This does NOT weaken any gate - it
-      // runs the gate MORE, never less, and the repair passes reuse the identical
-      // sandboxed runAgent closure. This is what lets a model-fixable failure (e.g.
-      // g1/test-cases-invalid) self-correct instead of dying at the first gate.
-      let bundle = assembleBundle(tmpDir, spec);
-      for (let attempt = 1; attempt <= MAX_VALIDATION_REPAIRS; attempt++) {
-        const result = await validateBundle(bundle, spec);
-        if (result.pass) break;
-        const fixable = result.violations.filter(isModelRepairable);
-        if (fixable.length === 0) break;
-        // Log ONLY gate/kind ids - NEVER v.detail (a g2 secret detail carries a
-        // preview), never the prompt, the model output, or the ANTHROPIC_API_KEY.
+      } catch (err) {
+        // A thrown attempt: an assembleBundle throw (readBundleFromDir rejected an
+        // unexpected/oversized file) or an agent-loop throw. Retry FRESH if attempts
+        // remain; on the last attempt propagate so live.ts surfaces the real reason.
         console.error(
-          "claude generation: validation failed, running repair pass",
-          attempt,
-          fixable.map((v) => `${v.gate}/${v.kind}`),
+          "claude generation: attempt threw",
+          genAttempt,
+          (err as Error).message,
         );
-        await runAgent(buildValidationRepairPrompt(fixable), 12);
-        bundle = assembleBundle(tmpDir, spec);
+        if (genAttempt >= MAX_GENERATION_ATTEMPTS) throw err;
+      } finally {
+        // Always remove this attempt's untrusted temp tree, even on a throw. A cleanup
+        // failure is non-fatal (log the path only) so it never masks the real outcome.
+        try {
+          rmSync(tmpDir, { recursive: true, force: true });
+        } catch (cleanupErr) {
+          console.error(
+            "claude generation: temp cleanup failed",
+            tmpDir,
+            (cleanupErr as Error).message,
+          );
+        }
       }
-
-      return bundle;
-    } finally {
-      // Always remove the untrusted model temp tree, even on a gate/read throw.
-      rmSync(tmpDir, { recursive: true, force: true });
     }
+
+    // Every attempt exhausted on a model-repairable failure: return the best-effort
+    // bundle so the caller's validateBundle (the FINAL authority) rejects it fail-closed.
+    if (!lastBundle) {
+      throw new Error("claude generation: produced no bundle after all attempts");
+    }
+    return lastBundle;
   }
 }
