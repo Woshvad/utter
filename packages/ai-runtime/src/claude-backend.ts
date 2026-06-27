@@ -18,7 +18,7 @@
 // The Dockerfile the model emits is DISCARDED and overwritten by the platform
 // generateDockerfile (digest-pinned, SBX-05) - the model only declares runtime +
 // deps, never the FROM line.
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
@@ -77,6 +77,57 @@ function buildPrompt(spec: ResourceSpec): string {
 
 /** The exact-five contract keys, as a Set for membership checks. */
 const BUNDLE_KEY_SET = new Set<string>(BUNDLE_KEYS);
+
+/**
+ * The REQUIRED MODEL-AUTHORED files a repair pass must check and regenerate. These
+ * are the three files the model truly authors AND that survive into the final
+ * bundle. The other two BUNDLE_KEYS members are platform-overwritten AFTER
+ * generation: Dockerfile by generateDockerfile and agent-card.json by
+ * buildAgentCard. A repair pass for those would be wasted work since the model's
+ * versions are discarded, so the missing-file check covers ONLY these three.
+ */
+const REQUIRED_MODEL_FILES: readonly string[] = [
+  "handler.ts",
+  "openapi.json",
+  "test-cases.json",
+];
+
+/**
+ * Pure helper: given a directory, return the subset of REQUIRED_MODEL_FILES that do
+ * NOT exist on disk. No reads, no model call - just existence checks over the
+ * provided dir, so it is unit-testable in isolation with no network.
+ */
+export function findMissingModelFiles(dir: string): string[] {
+  return REQUIRED_MODEL_FILES.filter((f) => !existsSync(join(dir, f)));
+}
+
+/**
+ * Pure helper: build the one-shot repair prompt naming the files the first pass left
+ * out. Dependency-free (reads no skill file) so it is unit-testable. When handler.ts
+ * is missing it restates the required handler export signature, since handler.ts is
+ * the mandatory core the first pass tends to skip (observed live as g1/missing-file).
+ */
+export function buildRepairPrompt(missing: string[]): string {
+  const lines = [
+    "Your previous output was INCOMPLETE: it did not write every required file.",
+    "",
+    "Missing files:",
+    ...missing.map((f) => `- ${f}`),
+    "",
+    "Write each missing file now per the five-file bundle contract you were given.",
+  ];
+  if (missing.includes("handler.ts")) {
+    lines.push(
+      "",
+      "handler.ts must export `async function handler(c: Context): Promise<Response>`.",
+    );
+  }
+  lines.push(
+    "",
+    "Do NOT modify the files that already exist. Emit ONLY the missing files, then stop.",
+  );
+  return lines.join("\n");
+}
 
 /**
  * Normalize the UNTRUSTED model temp-dir file tree into a Bundle with POSIX-style
@@ -153,23 +204,49 @@ export class ClaudeGenerator implements Generator {
       // (WR-02). This makes selectGenerator(env)'s key authoritative: the executor
       // honors the selector's key instead of silently depending on the ambient
       // process env, so the selector and executor agree on the key source.
-      for await (const _msg of query({
-        prompt: buildPrompt(spec),
-        options: {
-          model: this.config.model,
-          systemPrompt,
-          allowedTools: ["Write", "Read"],
-          disallowedTools: ["Bash", "WebFetch", "WebSearch"],
-          permissionMode: "acceptEdits",
-          cwd: tmpDir,
-          maxTurns: 8,
-          settingSources: [],
-          env: { ...process.env, ANTHROPIC_API_KEY: this.config.apiKey },
-        },
-      })) {
-        // Drain the iterator to run the agent loop to completion - the model output
-        // is read back from the temp dir, never trusted from the message stream.
-        void _msg;
+      //
+      // The closure shares ONE options object across both passes; only `prompt` and
+      // `maxTurns` differ. The repair pass is NOT allowed to relax the sandbox:
+      // allowedTools/disallowedTools/settingSources/cwd/env are identical.
+      const runAgent = async (prompt: string, maxTurns: number): Promise<void> => {
+        for await (const _msg of query({
+          prompt,
+          options: {
+            model: this.config.model,
+            systemPrompt,
+            allowedTools: ["Write", "Read"],
+            disallowedTools: ["Bash", "WebFetch", "WebSearch"],
+            permissionMode: "acceptEdits",
+            cwd: tmpDir,
+            maxTurns,
+            settingSources: [],
+            env: { ...process.env, ANTHROPIC_API_KEY: this.config.apiKey },
+          },
+        })) {
+          // Drain the iterator to run the agent loop to completion - the model output
+          // is read back from the temp dir, never trusted from the message stream.
+          void _msg;
+        }
+      };
+
+      // First pass. maxTurns was 8, raised to 24: a five-file write plus reasoning
+      // regularly exceeds 8 turns, and the model would stop having SKIPPED the
+      // hardest file (handler.ts) - observed live as the g1/missing-file rejection.
+      await runAgent(buildPrompt(spec), 24);
+
+      // One-shot repair pass. If any required model-authored file is absent, re-enter
+      // the SAME constrained loop ONCE to write only the missing files. This runs
+      // EXACTLY ONCE: still-missing files fall through to readBundleFromDir (bounded
+      // read) and the four 04-03 gates, which fail closed rather than looping. The
+      // diagnostic logs ONLY the file-name array - never the prompt, model output, or
+      // ANTHROPIC_API_KEY.
+      const missing = findMissingModelFiles(tmpDir);
+      if (missing.length > 0) {
+        console.error(
+          "claude generation: first pass missing files, running one repair pass",
+          missing,
+        );
+        await runAgent(buildRepairPrompt(missing), 12);
       }
 
       const bundle = readBundleFromDir(tmpDir);

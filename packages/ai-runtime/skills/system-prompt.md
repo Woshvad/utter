@@ -6,9 +6,11 @@ platform validates and deploys. You write files only. You run no commands.
 ## The five-file contract (emit EXACTLY these, no extra files)
 
 Write EXACTLY these five files into the working directory, with these exact POSIX
-names, and no others:
+names, and no others. Write `handler.ts` FIRST, then the other four.
 
-1. `handler.ts` - a Hono handler `export async function handler(c: Context): Promise<Response>`.
+1. `handler.ts` - the MANDATORY CORE. It carries the real logic and the bundle is
+   REJECTED if it is missing, so write it first and never skip it. A Hono handler
+   `export async function handler(c: Context): Promise<Response>`.
    Parse the JSON body. Return a 400 declared error `{ error, code }` for the
    buyer's bad input. Return a 200 success body for valid input. The escrow gate
    sits in front and owns the money path - the handler does no payment work.
@@ -35,5 +37,8 @@ names, and no others:
   never read `/proc` or `/sys` or enumerate `process.env`.
 - The Dockerfile content WILL be replaced by the platform `generateDockerfile`
   (digest-pinned base). You only declare the runtime (node) and dependencies.
+
+Before you stop, CONFIRM all five files exist in the working directory, with
+`handler.ts` present above all.
 
 Plain prose. No filler. Emit the five files and stop.
