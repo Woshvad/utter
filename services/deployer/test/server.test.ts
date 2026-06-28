@@ -275,6 +275,150 @@ describe("POST /deploy happy path + trust boundary (T-ny2-04)", () => {
   });
 });
 
+describe("POST /deploy persists the deployment record (Track A subtask 4)", () => {
+  it("a successful deploy writes a record GET /deployments returns (running, correct slug + derived resourceId)", async () => {
+    const fake = makeFakeDeploy();
+    const app = createDeployerApp({
+      stores: createInMemoryStores(),
+      authSecret: SECRET,
+      deploy: fake,
+    });
+
+    // Before any deploy the read-through is empty.
+    const before = await app.request("/deployments");
+    expect(await before.json()).toEqual([]);
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    // Drain the stream so the best-effort persist (after deploy resolves) has run.
+    await res.text();
+
+    const after = await app.request("/deployments");
+    const records = (await after.json()) as Array<{
+      slug: string;
+      resourceId: string;
+      status: string;
+      deployVersion: number;
+    }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.slug).toBe("gen");
+    expect(records[0]!.status).toBe("running");
+    // Write-then-launch (subtask 7): a "deploying" v1 record precedes launch, then the
+    // success write flips it to "running" via an idempotent redeploy that bumps the
+    // version to 2. The load-bearing assertion is status === "running"; the version is 2
+    // because the lifecycle now writes twice (deploying then running).
+    expect(records[0]!.deployVersion).toBe(2);
+    // The persisted resourceId is the SAME derivation defaultDeploy uses (label over slug).
+    expect(records[0]!.resourceId).toBe(resourceIdForLabel("gen-label"));
+  });
+
+  it("a deploy that THROWS leaves a failed record (not absent) and still streams the error frame", async () => {
+    const fake = vi.fn(async (): Promise<LiveDeployResult> => {
+      throw new Error("simulated deploy failure");
+    });
+    const app = createDeployerApp({
+      stores: createInMemoryStores(),
+      authSecret: SECRET,
+      deploy: fake,
+    });
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    const events = await readSseEvents(res);
+    expect(events.some((e) => e.status === "error")).toBe(true);
+
+    // Write-then-launch: a "deploying" record preceded the throw, then it was flipped to
+    // "failed" so reconcile excludes it from desired-running and reaps any partial
+    // containers. The record is present (not absent).
+    const after = await app.request("/deployments");
+    const records = (await after.json()) as Array<{ status: string }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.status).toBe("failed");
+  });
+
+  it("writes a deploying record BEFORE deploy resolves, then flips it to running on success", async () => {
+    // The injected deploy inspects the store WHILE it runs (before resolving) so the test
+    // can assert the deploying-then-running transition without timing flakiness.
+    const stores = createInMemoryStores();
+    let statusDuringDeploy: string | undefined;
+    const fake = vi.fn(
+      async (
+        _req: DeployRequest,
+        onProgress: (e: DeployProgressEvent) => void,
+      ): Promise<LiveDeployResult> => {
+        const records = await stores.deployments.list();
+        statusDuringDeploy = records[0]?.status;
+        onProgress({ phase: "done", status: "ok", message: "done", result: STUB_RESULT });
+        return STUB_RESULT;
+      },
+    );
+    const app = createDeployerApp({ stores, authSecret: SECRET, deploy: fake });
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // The record existed as "deploying" while deploy ran.
+    expect(statusDuringDeploy).toBe("deploying");
+    // And it was flipped to "running" after deploy resolved.
+    const after = await app.request("/deployments");
+    const records = (await after.json()) as Array<{ status: string; deployVersion: number }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.status).toBe("running");
+  });
+
+  it("a pre-launch SlugConflictError aborts the deploy: an error frame and ZERO deploy calls", async () => {
+    const stores = createInMemoryStores();
+    // Pre-claim the request slug ("gen") under a DIFFERENT resourceId so the pre-launch
+    // "deploying" write throws SlugConflictError (M5).
+    const otherResource: `0x${string}` = `0x${"b3".repeat(32)}`;
+    await stores.deployments.put({
+      agentId: otherResource,
+      resourceId: otherResource,
+      slug: "gen",
+      deployVersion: 1,
+      status: "running",
+      updatedAt: 1_000,
+    });
+    const fake = makeFakeDeploy();
+    const app = createDeployerApp({ stores, authSecret: SECRET, deploy: fake });
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    const events = await readSseEvents(res);
+    // The conflict aborts: an error frame is streamed and deploy was NEVER called.
+    expect(events.some((e) => e.status === "error")).toBe(true);
+    expect(fake).toHaveBeenCalledTimes(0);
+
+    // The original owner's record is unchanged (still running, no new record added).
+    const after = await app.request("/deployments");
+    const records = (await after.json()) as Array<{ resourceId: string; status: string }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.resourceId).toBe(otherResource);
+    expect(records[0]!.status).toBe("running");
+  });
+
+  it("a store.put failure on a successful deploy still streams done (best-effort persist)", async () => {
+    const fake = makeFakeDeploy();
+    const stores = createInMemoryStores();
+    // Make the desired-state put throw to simulate a store-layer failure.
+    stores.deployments.put = vi.fn(async () => {
+      throw new Error("store unavailable");
+    });
+    const app = createDeployerApp({ stores, authSecret: SECRET, deploy: fake });
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    const events = await readSseEvents(res);
+    // The deploy still completes: the terminal done frame is present despite the store error.
+    const last = events.at(-1)!;
+    expect(last.phase).toBe("done");
+    expect(last.status).toBe("ok");
+    // No error frame: a store failure is best-effort, not a deploy failure.
+    expect(events.some((e) => e.status === "error")).toBe(false);
+  });
+});
+
 describe("POST /deploy error frame (T-ny2-06)", () => {
   it("(f) a rejecting deploy emits an error frame and leaks no secret/stack", async () => {
     const fake = vi.fn(async (): Promise<LiveDeployResult> => {

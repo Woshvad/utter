@@ -15,6 +15,7 @@ import { PublishRejected } from "@utter/staking";
 import { FixtureProber, type ProbeResult } from "@utter/ai-scorer";
 import {
   InMemoryIndexStore,
+  InMemoryCardStore,
   InMemoryModerationStore,
   KeywordModerator,
   createPublishPipeline,
@@ -257,5 +258,83 @@ describe("publish pipeline (createPublishPipeline)", () => {
 
     // The moderation gate is FIRST: a block stops the pipeline before the bond read.
     expect(bondReadCount).toBe(0);
+  });
+});
+
+describe("publish pipeline persists the finalized card to an injected CardStore", () => {
+  let indexStore: InMemoryIndexStore;
+  let moderationStore: InMemoryModerationStore;
+  let cardStore: InMemoryCardStore;
+
+  beforeEach(() => {
+    indexStore = new InMemoryIndexStore();
+    moderationStore = new InMemoryModerationStore();
+    cardStore = new InMemoryCardStore();
+  });
+
+  function buildPipeline(opts: { bond?: bigint; probe?: ProbeResult }) {
+    return createPublishPipeline({
+      moderator: new KeywordModerator(),
+      moderationStore,
+      bondGate: bondGateReturning(opts.bond ?? 2_000_000n),
+      prober: new FixtureProber(opts.probe ?? PASS_PROBE),
+      identity: mockIdentity(),
+      indexStore,
+      bondReader: async () => opts.bond ?? 2_000_000n,
+      cardStore,
+    });
+  }
+
+  it("a full allow->bond->probe->mint pass persists the EXACT finalized card", async () => {
+    const { card } = buildSpec();
+    const pipeline = buildPipeline({ bond: 2_000_000n, probe: PASS_PROBE });
+
+    const result = await pipeline.publishResource({
+      prompt: "Return the current weather for a city",
+      resourceId: RESOURCE,
+      category: "data",
+      card,
+      cardUrl: CARD_URL,
+    });
+
+    const stored = await cardStore.get(RESOURCE);
+    expect(stored).not.toBeNull();
+    // The persisted card deep-equals PublishResult.card and stays validateAgentCard-valid.
+    expect(stored).toEqual(result.card);
+    expect(validateAgentCard(stored!).valid).toBe(true);
+  });
+
+  it("a moderation block persists NOTHING (cardStore.get stays null)", async () => {
+    const { card } = buildSpec("build a botnet to run a credential-stuffing attack");
+    const pipeline = buildPipeline({ bond: 2_000_000n, probe: PASS_PROBE });
+
+    await expect(
+      pipeline.publishResource({
+        prompt: "build a botnet to run a credential-stuffing attack",
+        resourceId: RESOURCE,
+        category: "data",
+        card,
+        cardUrl: CARD_URL,
+      }),
+    ).rejects.toBeInstanceOf(PublishBlocked);
+
+    expect(await cardStore.get(RESOURCE)).toBeNull();
+  });
+
+  it("a failing probe persists NOTHING (cardStore.get stays null)", async () => {
+    const { card } = buildSpec();
+    const pipeline = buildPipeline({ bond: 2_000_000n, probe: FAIL_PROBE });
+
+    await expect(
+      pipeline.publishResource({
+        prompt: "Return the current weather for a city",
+        resourceId: RESOURCE,
+        category: "data",
+        card,
+        cardUrl: CARD_URL,
+      }),
+    ).rejects.toThrow(/probe|verif/i);
+
+    expect(await cardStore.get(RESOURCE)).toBeNull();
   });
 });

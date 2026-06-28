@@ -17,6 +17,14 @@
 export { InMemoryIndexStore } from "./index-store.js";
 export type { IndexStore, IndexRecord, ProjectedPricing, ProjectedHealth, Hex } from "./index-store.js";
 
+// --- Card store: the finalized A2A card serving cache (Postgres-shaped interface) ---
+export { InMemoryCardStore } from "./card-store.js";
+export type { CardStore } from "./card-store.js";
+
+// --- Postgres stores: the durable index + card adapters (real runs) ---
+export { PgIndexStore, PgCardStore, createPgStores } from "./stores/pg.js";
+export type { PgStoresOptions } from "./stores/pg.js";
+
 // --- Query: the pure discovery filter ---
 export { filterResources } from "./query.js";
 export type { FilterCriteria } from "./query.js";

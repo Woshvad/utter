@@ -21,9 +21,11 @@
     "@utter/sandbox": "workspace:*",
     "@utter/staking": "workspace:*",
     "@utter/x402-arc": "workspace:*",
-    "hono": "4.12.26"
+    "hono": "4.12.26",
+    "pg": "8.22.0"
   },
   "devDependencies": {
+    "@types/pg": "8.20.0",
     "viem": "2.52.2"
   }
 }

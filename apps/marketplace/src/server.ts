@@ -7,9 +7,11 @@
 // root .env.local for the children that need it. This host mounts the EXISTING
 // createCardApp factory verbatim (the card route is never re-authored here) and adds
 // a discovery route over the pure filterResources filter.
+import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { PublishRejected } from "@utter/staking";
 // Extensionless relative specifiers (mirroring the facilitator server.ts template:
 // ./app, ./relayer). The native ts-resolver hook rewrites extensionless `./foo` to
 // `./foo.ts`; a literal `.js` specifier would pass through unrewritten and fail to
@@ -17,33 +19,157 @@ import { Hono } from "hono";
 import { createCardApp } from "./card-route";
 import { filterResources } from "./query";
 import { InMemoryIndexStore } from "./index-store";
+import { InMemoryCardStore } from "./card-store";
+import { createPgStores } from "./stores/pg";
+import { InMemoryModerationStore } from "./moderation/review-queue";
+import { createPublishPipeline, PublishBlocked, PublishHeldForReview, PublishUnverified } from "./publish";
+import { createPublishPipelineDeps } from "./publish-deps";
 import type { CardSource } from "./card-route";
 import type { FilterCriteria } from "./query";
-import type { IndexStore } from "./index-store";
+import type { IndexStore, Hex } from "./index-store";
+import type { CardStore } from "./card-store";
+import type { PublishPipeline, PublishRequest } from "./publish";
 
 /** The route deps for the marketplace host. */
 export interface MarketplaceAppDeps {
   indexStore: IndexStore;
+  cardStore: CardStore;
   cardSource: CardSource;
+  /** The composed publish pipeline POST /resources runs (MKT-03). */
+  publishPipeline: PublishPipeline;
+  /** The Bearer the authenticated POST /resources route checks; unset -> publish fails closed. */
+  publishAuthSecret?: string;
 }
 
 /**
- * Build the marketplace route deps. The autonomous/dev default is the in-memory
- * IndexStore (empty at boot) with a CardSource backed by that store: an unknown
- * resource resolves to null, which createCardApp serves as a 404. The future
- * Postgres adapter implements the same IndexStore contract, so this swaps by env.
+ * Constant-time Bearer check, mirroring the deployer server.ts posture EXACTLY. Reads
+ * the token off the Authorization header, strips the `Bearer ` prefix, and compares it
+ * to the secret with timingSafeEqual over equal-length Buffers. A length mismatch (or a
+ * missing header) short-circuits to false WITHOUT calling timingSafeEqual (which throws
+ * on unequal lengths). The secret/token is never logged.
+ */
+function bearerMatches(authHeader: string | undefined, secret: string): boolean {
+  if (!authHeader) return false;
+  const prefix = "Bearer ";
+  if (!authHeader.startsWith(prefix)) return false;
+  const token = authHeader.slice(prefix.length);
+  const tokenBuf = Buffer.from(token, "utf8");
+  const secretBuf = Buffer.from(secret, "utf8");
+  // Length-mismatch short-circuit: timingSafeEqual throws on unequal-length Buffers.
+  if (tokenBuf.length !== secretBuf.length) return false;
+  return timingSafeEqual(tokenBuf, secretBuf);
+}
+
+/** True iff value is a 0x-prefixed 32-byte (64 hex char) string (a resourceId/bytes32). */
+function isBytes32Hex(value: unknown): value is Hex {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+/** True iff value is a plain object (a card / nested object), not null or an array. */
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** True iff value is a syntactically valid http(s) URL string (the served cardUrl). */
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Shape-validate an untrusted JSON body into a PublishRequest, or return null when any
+ * required field is missing/malformed (the route maps null -> 400). Money/identity is
+ * never authored here: reputation is parsed from a decimal string to a BigInt only when
+ * present, and the card/pricing are passed through to the pipeline unchanged.
+ */
+function parsePublishRequest(body: unknown): PublishRequest | null {
+  if (!isObject(body)) return null;
+  const { prompt, resourceId, category, card, cardUrl, slug, reputation } = body;
+  if (typeof prompt !== "string" || prompt.length === 0) return null;
+  if (!isBytes32Hex(resourceId)) return null;
+  if (typeof category !== "string" || category.length === 0) return null;
+  if (!isObject(card)) return null;
+  if (!isHttpUrl(cardUrl)) return null;
+  if (slug !== undefined && typeof slug !== "string") return null;
+
+  const req: PublishRequest = { prompt, resourceId, category, card, cardUrl };
+  if (typeof slug === "string") req.slug = slug;
+  if (reputation !== undefined) {
+    if (typeof reputation !== "string") return null;
+    try {
+      req.reputation = BigInt(reputation);
+    } catch {
+      return null;
+    }
+  }
+  return req;
+}
+
+/**
+ * Resolve the marketplace index + card stores from the environment, fail-closed on
+ * durability in production (mirrors the deployer's resolveDeployerStores style).
+ *
+ * DATABASE_URL set + non-empty -> the durable Postgres-backed adapters (the discovery
+ * index AND the served finalized cards survive a restart, so a deployed resource never
+ * silently drops out of agent discovery). Otherwise, in production we THROW at boot: an
+ * in-memory store loses every listing + served card on restart, so silently running
+ * ephemeral in prod is a correctness regression. In dev/test (NODE_ENV !== "production")
+ * the in-memory adapters stay the default so the autonomous suite needs no Postgres.
+ * DATABASE_URL may carry credentials and is NEVER logged or echoed in the error.
+ */
+export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
+  indexStore: IndexStore;
+  cardStore: CardStore;
+} {
+  const databaseUrl = (env.DATABASE_URL ?? "").trim();
+  if (databaseUrl.length > 0) {
+    return createPgStores({ databaseUrl });
+  }
+  if (env.NODE_ENV === "production") {
+    throw new Error(
+      "DATABASE_URL must be set in production: the marketplace index and served " +
+        "cards must be durable; an in-memory store drops every listing on restart.",
+    );
+  }
+  return { indexStore: new InMemoryIndexStore(), cardStore: new InMemoryCardStore() };
+}
+
+/**
+ * Build the marketplace route deps. Stores come from resolveMarketplaceStores
+ * (Postgres when DATABASE_URL is set; in-memory dev/test default; fail-closed in
+ * production with no DATABASE_URL) - the SAME IndexStore / CardStore contract either
+ * adapter implements, so this swaps by env without touching route logic. The CardSource
+ * reads through the resolved cardStore: an unknown resource resolves to null, which
+ * createCardApp serves as a 404; a published resource resolves its finalized card.
  */
 export function buildDepsFromEnv(): MarketplaceAppDeps {
-  const indexStore = new InMemoryIndexStore();
+  const { indexStore, cardStore } = resolveMarketplaceStores(process.env);
+  const moderationStore = new InMemoryModerationStore();
   const cardSource: CardSource = {
     async getCard(resourceId) {
-      const record = await indexStore.get(resourceId as `0x${string}`);
-      // The in-memory store is empty at boot, so an unknown resource is null -> 404
-      // via createCardApp. A real run resolves the finalized card projection here.
-      return record as Record<string, unknown> | null;
+      // Serve the FINALIZED card the publish pipeline persisted to the CardStore. The
+      // store is empty at boot, so an unknown resource is null -> 404 via createCardApp;
+      // a published resource resolves its finalized card here (re-validated at the route).
+      return (await cardStore.get(resourceId as Hex)) ?? null;
     },
   };
-  return { indexStore, cardSource };
+  // The SAME indexStore + cardStore instances back GET /resources, the card route, AND
+  // the publish pipeline, so a successful publish is immediately discoverable + servable.
+  const publishPipeline = createPublishPipeline(
+    createPublishPipelineDeps(process.env, { indexStore, cardStore, moderationStore }),
+  );
+  return {
+    indexStore,
+    cardStore,
+    cardSource,
+    publishPipeline,
+    publishAuthSecret: process.env.MARKETPLACE_AUTH_SECRET,
+  };
 }
 
 /**
@@ -81,6 +207,61 @@ export function createMarketplaceApp(deps: MarketplaceAppDeps): Hono {
       bond: r.bond.toString(),
     }));
     return c.json(safe);
+  });
+
+  // POST /resources - the authenticated publish endpoint (MKT-03). It runs the publish
+  // pipeline (moderation -> bond -> probe -> mint -> index) and, on success, persists
+  // the finalized card + index record so the resource is immediately discoverable +
+  // servable. Registered BEFORE the createCardApp mount so it owns the POST verb.
+  app.post("/resources", async (c) => {
+    // (a) AUTH FAIL-CLOSED, before body parse / pipeline run. An unset/blank secret is
+    // never an open publish endpoint; the Bearer is constant-time compared, never logged.
+    const secret = deps.publishAuthSecret?.trim();
+    if (!secret) {
+      return c.json({ error: "publish disabled: MARKETPLACE_AUTH_SECRET unset" }, 503);
+    }
+    if (!bearerMatches(c.req.header("authorization"), secret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+
+    // (b) Parse + shape-validate the body into a PublishRequest. A bad body -> 400.
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "bad_request" }, 400);
+    }
+    const req = parsePublishRequest(body);
+    if (!req) return c.json({ error: "bad_request" }, 400);
+
+    // (c) Run the pipeline. Map each gate failure to its status by instanceof; rethrow
+    // anything else so a real server fault surfaces as a 500 via Hono.
+    try {
+      const result = await deps.publishPipeline.publishResource(req);
+      return c.json(
+        {
+          listed: true,
+          resourceId: req.resourceId,
+          agentId: result.agentId.toString(),
+          cardUrl: req.cardUrl,
+        },
+        201,
+      );
+    } catch (e) {
+      if (e instanceof PublishBlocked) {
+        return c.json({ error: "blocked", reason: e.reason }, 403);
+      }
+      if (e instanceof PublishHeldForReview) {
+        return c.json({ status: "review", reason: e.reason }, 202);
+      }
+      if (e instanceof PublishUnverified) {
+        return c.json({ error: "unverified", reason: e.reason }, 422);
+      }
+      if (e instanceof PublishRejected) {
+        return c.json({ error: "rejected", reason: e.message }, 422);
+      }
+      throw e;
+    }
   });
 
   // Mount the existing finalized-card route verbatim (never re-author the card).
