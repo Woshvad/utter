@@ -42,6 +42,16 @@ import {
 import { validateSlug } from "./traefik-config";
 import { gateGeneratedBundle, BundleGateError } from "./gate-bundle";
 import { recordDeployment } from "./record-deploy";
+import { SlugConflictError } from "./stores/memory";
+import {
+  resolveDockerHandle,
+  listResourceContainers,
+  reapResourceContainer,
+  reapOrphanPairNetworks,
+  type DockerHandle,
+} from "./orchestrate";
+import { createReconcileLoop, type ReconcileLoop } from "./reconcile";
+import { DEFAULT_RUNAWAY_POLICY } from "./reaper";
 
 loadEnv({ path: ".env.local" });
 
@@ -293,18 +303,51 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       const enqueue = (e: DeployProgressEvent): void => {
         writeQueue = writeQueue.then(() => stream.writeSSE({ data: JSON.stringify(e) }));
       };
+      // WRITE-THEN-LAUNCH (subtask 7): write a "deploying" record BEFORE launch so a
+      // reconcile tick during the launch window treats the launching containers as
+      // desired (not orphans to reap). A SlugConflictError here means the slug is owned
+      // by a DIFFERENT resourceId (M5): ABORT the deploy - emit an error frame and never
+      // call deploy. Any OTHER store error is best-effort (the loop just will not track
+      // the in-flight deploy): log non-secret and proceed.
+      try {
+        await recordDeployment(deps.stores.deployments, {
+          resourceId,
+          slug: req.slug,
+          status: "deploying",
+        });
+      } catch (preErr) {
+        if (preErr instanceof SlugConflictError) {
+          enqueue({
+            phase: "error",
+            status: "error",
+            message: preErr.message,
+          });
+          await writeQueue;
+          return;
+        }
+        console.error(
+          "pre-launch deployment record write failed (proceeding best-effort)",
+          preErr instanceof Error ? preErr.message : preErr,
+        );
+      }
+
       let sawDone = false;
       try {
         const result = await deploy(req, (e) => {
           if (e.phase === "done") sawDone = true;
           enqueue(e);
         });
-        // BEST-EFFORT desired-state persist (only reached when deploy RESOLVED; a deploy
-        // that threw is in the catch and writes no record). The resource is already live,
-        // so a store failure must NOT turn a successful deploy into a reported failure: it
-        // is logged non-secret and the done frame still emits.
+        // BEST-EFFORT desired-state persist (only reached when deploy RESOLVED). This
+        // flips the "deploying" record to "running" (an idempotent redeploy of the just-
+        // written record). The resource is already live, so a store failure must NOT turn
+        // a successful deploy into a reported failure: it is logged non-secret and the
+        // done frame still emits.
         try {
-          await recordDeployment(deps.stores.deployments, { resourceId, slug: req.slug });
+          await recordDeployment(deps.stores.deployments, {
+            resourceId,
+            slug: req.slug,
+            status: "running",
+          });
         } catch (storeErr) {
           console.error(
             "deploy succeeded but recording the deployment failed",
@@ -315,6 +358,21 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
           enqueue({ phase: "done", status: "ok", message: "deploy complete", result });
         }
       } catch (err) {
+        // The deploy threw: mark the record "failed" (best-effort, in its OWN try/catch
+        // so it never masks the original deploy error) so reconcile excludes it from
+        // desired-running and reaps any partial containers. THEN emit the error frame.
+        try {
+          await recordDeployment(deps.stores.deployments, {
+            resourceId,
+            slug: req.slug,
+            status: "failed",
+          });
+        } catch (storeErr) {
+          console.error(
+            "deploy failed and marking the deployment failed also failed",
+            storeErr instanceof Error ? storeErr.message : storeErr,
+          );
+        }
         enqueue({
           phase: "error",
           status: "error",
@@ -327,6 +385,42 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
   });
 
   return app;
+}
+
+/**
+ * Build the host-gated reconcile loop over a real docker handle + the deployer deps.
+ *
+ * It wires the EXISTING authoritative container/network ops from orchestrate.ts into
+ * createReconcileLoop: listResourceContainers (actual state), reapResourceContainer
+ * (orphan + runaway reap, T-03-19 / H4), reapOrphanPairNetworks (pairnet GC, mwb), and
+ * the deployments store (desired state). The runaway pass uses DEFAULT_RUNAWAY_POLICY.
+ *
+ * DELIBERATELY NO launchContainer: untrusted generated code is NEVER auto-relaunched (a
+ * generated bundle cannot be re-run without its ephemeral bundle). The loop's job here is
+ * orphan-container reap + runaway quarantine + pairnet GC only; it REPORTS toLaunch drift
+ * but never acts on it. RECONCILE_INTERVAL_MS (default 15000) sets the tick interval;
+ * MAX_CONCURRENT_RESOURCES, when set, caps running resources (but with no launch hook it
+ * only ever affects reporting). All values are host-capacity numbers, never money literals.
+ *
+ * Exported + parameterized on docker/deps/env so it is unit-testable with fakes; start()
+ * passes the real handle only on the gVisor host.
+ */
+export function buildReconcileLoop(
+  docker: DockerHandle,
+  deps: DeployerAppDeps,
+  env: NodeJS.ProcessEnv,
+): ReconcileLoop {
+  return createReconcileLoop({
+    store: deps.stores.deployments,
+    listContainers: () => listResourceContainers(docker),
+    reapContainer: (c) => reapResourceContainer(docker, c),
+    reapOrphanNetworks: () => reapOrphanPairNetworks(docker),
+    intervalMs: Number(env.RECONCILE_INTERVAL_MS ?? "15000"),
+    runawayPolicy: DEFAULT_RUNAWAY_POLICY,
+    ...(env.MAX_CONCURRENT_RESOURCES
+      ? { maxConcurrent: Number(env.MAX_CONCURRENT_RESOURCES) }
+      : {}),
+  });
 }
 
 /** Start the deployer HTTP server on the given port (default 8788). */
@@ -342,6 +436,24 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   const hostname = process.env.HOST?.trim() || "0.0.0.0";
   console.log(`deployer listening on ${hostname}:${port}`);
   serve({ fetch: app.fetch, hostname, port });
+
+  // HOST-GATED reconcile loop bootstrap (DEP-05 / T-03-19): start the orphan-reap +
+  // runaway-quarantine + pairnet-GC loop ONLY on the provisioned gVisor host
+  // (UTTER_SANDBOX_HOST=1) with a real docker handle. resolveDockerHandle() already
+  // returns undefined unless UTTER_SANDBOX_HOST=1, so off-host (dev/test) the loop is
+  // never built and boot is byte-unchanged - no dockerode connection, no interval. The
+  // loop interval is unref'd (reconcile.ts) so it never keeps the process alive. We
+  // never store the handle to a closure for relaunch: the loop only reaps + GCs.
+  const docker = process.env.UTTER_SANDBOX_HOST === "1" ? resolveDockerHandle() : undefined;
+  if (docker) {
+    const loop = buildReconcileLoop(docker, deps, process.env);
+    loop.start();
+    const intervalMs = Number(process.env.RECONCILE_INTERVAL_MS ?? "15000");
+    // Non-secret: interval only (no env values, no secrets).
+    console.log(`reconcile loop started, interval ${intervalMs}ms`);
+  } else {
+    console.log("reconcile loop not started (no sandbox host)");
+  }
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.
