@@ -23,6 +23,7 @@ import { createRelayerPool } from "./relayer";
 import { createInMemoryBuyerLock } from "./verify";
 import { createInMemoryStores, type FacilitatorStores } from "./stores/memory";
 import { createPgRedisStores } from "./stores/pgRedis";
+import { createRedisSpendCapStore } from "./stores/spend-cap-redis";
 
 loadEnv({ path: ".env.local" });
 
@@ -112,25 +113,44 @@ export function resolveFacilitatorStores(): FacilitatorStores {
  * Resolve the per-payer spend-cap store from the environment (P1-4). Mirrors
  * resolveAuthConfig's fail-closed style.
  *
- * When the cap is ARMED (perPayerDayCap !== undefined) in production this FAILS
- * CLOSED: the in-memory store resets the rolling-24h window on restart, a
- * free-compute reset vector. In dev/test an armed cap uses the in-memory store
- * exactly as before. When the cap is NOT armed (the default) no store is built and
- * no error is thrown, so the unarmed path is unchanged. The thrown error is
- * VALUE-FREE. P1-4 FOLLOW-UP: a Redis-backed SpendCapStore adapter (the contract
- * already exists in @utter/data-proxy) will let the spend cap be armed in
- * production; until it lands, arming the cap in production fails closed here.
+ * When the cap is ARMED (perPayerDayCap !== undefined):
+ *   - REDIS_URL set (non-empty after trim) -> the durable Redis-backed
+ *     RedisSpendCapStore. The Redis SpendCapStore adapter now EXISTS, so arming
+ *     the cap in production works: a production buildDepsFromEnv reaches this
+ *     branch only after resolveFacilitatorStores has already REQUIRED REDIS_URL,
+ *     so REDIS_URL is always present in production by the time we get here.
+ *   - no REDIS_URL + NODE_ENV=production -> THROW (defensive). This branch is
+ *     unreachable through buildDepsFromEnv (resolveFacilitatorStores fails first
+ *     without REDIS_URL in production) but is correct on a direct call: an armed
+ *     cap on an ephemeral in-memory store in production is a free-compute reset
+ *     vector, so we fail closed. The thrown error is VALUE-FREE (no URL echoed).
+ *   - no REDIS_URL + dev/test -> the in-memory store, exactly as before, so the
+ *     autonomous suite needs no Redis.
+ *
+ * When the cap is NOT armed (the default) no store is built and no error is thrown,
+ * so the unarmed path is unchanged.
+ *
+ * `env` defaults to process.env; it is a parameter only so a direct unit test can
+ * exercise the defensive production branch without mutating the real environment.
+ * REDIS_URL is never logged.
  */
-export function resolveSpendCapStore(perPayerDayCap: bigint | undefined): SpendCapStore | undefined {
+export function resolveSpendCapStore(
+  perPayerDayCap: bigint | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): SpendCapStore | undefined {
   if (perPayerDayCap === undefined) return undefined;
 
-  if (process.env.NODE_ENV === "production") {
-    // Fail loud. The message names no secret/value (the cap is the only input).
+  const redisUrl = (env.REDIS_URL ?? "").trim();
+  if (redisUrl.length > 0) {
+    return createRedisSpendCapStore(redisUrl);
+  }
+
+  if (env.NODE_ENV === "production") {
+    // Fail loud. The message names no secret/value (REDIS_URL is the missing var).
     throw new Error(
       "arming SPEND_CAP_PER_PAYER_24H_BASE_UNITS in production requires a durable " +
-        "Redis-backed spend-cap store; the in-memory store resets the rolling-24h " +
-        "window on restart, a free-compute reset vector. The Redis SpendCapStore adapter " +
-        "is a tracked follow-up; do not arm the spend cap in production until it lands.",
+        "Redis-backed spend-cap store; set REDIS_URL. The in-memory store resets the " +
+        "rolling-24h window on restart, a free-compute reset vector.",
     );
   }
 
@@ -171,9 +191,10 @@ export function buildDepsFromEnv(): AppDeps {
     perPayerDayCapRaw && perPayerDayCapRaw.trim().length > 0
       ? BigInt(perPayerDayCapRaw.trim())
       : undefined;
-  // P1-4: the in-memory spend-cap store is fail-closed in production (an armed cap on
-  // an ephemeral store is a free-compute reset vector). The Redis SpendCapStore adapter
-  // is the remaining follow-up that will let the spend cap be armed in production.
+  // P1-4: arming the cap uses the durable Redis-backed spend-cap store when REDIS_URL
+  // is set. Arming it in production now works because production already REQUIRES
+  // REDIS_URL (resolveFacilitatorStores fails closed without it), so the durable store
+  // is always available there. In dev/test without REDIS_URL the in-memory store is used.
   const spendCapStore: SpendCapStore | undefined = resolveSpendCapStore(perPayerDayCap);
 
   // CR-02: the min-economical batching threshold. EMPTY by default (no env -> no
