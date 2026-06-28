@@ -256,6 +256,7 @@ export class LiveAdapter implements StudioDataAdapter {
     //    (no hang/leak, T-1g-02).
     const channel = deps.buildChannel;
     const deployBundle = deps.deployBundle;
+    const publishToMarketplace = deps.publishToMarketplace;
     void (async () => {
       try {
         // Generate running first (one event), then the real generate + four-gate validate.
@@ -330,7 +331,43 @@ export class LiveAdapter implements StudioDataAdapter {
           }
           // Publish + Live remain studio-side, emitted ONCE after the deploy branch (the
           // deployer covers register/build/launch/route/verify/probe -> Mint/Deploy/Verify).
-          channel.emit(resourceId, { stage: "Publish", status: "ok", log: "listed for discovery (shared local index)" });
+          //
+          // When the marketplace publish seam is bound, list the resource in the
+          // marketplace SERVICE (the A2A discovery surface agents hit): parse the built A2A
+          // card from the generated bundle (the platform-overwritten agent-card.json) and
+          // POST it. This runs in its OWN try/catch: a listing failure (a publish throw OR
+          // a card-parse failure) is NON-FATAL - the resource is deployed and reachable, so
+          // it surfaces a Publish:error (bearer-free) and CONTINUES to Live. When the seam
+          // is unbound, keep the existing local-index Publish:ok event verbatim.
+          if (publishToMarketplace) {
+            try {
+              const cardJson = bundle["agent-card.json"];
+              if (typeof cardJson !== "string") {
+                throw new Error("generated bundle is missing agent-card.json");
+              }
+              const card = JSON.parse(cardJson) as Record<string, unknown>;
+              await publishToMarketplace({
+                prompt: spec.prompt,
+                resourceId,
+                category: "data",
+                card,
+                cardUrl: record.cardUrl,
+                slug,
+              });
+              channel.emit(resourceId, { stage: "Publish", status: "ok", log: "listed for discovery (marketplace)" });
+            } catch (err) {
+              // The publishResource errors are already bearer-free, and a card-parse error
+              // carries no secret, so the message is safe to surface as a log. The Live emit
+              // below still fires (a listing failure must not block a live resource).
+              channel.emit(resourceId, {
+                stage: "Publish",
+                status: "error",
+                log: (err as Error).message,
+              });
+            }
+          } else {
+            channel.emit(resourceId, { stage: "Publish", status: "ok", log: "listed for discovery (shared local index)" });
+          }
           channel.emit(resourceId, { stage: "Live", status: "ok", log: "resource is live" });
         } catch (err) {
           // A deployer failure surfaces a Deploy(error) into the channel. streamDeploy's

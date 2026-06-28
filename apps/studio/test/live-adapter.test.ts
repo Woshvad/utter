@@ -106,6 +106,7 @@ const STUB_REVENUE: RevenueSummary = {
 async function makeLiveAdapter(
   validate: (bundle: Bundle, spec: ResourceSpec) => Promise<ValidationResult> = validateBundle,
   deployBundle?: LiveDeps["deployBundle"],
+  publishToMarketplace?: LiveDeps["publishToMarketplace"],
 ): Promise<LiveAdapter> {
   const indexStore = new InMemoryIndexStore();
   for (const rec of seedRecords()) {
@@ -120,6 +121,9 @@ async function makeLiveAdapter(
     // The real deploy seam (undefined by default so the existing cases keep the
     // LOCAL_REAL_BUILD_EVENTS local-sim path). When injected, createResource streams it.
     deployBundle,
+    // The marketplace publish seam (undefined by default so the existing cases keep the
+    // local-index Publish:ok path). When injected, createResource lists to the marketplace.
+    publishToMarketplace,
     // Inject the REAL harness so the escrow reserve-before-run gate is proven, not faked.
     runPlayground: runPlaygroundHarness,
     // Inject a deterministic revenue seam (the production seam GETs the facilitator's
@@ -552,5 +556,90 @@ describe("LiveAdapter create flow with the real deployer seam (injected deployBu
     for (const ev of collected) {
       expect(ev.log).not.toContain(SECRET_SHAPED);
     }
+  });
+});
+
+describe("LiveAdapter create flow with the marketplace publish seam (injected publishToMarketplace)", () => {
+  /** The slug derived from the standard makeComposeSpec prompt (kebab of the prompt text). */
+  const EXPECTED_SLUG = "echo-the-caller-s-text-back-with-its-length";
+
+  it("calls publishToMarketplace once with the right params and emits Publish:ok (marketplace) then Live:ok", async () => {
+    // Capture the single argument the publish seam is called with, and report a listed
+    // outcome. The card is parsed from the generated bundle's agent-card.json.
+    let captured: import("../app/adapter/marketplace-client.server").PublishParams | undefined;
+    let calls = 0;
+    const publishToMarketplace: LiveDeps["publishToMarketplace"] = async (params) => {
+      calls += 1;
+      captured = params;
+      return { listed: true, agentId: "7" };
+    };
+    const adapter = await makeLiveAdapter(validateBundle, undefined, publishToMarketplace);
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string; log: string }[] = [];
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status, log: ev.log });
+    }
+
+    // Called exactly once, with the keystone resourceId/cardUrl, the prompt (moderation
+    // input), category "data", the parsed A2A card, and the derived slug.
+    expect(calls).toBe(1);
+    expect(captured?.prompt).toBe(makeComposeSpec().prompt);
+    expect(captured?.resourceId).toBe(resourceId);
+    expect(captured?.category).toBe("data");
+    expect(captured?.slug).toBe(EXPECTED_SLUG);
+    expect(captured?.cardUrl).toMatch(/\/\.well-known\/agent-card\.json$/);
+    // The card is the PARSED object (not the raw JSON string), so it is a plain object.
+    expect(captured?.card).toBeTypeOf("object");
+    expect(captured?.card).not.toBeNull();
+
+    // The Publish stage reflects the marketplace listing, followed by Live.
+    const publish = collected.find((e) => e.stage === "Publish");
+    expect(publish?.status).toBe("ok");
+    expect(publish?.log).toContain("marketplace");
+    expect(collected.at(-1)?.stage).toBe("Live");
+    expect(collected.at(-1)?.status).toBe("ok");
+  });
+
+  it("emits Publish:error (bearer-free) and STILL emits Live:ok when publishToMarketplace throws", async () => {
+    const SECRET_SHAPED = "Bearer sk_live_should_never_appear";
+    const publishToMarketplace: LiveDeps["publishToMarketplace"] = async () => {
+      // publishResource errors are already bearer-free; this stands in for one.
+      throw new Error("marketplace blocked the resource (not listed): disallowed category");
+    };
+    const adapter = await makeLiveAdapter(validateBundle, undefined, publishToMarketplace);
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string; log: string }[] = [];
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status, log: ev.log });
+    }
+
+    // A listing failure is NON-FATAL: Publish:error is emitted, and Live:ok STILL fires.
+    const publish = collected.find((e) => e.stage === "Publish");
+    expect(publish?.status).toBe("error");
+    expect(publish?.log).toContain("blocked");
+    const live = collected.find((e) => e.stage === "Live");
+    expect(live?.status).toBe("ok");
+    // No emitted log carries a secret-shaped string.
+    for (const ev of collected) {
+      expect(ev.log).not.toContain(SECRET_SHAPED);
+    }
+  });
+
+  it("keeps the local-index Publish:ok path unchanged when publishToMarketplace is unbound", async () => {
+    // The default (no publishToMarketplace) keeps the existing local-index listing event.
+    const adapter = await makeLiveAdapter();
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+
+    const collected: { stage: string; status: string; log: string }[] = [];
+    for await (const ev of adapter.subscribeBuildEvents(resourceId)) {
+      collected.push({ stage: ev.stage, status: ev.status, log: ev.log });
+    }
+
+    const publish = collected.find((e) => e.stage === "Publish");
+    expect(publish?.status).toBe("ok");
+    expect(publish?.log).toBe("listed for discovery (shared local index)");
+    expect(collected.at(-1)?.stage).toBe("Live");
   });
 });

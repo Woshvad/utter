@@ -59,3 +59,35 @@ describe("seeded echo entry (canonical cross-piece id, §5.5)", () => {
     );
   });
 });
+
+describe("buildLiveDeps publishToMarketplace seam (env-conditional binding)", () => {
+  it("binds publishToMarketplace only when BOTH MARKETPLACE_URL and MARKETPLACE_AUTH_SECRET are set", () => {
+    const deps = buildLiveDeps({
+      MARKETPLACE_URL: "https://marketplace.example.com",
+      MARKETPLACE_AUTH_SECRET: "test-marketplace-secret-at-least-32-chars-long",
+    } as NodeJS.ProcessEnv);
+    expect(typeof deps.publishToMarketplace).toBe("function");
+  });
+
+  it("leaves publishToMarketplace undefined when MARKETPLACE_AUTH_SECRET is missing", () => {
+    const deps = buildLiveDeps({
+      MARKETPLACE_URL: "https://marketplace.example.com",
+    } as NodeJS.ProcessEnv);
+    expect(deps.publishToMarketplace).toBeUndefined();
+  });
+
+  it("leaves publishToMarketplace undefined when MARKETPLACE_URL is missing", () => {
+    const deps = buildLiveDeps({
+      MARKETPLACE_AUTH_SECRET: "test-marketplace-secret-at-least-32-chars-long",
+    } as NodeJS.ProcessEnv);
+    expect(deps.publishToMarketplace).toBeUndefined();
+  });
+
+  it("leaves publishToMarketplace undefined when both are blank/whitespace", () => {
+    const deps = buildLiveDeps({
+      MARKETPLACE_URL: "   ",
+      MARKETPLACE_AUTH_SECRET: "   ",
+    } as NodeJS.ProcessEnv);
+    expect(deps.publishToMarketplace).toBeUndefined();
+  });
+});

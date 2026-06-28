@@ -146,6 +146,14 @@ services:
       - DEPLOYER_URL=${DEPLOYER_URL:-http://host.docker.internal:8788}
       # Bearer secret for POST /deploy. EMPTY here; real value in .env.local only.
       - DEPLOYER_AUTH_SECRET=${DEPLOYER_AUTH_SECRET:-}
+      # The marketplace service the studio lists a deployed resource in (POST /resources).
+      # EMPTY disables the marketplace listing (the studio keeps its local-index Publish
+      # stage). The marketplace is not yet a compose service; point this at the running
+      # marketplace host once provisioned.
+      - MARKETPLACE_URL=${MARKETPLACE_URL:-}
+      # Shared Bearer for POST /resources. EMPTY here; real value in .env.local only. It
+      # must match the marketplace service's own MARKETPLACE_AUTH_SECRET.
+      - MARKETPLACE_AUTH_SECRET=${MARKETPLACE_AUTH_SECRET:-}
       # The deploy domain the agent-card URLs are built from.
       - DEPLOY_DOMAIN=${DEPLOY_DOMAIN:-}
       # SIWE anti-phishing domain bind. The browser signs a SiweMessage declaring the

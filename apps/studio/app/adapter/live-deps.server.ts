@@ -27,6 +27,7 @@ import type { Pricing } from "@utter/x402-arc";
 import { runPlaygroundHarness, type PlaygroundHarnessResult } from "./playground-harness.js";
 import { BuildEventChannel } from "./build-channel.js";
 import { streamDeploy } from "./deployer-client.server.js";
+import { publishResource, type PublishParams } from "./marketplace-client.server.js";
 import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
 import type { BuildEvent, Hex, RevenueSummary } from "./types.js";
 
@@ -86,6 +87,18 @@ export interface LiveDeps {
     resourceLabel: string;
     pricing: Pricing;
   }) => AsyncIterable<BuildEvent>;
+  /**
+   * List a deployed resource in the marketplace SERVICE (the A2A discovery surface agents
+   * hit), closing the publish loop. Bound ONLY when both MARKETPLACE_URL and
+   * MARKETPLACE_AUTH_SECRET are present; left undefined otherwise so createResource keeps
+   * its local-index-only Publish stage. createResource calls this in its own try/catch on
+   * the deploy success path: a throw is non-fatal (the resource is still live) and only
+   * reflects the Publish stage outcome. The bearer is read in buildLiveDeps and passed
+   * straight into the Authorization header, never logged or surfaced.
+   */
+  publishToMarketplace?: (
+    params: PublishParams,
+  ) => Promise<{ listed: boolean; agentId?: string }>;
 }
 
 /**
@@ -287,6 +300,18 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
           streamDeploy(p, { deployerUrl, authSecret })
       : undefined;
 
+  // Bind the marketplace publish seam ONLY when both the marketplace URL and the bearer
+  // are set and non-empty (mirrors the deployBundle conditional). Both must be present to
+  // enable a real listing; unset -> the local-index-only Publish stage. The bearer is
+  // passed straight into publishResource's Authorization header and is NEVER logged here.
+  const marketplaceUrl = env.MARKETPLACE_URL?.trim();
+  const marketplaceAuthSecret = env.MARKETPLACE_AUTH_SECRET?.trim();
+  const publishToMarketplace =
+    marketplaceUrl && marketplaceAuthSecret
+      ? (p: PublishParams) =>
+          publishResource(p, { marketplaceUrl, authSecret: marketplaceAuthSecret })
+      : undefined;
+
   return {
     publicClient,
     indexStore: getSharedIndexStore(env),
@@ -303,5 +328,8 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     buildCardUrl: (slug) => resolveCardUrl(slug, env),
     // Real deploy seam: bound only when DEPLOYER_URL + DEPLOYER_AUTH_SECRET are both set.
     deployBundle,
+    // Marketplace publish seam: bound only when MARKETPLACE_URL + MARKETPLACE_AUTH_SECRET
+    // are both set; undefined otherwise (the local-index-only Publish stage).
+    publishToMarketplace,
   };
 }
