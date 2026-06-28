@@ -21,6 +21,20 @@ export interface FacilitatorStores {
   results: ResultStore;
   /** Per-resource revenue ledger the studio dashboard reads via GET /revenue. */
   revenueLedger: RevenueLedger;
+  /**
+   * Teardown for the durable adapter (pg.end + redis.quit), called from graceful
+   * shutdown AFTER the request drain. Undefined for the in-memory default (nothing to
+   * close), so dev/test boot is byte-unchanged.
+   */
+  close?: () => Promise<void>;
+  /**
+   * Cheap read-only reachability probe for GET /ready: a pg SELECT 1 + a redis PING.
+   * Resolves when every backend is reachable; rejects otherwise. It never writes and
+   * never touches the money/identity tables. Optional: the in-memory default wires a
+   * resolving no-op, so /ready always reports ready in dev/test (the autonomous suite
+   * stays green) and only the durable path can ever 503.
+   */
+  probe?: () => Promise<void>;
 }
 
 /**
@@ -33,6 +47,9 @@ export function createInMemoryStores(): FacilitatorStores {
     payments: new InMemoryPaymentStore(),
     results: new InMemoryResultStore(),
     revenueLedger: new InMemoryRevenueLedger(),
+    // The in-memory backends are always reachable, so the readiness probe is a
+    // resolving no-op: /ready reports ready in dev/test and never 503s.
+    probe: async () => {},
   };
 }
 

@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
+import { runGracefulShutdown } from "@utter/observability";
 import { InMemorySpendCapStore, type SpendCapStore } from "@utter/data-proxy";
 import { createApp, type AppDeps } from "./app";
 import {
@@ -23,10 +24,11 @@ import {
   type PayerScreen,
 } from "./payer-screen";
 import { createRelayerPool } from "./relayer";
-import { createInMemoryBuyerLock } from "./verify";
+import { createInMemoryBuyerLock, type PerBuyerLock } from "./verify";
 import { createInMemoryStores, type FacilitatorStores } from "./stores/memory";
 import { createPgRedisStores } from "./stores/pgRedis";
 import { createRedisSpendCapStore } from "./stores/spend-cap-redis";
+import { createRedisBuyerLock } from "./stores/buyer-lock-redis";
 
 loadEnv({ path: ".env.local" });
 
@@ -161,6 +163,48 @@ export function resolveSpendCapStore(
 }
 
 /**
+ * Resolve the per-buyer verify lock from the environment (Provisioning track). Mirrors
+ * resolveSpendCapStore's prod-fail-closed style exactly.
+ *
+ * The PerBuyerLock serializes the /verify critical section per buyer (the balanceOf
+ * read + outstandingReserved sum + nonce check + store.reserve inside
+ * verifyAndReserve), the off-chain double-reserve (free-compute) guard. The in-memory
+ * lock is per-process: a second facilitator replica defeats it and a restart loses
+ * it, silently degrading the guard. So in production the lock must be durable across
+ * replicas and restarts, behind the SAME switch as the other stores.
+ *
+ *   - REDIS_URL set (non-empty after trim) -> the durable Redis-backed RedisBuyerLock.
+ *   - no REDIS_URL + NODE_ENV=production -> THROW (defensive). This branch is
+ *     unreachable through buildDepsFromEnv (resolveFacilitatorStores fails first
+ *     without REDIS_URL in production) but is correct on a direct call: a per-process
+ *     lock in a multi-replica production deployment silently degrades the guard, so we
+ *     fail closed. The thrown error is VALUE-FREE (no URL echoed).
+ *   - no REDIS_URL + dev/test -> the in-memory lock, exactly as before, so the
+ *     autonomous suite needs no Redis.
+ *
+ * `env` defaults to process.env; it is a parameter only so a direct unit test can
+ * exercise the defensive production branch without mutating the real environment.
+ * REDIS_URL is never logged.
+ */
+export function resolveBuyerLock(env: NodeJS.ProcessEnv = process.env): PerBuyerLock {
+  const redisUrl = (env.REDIS_URL ?? "").trim();
+  if (redisUrl.length > 0) {
+    return createRedisBuyerLock(redisUrl);
+  }
+
+  if (env.NODE_ENV === "production") {
+    // Fail loud. The message names REDIS_URL but echoes no value.
+    throw new Error(
+      "the /verify per-buyer double-reserve guard must be durable across replicas and " +
+        "restarts in production; set REDIS_URL. The in-memory lock is per-process, so a " +
+        "second facilitator replica defeats it and a restart loses it.",
+    );
+  }
+
+  return createInMemoryBuyerLock();
+}
+
+/**
  * Resolve the payer sanctions screen from the environment (Compliance track). Mirrors
  * resolveSpendCapStore's prod-fail-closed style.
  *
@@ -276,7 +320,7 @@ export function buildDepsFromEnv(): AppDeps {
     resultStore: stores.results,
     relayerPool,
     publicClient,
-    perBuyerLock: createInMemoryBuyerLock(),
+    perBuyerLock: resolveBuyerLock(),
     escrowAddress: PAYMENT_ESCROW,
     splitterAddress: PAYMENT_SPLITTER,
     usdcAddress: USDC,
@@ -290,6 +334,12 @@ export function buildDepsFromEnv(): AppDeps {
     revenueLedger,
     authSecret,
     authEnforced,
+    // Teardown-only: the durable stores' close (pg.end + redis.quit), threaded to
+    // graceful shutdown. Undefined for the in-memory default. NO route reads it.
+    storesClose: stores.close,
+    // The readiness probe (durable: a SELECT 1 + PING; in-memory: a resolving no-op),
+    // read only by GET /ready.
+    storeProbe: stores.probe,
   };
 }
 
@@ -301,7 +351,27 @@ export function start(port = Number(process.env.PORT ?? "8787")): void {
   console.log(
     `facilitator listening on :${port} (relayer pool size ${deps.relayerPool.signers.length})`,
   );
-  serve({ fetch: app.fetch, port });
+  // Capture the serve() handle (previously discarded) so graceful shutdown can drain an
+  // in-flight /settle (the money path) to completion BEFORE closing any pool/client.
+  const server = serve({ fetch: app.fetch, port });
+  const drainTimeoutMs = Number(process.env.SHUTDOWN_DRAIN_MS ?? "10000");
+  // The closeables: the durable stores (pg.end + redis.quit), the spend-cap store's
+  // redis client, and the per-buyer lock's redis client. Each is guarded with typeof so
+  // the in-memory variants (which expose no close/disconnect) are skipped, leaving
+  // dev/test boot byte-unchanged. None closes until the drain above has finished.
+  const closeables: Array<() => Promise<void>> = [];
+  if (typeof deps.storesClose === "function") {
+    closeables.push(deps.storesClose);
+  }
+  const spendCapDisconnect = deps.spendCapStore?.disconnect;
+  if (typeof spendCapDisconnect === "function") {
+    closeables.push(() => spendCapDisconnect.call(deps.spendCapStore));
+  }
+  const buyerLockDisconnect = deps.perBuyerLock.disconnect;
+  if (typeof buyerLockDisconnect === "function") {
+    closeables.push(() => buyerLockDisconnect.call(deps.perBuyerLock));
+  }
+  runGracefulShutdown({ server, drainTimeoutMs, closeables }).register();
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.

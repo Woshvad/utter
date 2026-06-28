@@ -194,6 +194,19 @@ export class InMemoryResponseCache implements ResponseCache {
 export interface DeployerStores {
   deployments: DeploymentStore;
   cache: ResponseCache;
+  /**
+   * Teardown for the durable adapter (redis.quit), called from graceful shutdown AFTER
+   * the request drain. Undefined for the in-memory default (nothing to close), so
+   * dev/test boot is byte-unchanged.
+   */
+  close?: () => Promise<void>;
+  /**
+   * Cheap read-only reachability probe for GET /ready: a redis PING. Resolves when the
+   * backend is reachable; rejects otherwise. It never writes and never touches the
+   * deployment records. Optional: the in-memory default wires a resolving no-op, so
+   * /ready always reports ready in dev/test and only the durable path can ever 503.
+   */
+  probe?: () => Promise<void>;
 }
 
 /**
@@ -205,5 +218,8 @@ export function createInMemoryStores(): DeployerStores {
   return {
     deployments: new InMemoryDeploymentStore(),
     cache: new InMemoryResponseCache(),
+    // The in-memory backend is always reachable, so the readiness probe is a resolving
+    // no-op: /ready reports ready in dev/test and never 503s.
+    probe: async () => {},
   };
 }

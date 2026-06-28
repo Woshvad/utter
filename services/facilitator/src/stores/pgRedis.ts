@@ -309,5 +309,20 @@ export function createPgRedisStores(opts: PgRedisOptions): FacilitatorStores {
     // The revenue ledger SHARES the same pg Pool (no second Pool). It is durable, so a
     // facilitator restart no longer zeroes a creator's revenue history.
     revenueLedger: new PgRevenueLedger(pg),
+    // Teardown for graceful shutdown: drain the pg pool then quit the redis client. Both
+    // are owned here (the payment/result/revenue stores share them), so this is the one
+    // place that closes them. Called only after the request drain completes.
+    close: async () => {
+      await pg.end();
+      await redis.quit();
+    },
+    // Readiness probe for GET /ready: a cheap read-only SELECT 1 + PING over the same
+    // pg/redis clients the stores use. It never writes and never touches the
+    // payments/results/revenue tables, so it cannot perturb the money path; a throw
+    // here turns /ready into a value-free 503.
+    probe: async () => {
+      await pg.query("SELECT 1");
+      await redis.ping();
+    },
   };
 }

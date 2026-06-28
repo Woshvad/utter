@@ -44,3 +44,34 @@ export {
   type AlertThresholds,
   type MetricSnapshot,
 } from "./alerts";
+
+// Provisioning track: the dependency-free graceful-shutdown sequencer (strict drain
+// order: stop intake -> drain -> stop loop -> close pools/clients -> exit).
+export {
+  runGracefulShutdown,
+  type HttpServerLike,
+  type ShutdownLogger,
+  type GracefulShutdownOptions,
+  type GracefulShutdown,
+} from "./shutdown";
+
+// Provisioning track: the dependency-free JSON-lines logger (DISTINCT from the OBS-02
+// money-path StructuredLogger). Serializes bigint as a base-10 string, one line per call.
+export {
+  JsonLogger,
+  CaptureJsonSink,
+  stdoutSink,
+  type Level,
+  type JsonLogSink,
+} from "./jsonlog";
+
+// Provisioning track: the best-effort reconcile alert sink, gated on ALERT_WEBHOOK_URL
+// (DISTINCT from the ALERT_SINK_URL-gated AlertSink). Unset/blank -> a pure no-op sink.
+export {
+  makeWebhookPoster,
+  selectReconcileEventSink,
+  CaptureReconcileSink,
+  type ReconcileAlertEvent,
+  type ReconcileEventSink,
+  type WebhookPosterOpts,
+} from "./webhook-sink";

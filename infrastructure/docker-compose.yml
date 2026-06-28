@@ -53,6 +53,14 @@ services:
     image: redis:7
     restart: unless-stopped
     networks: [redisnet]
+    # Readiness healthcheck so dependents can gate on redis being reachable, not merely
+    # started. redis-cli ships in the redis:7 image (unlike node:slim, which has no
+    # curl/wget), so a plain `redis-cli ping` is the cheap liveness probe here.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # The allowlisted egress proxy (PRX-01/PRX-02) - the ONLY permitted egress from
   # a sandboxed resource. It joins proxynet (the handler's sole data-plane peer)
@@ -75,7 +83,8 @@ services:
       upstreamnet: {}
       redisnet: {}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       # HMAC secret for the scoped JWT. EMPTY here; real value in .env.local only.
       - DATA_PROXY_TOKEN_SECRET=${DATA_PROXY_TOKEN_SECRET:-}
@@ -86,17 +95,38 @@ services:
   # The trusted settlement gate (PAY-09/PAY-10): the sidecar gate POSTs to
   # http://facilitator:8787/verify /settle /release over controlplane. The
   # facilitator joins controlplane (where the sidecar reaches it) + upstreamnet
-  # (the only net where it reaches Arc RPC for the relayer pool / /settle). It is
-  # internal-only (no published host port); operators read health from
-  # `docker compose logs facilitator`. It uses in-memory stores (DATABASE_URL +
-  # REDIS_URL are deliberately unset), so it is NOT on redisnet. Resources are
-  # never on upstreamnet, so they cannot reach Arc RPC directly (design §3(d)).
+  # (the only net where it reaches Arc RPC for the relayer pool / /settle) +
+  # redisnet + backendnet (its durable backends: Redis for the reservation lock,
+  # Postgres for the payments/results/revenue tables). It is internal-only (no
+  # published host port); operators read health from `docker compose logs
+  # facilitator`. Durability is OPT-IN: DATABASE_URL is empty and NODE_ENV is
+  # unset by default, so the facilitator keeps its in-memory stores; the postgres
+  # service is reachable on backendnet but only used once DATABASE_URL + production
+  # are set. Resources are never on upstreamnet/redisnet/backendnet, so they
+  # cannot reach Arc RPC, Redis, or Postgres directly (design §3(d)).
   facilitator:
     build:
       context: ..
       dockerfile: services/facilitator/Dockerfile
     restart: unless-stopped
-    networks: [controlplane, upstreamnet]
+    # Drain margin: SHUTDOWN_DRAIN_MS defaults to 10s, which equals Docker's default
+    # stop grace, leaving zero headroom before SIGKILL. 15s gives the request drain
+    # room to finish on a plain `docker stop` (compose enforces it; no -t 15 needed).
+    stop_grace_period: 15s
+    networks: [controlplane, upstreamnet, redisnet, backendnet]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Compose-level readiness healthcheck (this block, NOT the image HEALTHCHECK, is what
+    # `condition: service_healthy` reads). node:22-bookworm-slim has no curl/wget, so the
+    # probe is `node -e` + the global fetch against GET /ready (store-aware): healthy only
+    # when the durable backends are reachable. start_period covers the boot window.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     environment:
       # Settlement relayer key(s). EMPTY here; real value in .env.local only, passed via --env-file.
       - RELAYER_SIGNER_KEYS=${RELAYER_SIGNER_KEYS:-}
@@ -107,6 +137,13 @@ services:
       # sequence). Do NOT set production before the sidecar exists (it would 401).
       - FACILITATOR_AUTH_SECRET=${FACILITATOR_AUTH_SECRET:-}
       - NODE_ENV=${NODE_ENV:-}
+      # Durable stores (PAY-09/PAY-11). EMPTY by default so the in-memory stores
+      # stay the default; resolveFacilitatorStores arms the pg+redis adapters only
+      # when NODE_ENV=production AND these URLs are set (and then fails closed if
+      # they are absent). DATABASE_URL points at the in-compose postgres service;
+      # REDIS_URL defaults to the in-compose redis on redisnet.
+      - DATABASE_URL=${DATABASE_URL:-}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       # Optional Arc RPC override; falls back to the chain default when blank.
       - ARC_RPC_URL=${ARC_RPC_URL:-}
       - PORT=8787
@@ -131,9 +168,15 @@ services:
     networks: [ingress, controlplane, upstreamnet]
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Gate studio startup on the facilitator + marketplace being READY (store-aware
+    # service_healthy), not merely started, so the studio cannot accept a deploy before
+    # those control-plane services can reach their durable backends. service_healthy
+    # reads each service's compose healthcheck block above.
     depends_on:
-      - facilitator
-      - marketplace
+      facilitator:
+        condition: service_healthy
+      marketplace:
+        condition: service_healthy
     environment:
       # Production forces session.server.ts to require a >=32-char SESSION_SECRET.
       - NODE_ENV=production
@@ -181,12 +224,17 @@ services:
   # platform control-plane service, NOT the gVisor untrusted boundary. It joins
   # ingress (Traefik routes to it over the shared ingress net via
   # dynamic/marketplace.yml, so external agents can fetch deployed-resource cards +
-  # /resources discovery) and controlplane (where the studio reaches it at
-  # marketplace:8789 to POST a deployed resource). It is NEVER on edge, proxynet,
-  # redisnet, or upstreamnet, so it cannot weaken the resource-plane or money-path
-  # isolation, and it publishes no host port (Traefik fronts the public surface;
-  # the studio reaches it on the internal controlplane net). Its publish endpoint
-  # is Bearer-gated (fail-closed) so public Traefik exposure is safe; GET /resources
+  # /resources discovery), controlplane (where the studio reaches it at
+  # marketplace:8789 to POST a deployed resource), and backendnet (its durable
+  # Postgres backend for the resources/cards/moderation tables). It is Postgres-only
+  # and does NOT read REDIS_URL, so it is NEVER on redisnet; it is also never on
+  # edge, proxynet, or upstreamnet, so it cannot weaken the resource-plane or
+  # money-path isolation, and it publishes no host port (Traefik fronts the public
+  # surface; the studio reaches it on the internal controlplane net). Durability is
+  # OPT-IN: DATABASE_URL is empty and NODE_ENV unset by default, so the in-memory
+  # stores stay the default; the postgres service is reachable on backendnet but
+  # only used once DATABASE_URL + production are set. Its publish endpoint is
+  # Bearer-gated (fail-closed) so public Traefik exposure is safe; GET /resources
   # and the card route are intentionally public for agent discovery. All
   # secret-bearing env defaults to empty here; real values are supplied via
   # --env-file .env.local.
@@ -195,7 +243,24 @@ services:
       context: ..
       dockerfile: apps/marketplace/Dockerfile
     restart: unless-stopped
-    networks: [ingress, controlplane]
+    # Drain margin: SHUTDOWN_DRAIN_MS defaults to 10s, which equals Docker's default
+    # stop grace, leaving zero headroom before SIGKILL. 15s gives the request drain
+    # room to finish on a plain `docker stop` (compose enforces it; no -t 15 needed).
+    stop_grace_period: 15s
+    networks: [ingress, controlplane, backendnet]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Compose-level readiness healthcheck (this block, NOT the image HEALTHCHECK, is what
+    # `condition: service_healthy` reads). node:22-bookworm-slim has no curl/wget, so the
+    # probe is `node -e` + the global fetch against GET /ready (store-aware): healthy only
+    # when the durable backend is reachable. start_period covers the boot window.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8789/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     environment:
       # The marketplace HTTP port (server.ts default is 8789; set explicitly).
       - PORT=8789
@@ -206,6 +271,35 @@ services:
       # value in .env.local only. It must match the studio's MARKETPLACE_AUTH_SECRET.
       - MARKETPLACE_AUTH_SECRET=${MARKETPLACE_AUTH_SECRET:-}
       - NODE_ENV=${NODE_ENV:-}
+
+  # The durable Postgres backend (PAY-09/PAY-11, MKT-01/02). It lives on backendnet
+  # ONLY (internal:true): a trusted backend net it shares with the facilitator and
+  # marketplace and nothing else. It is NEVER on a resource-reachable net
+  # (proxynet/ingress/upstreamnet), and the 5432 port is NOT published to the host,
+  # so a compromised handler/sidecar has no L3 path to it; local dev reads it via
+  # `docker exec <postgres> psql` (no host port needed). The schema is loaded ONCE
+  # from ./db/schema.sql via /docker-entrypoint-initdb.d, and only when the pgdata
+  # volume is EMPTY (postgres:16 runs init scripts on a fresh data dir only). To
+  # re-apply a schema change the operator drops the pgdata volume. An empty
+  # POSTGRES_PASSWORD with no POSTGRES_HOST_AUTH_METHOD makes postgres:16 fail
+  # loudly at boot rather than silently opening a trust-auth database, so durability
+  # is never accidentally armed without an operator-set password from .env.local.
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    networks: [backendnet]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-utter}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_DB=${POSTGRES_DB:-utter}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-utter} -d ${POSTGRES_DB:-utter}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Internal pull-through npm registry mirror (SBX-05). DEV-ONLY build tooling: it
   # stays OFF all six networks (it is on the compose default project net), so it is
@@ -251,6 +345,10 @@ networks:
   redisnet:
     name: redisnet
     internal: true # redis backend, trusted services ONLY (redis + data-proxy).
+  backendnet:
+    name: backendnet
+    internal: true # trusted pg backend: postgres + facilitator + marketplace only; no internet, not resource-reachable.
 
 volumes:
   traefik-letsencrypt:
+  pgdata:

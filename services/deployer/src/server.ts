@@ -30,6 +30,14 @@ import { timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import {
+  runGracefulShutdown,
+  JsonLogger,
+  stdoutSink,
+  selectReconcileEventSink,
+  type ReconcileEventSink,
+  type ReconcileAlertEvent,
+} from "@utter/observability";
 import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { createInMemoryStores } from "./stores/memory";
 import type { DeployerStores } from "./stores/memory";
@@ -50,7 +58,11 @@ import {
   reapOrphanPairNetworks,
   type DockerHandle,
 } from "./orchestrate";
-import { createReconcileLoop, type ReconcileLoop } from "./reconcile";
+import {
+  createReconcileLoop,
+  type ReconcileLoop,
+  type ReconcileErrorEvent,
+} from "./reconcile";
 import { DEFAULT_RUNAWAY_POLICY } from "./reaper";
 
 loadEnv({ path: ".env.local" });
@@ -203,6 +215,25 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
   const app = new Hono();
 
   app.get("/health", (c) => c.json({ ok: true, service: "deployer" }));
+
+  // GET /ready - the store-aware readiness probe. The deployer is a HOST process (no
+  // Dockerfile, no compose service), so it gets no image HEALTHCHECK; instead the host
+  // supervisor (systemd) should health-probe http://127.0.0.1:8788/ready to gate the
+  // deployer behind store reachability. It returns 200 {ready:true} only when the
+  // durable store is reachable, 503 {ready:false} when the probe throws, and 200
+  // {ready:true} when no probe is wired (the in-memory dev/test default), so local up
+  // and the autonomous suite stay green. The 503 path is VALUE-FREE: the catch swallows
+  // the error so a connection string in err.message can never reach the response body.
+  app.get("/ready", async (c) => {
+    const probe = deps.stores.probe;
+    if (!probe) return c.json({ ready: true }, 200);
+    try {
+      await probe();
+      return c.json({ ready: true }, 200);
+    } catch {
+      return c.json({ ready: false }, 503);
+    }
+  });
 
   app.get("/deployments", async (c) => {
     const records = await deps.stores.deployments.list();
@@ -397,8 +428,11 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
  *
  * DELIBERATELY NO launchContainer: untrusted generated code is NEVER auto-relaunched (a
  * generated bundle cannot be re-run without its ephemeral bundle). The loop's job here is
- * orphan-container reap + runaway quarantine + pairnet GC only; it REPORTS toLaunch drift
- * but never acts on it. RECONCILE_INTERVAL_MS (default 15000) sets the tick interval;
+ * orphan-container reap + runaway quarantine + stale-deploying quarantine + pairnet GC
+ * only; it REPORTS toLaunch drift but never acts on it. RECONCILE_INTERVAL_MS (default
+ * 15000) sets the tick interval; DEPLOY_TIMEOUT_MS (default 600000, 10 min) sets the
+ * stale-deploying quarantine window - a record stuck at "deploying" past it (a crash
+ * before the deploy resolved) is flipped to "failed" so its partial container is reaped;
  * MAX_CONCURRENT_RESOURCES, when set, caps running resources (but with no launch hook it
  * only ever affects reporting). All values are host-capacity numbers, never money literals.
  *
@@ -410,17 +444,97 @@ export function buildReconcileLoop(
   deps: DeployerAppDeps,
   env: NodeJS.ProcessEnv,
 ): ReconcileLoop {
+  // Structured JSON-lines logger pinned to this component. Distinct from the OBS-02
+  // money-path StructuredLogger; this is operational logging only (counts + the typed
+  // non-secret reconcile fields).
+  const logger = new JsonLogger(stdoutSink, { service: "deployer", component: "reconcile" });
+  // Best-effort reconcile alert sink. ALERT_WEBHOOK_URL unset/blank -> a pure no-op
+  // (no fetch, no network) so the autonomous suite never reaches a network path.
+  const eventSink = selectReconcileEventSink(env, logger);
+
   return createReconcileLoop({
     store: deps.stores.deployments,
     listContainers: () => listResourceContainers(docker),
     reapContainer: (c) => reapResourceContainer(docker, c),
     reapOrphanNetworks: () => reapOrphanPairNetworks(docker),
     intervalMs: Number(env.RECONCILE_INTERVAL_MS ?? "15000"),
+    // Stale-deploying quarantine window (crash recovery). 10 min default - far above a
+    // real gVisor deploy, so a slow-but-live deploy is never wrongly failed. now is left
+    // unset here so it defaults to Date.now in prod (tests inject a pinned clock).
+    deployTimeoutMs: Number(env.DEPLOY_TIMEOUT_MS ?? "600000"),
     runawayPolicy: DEFAULT_RUNAWAY_POLICY,
+    // reconcile.ts calls onError INLINE inside a tick, so this handler MUST NEVER throw
+    // back into the loop: handleReconcileError wraps its whole body in try/catch.
+    onError: (e) => handleReconcileError(e, logger, eventSink),
+    // onTick logs counts only (never the records, which could carry resource detail).
+    onTick: (r) =>
+      logger.info("reconcile tick", {
+        healthy: r.healthy,
+        toLaunch: r.toLaunch.length,
+        toReap: r.toReap.length,
+      }),
     ...(env.MAX_CONCURRENT_RESOURCES
       ? { maxConcurrent: Number(env.MAX_CONCURRENT_RESOURCES) }
       : {}),
   });
+}
+
+/**
+ * Map a reconcile phase to its security-relevant alert kind. The reconcile phases
+ * (reap / runaway / capacity / tick / launch / deploy-timeout) map 1:1 onto the alert
+ * kinds the webhook sink forwards. A pure function so the mapping is unit-testable in
+ * isolation.
+ */
+function reconcilePhaseToAlertKind(phase: ReconcileErrorEvent["phase"]): ReconcileAlertEvent["kind"] {
+  switch (phase) {
+    case "reap":
+      return "reap_failure";
+    case "runaway":
+      return "runaway_quarantine";
+    case "capacity":
+      return "capacity_defer";
+    case "tick":
+      return "tick_failure";
+    case "launch":
+      return "launch_failure";
+    case "deploy-timeout":
+      return "deploy_timeout";
+  }
+}
+
+/**
+ * The reconcile onError handler used by buildReconcileLoop. It (a) logs the event via
+ * the JSON-lines logger (only the typed non-secret fields: phase / containerId /
+ * resourceId / message) and (b) maps the phase to a ReconcileAlertEvent and emits it to
+ * the event sink. reconcile.ts calls onError INLINE inside a tick, so the WHOLE body is
+ * wrapped in try/catch: a failure here (a logger or sink throw) must NEVER propagate
+ * back into the loop. Exported so a test can drive the mapping with a CaptureReconcileSink.
+ */
+export function handleReconcileError(
+  e: ReconcileErrorEvent,
+  logger: JsonLogger,
+  eventSink: ReconcileEventSink,
+): void {
+  try {
+    // Forward ONLY the typed reconcile fields (reconcile.ts documents these as never
+    // carrying secret material). No addresses, keys, tokens, or credential URLs.
+    logger.warn("reconcile event", {
+      phase: e.phase,
+      containerId: e.containerId,
+      resourceId: e.resourceId,
+      message: e.message,
+    });
+    eventSink.emit({
+      kind: reconcilePhaseToAlertKind(e.phase),
+      phase: e.phase,
+      message: e.message,
+      containerId: e.containerId,
+      resourceId: e.resourceId,
+      ts: Date.now(),
+    });
+  } catch {
+    // Inline inside a tick: never throw back into the loop.
+  }
 }
 
 /** Start the deployer HTTP server on the given port (default 8788). */
@@ -435,7 +549,9 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   // operator who pins it to the docker bridge IP. Log only host:port (no env values).
   const hostname = process.env.HOST?.trim() || "0.0.0.0";
   console.log(`deployer listening on ${hostname}:${port}`);
-  serve({ fetch: app.fetch, hostname, port });
+  // Capture the serve() handle (previously discarded) so graceful shutdown can drain an
+  // in-flight POST /deploy stream before closing the store client.
+  const server = serve({ fetch: app.fetch, hostname, port });
 
   // HOST-GATED reconcile loop bootstrap (DEP-05 / T-03-19): start the orphan-reap +
   // runaway-quarantine + pairnet-GC loop ONLY on the provisioned gVisor host
@@ -444,9 +560,14 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   // never built and boot is byte-unchanged - no dockerode connection, no interval. The
   // loop interval is unref'd (reconcile.ts) so it never keeps the process alive. We
   // never store the handle to a closure for relaunch: the loop only reaps + GCs.
+  //
+  // `loop` is hoisted to function scope so the shutdown closure below can stop it after
+  // the request drain and before the store client closes (so no tick fires a store call
+  // against a closing client). loop?.stop() is idempotent and a no-op when undefined.
+  let loop: ReconcileLoop | undefined;
   const docker = process.env.UTTER_SANDBOX_HOST === "1" ? resolveDockerHandle() : undefined;
   if (docker) {
-    const loop = buildReconcileLoop(docker, deps, process.env);
+    loop = buildReconcileLoop(docker, deps, process.env);
     loop.start();
     const intervalMs = Number(process.env.RECONCILE_INTERVAL_MS ?? "15000");
     // Non-secret: interval only (no env values, no secrets).
@@ -454,6 +575,27 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   } else {
     console.log("reconcile loop not started (no sandbox host)");
   }
+
+  // Graceful shutdown: drain in-flight requests, THEN stop the reconcile loop, THEN close
+  // the store client. The store close is guarded with typeof so the in-memory default
+  // (no close) is skipped, leaving dev/test boot byte-unchanged.
+  const drainTimeoutMs = Number(process.env.SHUTDOWN_DRAIN_MS ?? "10000");
+  const closeables: Array<() => Promise<void>> = [];
+  if (typeof deps.stores.close === "function") {
+    const storesClose = deps.stores.close;
+    closeables.push(() => storesClose());
+  }
+  runGracefulShutdown({
+    server,
+    drainTimeoutMs,
+    // Await loop.stop() so the live reconcile tick settles BEFORE the closeable quits
+    // redis: no in-flight store call survives into the client close (the loop's own
+    // documented invariant). loop?.stop() is idempotent and a no-op when undefined.
+    beforeClosePools: async () => {
+      await loop?.stop();
+    },
+    closeables,
+  }).register();
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.

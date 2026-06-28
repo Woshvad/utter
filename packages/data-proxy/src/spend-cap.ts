@@ -67,6 +67,12 @@ export interface SpendCapStore {
    * the payer's cap - a self-DoS). A no-op when there is nothing to refund.
    */
   refundSpend(payer: string, amount: bigint, now: number): Promise<bigint>;
+  /**
+   * OPTIONAL teardown for a durable adapter (the Redis-backed store quits its client),
+   * called from graceful shutdown after the request drain. The in-memory default does
+   * not implement it (nothing to close), so callers guard the call with a typeof check.
+   */
+  disconnect?(): Promise<void>;
 }
 
 /** One timestamped spend entry in a payer's rolling window. */

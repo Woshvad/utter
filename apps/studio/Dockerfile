@@ -41,6 +41,12 @@ RUN cp -r packages/ai-runtime/skills apps/studio/build/skills
 
 EXPOSE 3000
 
+# Container HEALTHCHECK over GET /health (LIVENESS only - the studio owns no store, so
+# there is nothing to probe for readiness). node:22-bookworm-slim ships NEITHER curl NOR
+# wget, so the probe uses `node -e` + the global fetch: exit 0 when /health is 200, exit
+# 1 otherwise. The start-period covers the install + build + boot window.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=3 CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # Serve the built app with the workspace react-router-serve binary, pointed at
 # the SSR entry. PORT defaults to 3000 (also set in the compose env).
 CMD ["pnpm", "-C", "apps/studio", "exec", "react-router-serve", "./build/server/index.js"]

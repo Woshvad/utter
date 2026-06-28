@@ -153,6 +153,22 @@ export interface ReconcileLoopOpts {
    * (phase "runaway"). Absent = no runaway pass.
    */
   runawayPolicy?: RunawayPolicy;
+  /**
+   * Stale-deploying quarantine timeout in ms (crash recovery). When set, the tick runs a
+   * pass that flips any record stuck at status "deploying" longer than this window to
+   * "failed" so its partial containers become reapable orphans the same tick. The deployer
+   * never auto-relaunches generated bundles, so a "deploying" record left after a crash
+   * would otherwise strand forever. Absent = the pass is a complete no-op (prior behavior).
+   * A generous value (the env default is 10 min) keeps a slow-but-live deploy from being
+   * wrongly failed. A host-timing number, never a money literal.
+   */
+  deployTimeoutMs?: number;
+  /**
+   * The clock, injectable for tests. Resolves to Date.now in prod. Used for BOTH the
+   * runaway quarantine timestamp and the stale-deploying comparison so there is a single
+   * now() source across the tick.
+   */
+  now?: () => number;
   /** Optional hook invoked with each tick's result (e.g. to act on drift / log health). */
   onTick?: (result: ReconcileResult) => void;
   /**
@@ -167,7 +183,7 @@ export interface ReconcileLoopOpts {
 /** A surfaced reconcile/enforcement failure (never carries secret material). */
 export interface ReconcileErrorEvent {
   /** What failed (or was deferred/quarantined). */
-  phase: "tick" | "reap" | "launch" | "capacity" | "runaway";
+  phase: "tick" | "reap" | "launch" | "capacity" | "runaway" | "deploy-timeout";
   /** The container id (for a reap failure), if known. */
   containerId?: string;
   /** The resourceId involved, if known. */
@@ -190,8 +206,15 @@ export interface ReconcileLoop {
   tick(): Promise<ReconcileResult>;
   /** Begin ticking on the interval. Idempotent (a second start is a no-op). */
   start(): void;
-  /** Stop the interval. Idempotent. */
-  stop(): void;
+  /**
+   * Stop the interval. Idempotent. Returns a promise that resolves once any
+   * in-flight tick has settled, so a shutdown sequencer can AWAIT the live tick
+   * before it closes the shared store client (no store call survives into the
+   * close). Resolves immediately when no tick is in flight (or the loop was
+   * never started). Backward compatible: callers that ignore the return are
+   * unaffected.
+   */
+  stop(): Promise<void>;
 }
 
 /**
@@ -218,16 +241,33 @@ export interface ReconcileLoop {
  * endpoint-less per-resource pairnets AFTER the orphan-container reap (the safety net
  * that closes the pairnet leak under crashes / races). A sweep failure is surfaced
  * (phase "reap"), never propagated.
+ *
+ * Crash recovery: when `deployTimeoutMs` is set, the tick also runs a STALE-DEPLOYING
+ * quarantine pass (between the runaway pass and the desired read) - a record stuck at
+ * "deploying" past the timeout is flipped to "failed" so its partial container becomes a
+ * reapable orphan the same tick. It NEVER relaunches and NEVER touches a fresh deploying
+ * record (an in-flight launch must finish). Absent = a complete no-op. The whole tick uses
+ * a single injected `now` (`opts.now ?? Date.now`).
  */
 export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
   let timer: ReturnType<typeof setInterval> | null = null;
   const onError = opts.onError ?? defaultOnError;
+  // Single clock for the whole tick (runaway timestamp + stale-deploying compare).
+  // Unset in prod -> Date.now; tests inject a pinned clock.
+  const now = opts.now ?? Date.now;
   // Per-container consecutive high-CPU counts, kept across ticks so the sustained-
   // CPU runaway signal can accumulate. Pruned each tick to the live container set so
   // it cannot grow unbounded.
   const consecutiveHighCpu = new Map<string, number>();
+  // The in-flight tick, tracked so stop() can await it before the shutdown sequencer
+  // closes the shared store client. Set at the top of run() and cleared in its finally
+  // (only when it is still the same promise, so an overlapping run never clears a peer).
+  // Covers BOTH interval-driven and direct tick() calls.
+  let current: Promise<ReconcileResult> | null = null;
 
-  async function tick(): Promise<ReconcileResult> {
+  // The reconcile pass body. tick() wraps this so the in-flight promise is tracked
+  // around the whole run regardless of how it was invoked.
+  async function runTick(): Promise<ReconcileResult> {
     // Read actual FIRST so the runaway pass can quarantine wedged containers before
     // we read desired state (a quarantined record is then excluded from toLaunch).
     const actual = await opts.listContainers();
@@ -272,7 +312,7 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
           // to relaunch it. Only mark safeToReap on a DURABLE put - if the put throws,
           // leave the container running and try again next tick (never reap it now).
           try {
-            await opts.store.put({ ...rec, status: "failed", updatedAt: Date.now() });
+            await opts.store.put({ ...rec, status: "failed", updatedAt: now() });
             safeToReap = true;
           } catch (err) {
             safeToReap = false;
@@ -308,6 +348,43 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
       const liveIds = new Set(actual.map((c) => c.id));
       for (const id of [...consecutiveHighCpu.keys()]) {
         if (!liveIds.has(id)) consecutiveHighCpu.delete(id);
+      }
+    }
+
+    // STALE-DEPLOYING quarantine pass (crash recovery). A record stuck at "deploying"
+    // is treated as desired-running (the status filter), so it is never reaped, yet the
+    // deployer never auto-relaunches generated bundles - so a "deploying" record left
+    // behind by a crash (written before the deploy resolved) strands forever and its
+    // partial containers, sharing its resourceId, are never reaped. Flip any record older
+    // than the timeout to "failed" so the activeDesired filter drops it below and its
+    // partial container becomes a reapable orphan THIS tick. Runs BEFORE the desired read
+    // and BEFORE the orphan reap. A FRESH deploying record (inside the window) is left
+    // untouched so an in-flight launch can finish. There is NO relaunch path: a flip only
+    // removes the record from desired; untrusted generated code is never re-run. Absent
+    // timeout => the pass is a complete no-op (prior behavior byte-unchanged).
+    if (opts.deployTimeoutMs !== undefined) {
+      const deployTimeoutMs = opts.deployTimeoutMs;
+      const records = await opts.store.list();
+      for (const rec of records) {
+        if (rec.status !== "deploying") continue;
+        if (now() - rec.updatedAt <= deployTimeoutMs) continue;
+        try {
+          // The spread preserves agentId/resourceId/slug/deployVersion/cap; only status
+          // and updatedAt change.
+          await opts.store.put({ ...rec, status: "failed", updatedAt: now() });
+          onError({
+            phase: "deploy-timeout",
+            resourceId: rec.resourceId,
+            // WR-06: resourceId + a static message only. Never the bundle/cap/slug.
+            message: `deploying record stale > ${deployTimeoutMs}ms; quarantined to failed`,
+          });
+        } catch (err) {
+          onError({
+            phase: "deploy-timeout",
+            resourceId: rec.resourceId,
+            message: "quarantine failed: " + (err instanceof Error ? err.message : String(err)),
+          });
+        }
       }
     }
 
@@ -395,9 +472,26 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
     return result;
   }
 
+  // Track the in-flight run so stop() can await it. The run is set as `current` at
+  // entry and cleared in the finally only if it is still the same promise (an
+  // overlapping run must never clear a peer's tracking). Both interval-driven ticks
+  // and direct tick() calls flow through here, so the guarantee holds for both.
+  function tick(): Promise<ReconcileResult> {
+    const run = runTick();
+    current = run;
+    void run.finally(() => {
+      if (current === run) current = null;
+    });
+    return run;
+  }
+
   function start(): void {
     if (timer !== null) return; // idempotent: already running
     timer = setInterval(() => {
+      // RE-ENTRANCY GUARD (interval only): skip a new interval tick while one is
+      // still in flight so ticks never overlap. This guard lives ONLY in the
+      // interval callback - a direct tick() call always runs (tests rely on that).
+      if (current !== null) return;
       // A transient dockerode error must never crash the loop, but it MUST be
       // visible (WR-06): surface it via onError instead of swallowing. The next
       // tick re-reads fresh state.
@@ -412,10 +506,18 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
     (timer as { unref?: () => void }).unref?.();
   }
 
-  function stop(): void {
-    if (timer === null) return; // idempotent: already stopped
-    clearInterval(timer);
-    timer = null;
+  // Stop the interval AND return the in-flight tick so a caller can await it before
+  // closing the shared store client. Idempotent: clearing a null timer is a no-op and
+  // a never-started loop has no `current`, so it resolves immediately. The tick is not
+  // cancelled - it is allowed to finish so a partial store write never tears mid-call.
+  function stop(): Promise<void> {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+    // Await the live tick (resolve/reject swallowed: stop() only needs the tick to
+    // SETTLE, and a tick's own errors are already surfaced via onError on its path).
+    return current ? current.then(() => undefined, () => undefined) : Promise.resolve();
   }
 
   return { tick, start, stop };

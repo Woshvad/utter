@@ -227,5 +227,16 @@ export function createRedisStores(opts: RedisStoreOptions): DeployerStores {
   return {
     deployments: new RedisDeploymentStore(redis),
     cache: new RedisResponseCache(redis),
+    // Teardown for graceful shutdown: quit the single shared redis client (the
+    // deployment store + response cache share it). Called only after the request drain.
+    close: async () => {
+      await redis.quit();
+    },
+    // Readiness probe for GET /ready: a cheap read-only PING over the same redis client
+    // the stores use. It never writes and never touches the deployment records, so it
+    // cannot perturb deploy/cache logic; a throw here turns /ready into a value-free 503.
+    probe: async () => {
+      await redis.ping();
+    },
   };
 }

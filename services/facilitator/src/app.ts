@@ -130,6 +130,23 @@ export interface AppDeps {
    * default), the routes pass through unchanged (the current behavior).
    */
   authEnforced?: boolean;
+
+  /**
+   * Teardown for the durable stores (pg.end + redis.quit), threaded from
+   * resolveFacilitatorStores().close to graceful shutdown. NO route reads this; it is
+   * teardown-only metadata. Undefined for the in-memory default (nothing to close), so
+   * dev/test boot is byte-unchanged.
+   */
+  storesClose?: () => Promise<void>;
+
+  /**
+   * Readiness probe for GET /ready (a cheap read-only SELECT 1 + PING over the durable
+   * stores). When set, /ready resolves it -> 200 {ready:true}, or a value-free 503
+   * {ready:false} when it throws. UNSET (the in-memory default) leaves /ready returning
+   * 200 {ready:true}, so local boot + the autonomous suite stay green. Read-only and
+   * money-path-free: it never touches the reservation/result/strike state.
+   */
+  storeProbe?: () => Promise<void>;
 }
 
 /**
@@ -173,6 +190,27 @@ function decodePaymentBody(value: unknown): PaymentPayload | null {
  */
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
+
+  // GET /health - a CONSTANT liveness check (matching the deployer/marketplace shape).
+  // It touches no store, so it never 503s from a backend outage: it answers only "is
+  // this process up and serving HTTP". The facilitator had no /health before; this adds
+  // one so a liveness supervisor can distinguish a dead process from an unready one.
+  app.get("/health", (c) => c.json({ ok: true, service: "facilitator" }));
+
+  // GET /ready - the store-aware readiness probe. It returns 200 {ready:true} only when
+  // the durable backends are reachable, 503 {ready:false} when the probe throws, and 200
+  // {ready:true} when no probe is wired (the in-memory dev/test default), so local up and
+  // the autonomous suite stay green. The 503 path is VALUE-FREE: the catch swallows the
+  // error so a connection string in err.message can never reach the response body.
+  app.get("/ready", async (c) => {
+    if (!deps.storeProbe) return c.json({ ready: true }, 200);
+    try {
+      await deps.storeProbe();
+      return c.json({ ready: true }, 200);
+    } catch {
+      return c.json({ ready: false }, 503);
+    }
+  });
 
   // C1 per-resource caller-auth guard. Enforced ONLY when armed (authEnforced +
   // authSecret); otherwise it is a no-op so the in-process money path and the

@@ -1,0 +1,70 @@
+# Utter host deployer (services/deployer/src/server.ts) as a supervised systemd
+# service. The deployer is a BARE HOST process by design: it needs the host Docker
+# daemon + runsc (gVisor) to build and run sandboxed resources, so it is intentionally
+# NOT a compose service (plain Docker is not the security boundary; CLAUDE.md, SPEC 9.5).
+# Without a supervisor it has no restart and no log rotation; when it dies the studio's
+# Deploy step fails with "fetch failed" (see infrastructure/RUNBOOK.md troubleshooting).
+#
+# OPERATOR-GATED: install and `systemctl enable` this ONLY on the provisioned gVisor
+# host. Do NOT enable it on a dev box. No secret lives in this file; every secret comes
+# from /opt/utter/.env.local (gitignored) via EnvironmentFile.
+
+[Unit]
+Description=Utter host deployer (gate-first SSE /deploy on :8788; reconcile loop)
+Documentation=https://app.utter.technology file://infrastructure/RUNBOOK.md
+# It talks to the host Docker daemon, so order it after docker is up.
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=utter
+Group=docker
+# Repo root: server.ts loads .env.local from the working directory and the ts-resolver
+# path in this invocation is repo-root-relative, so WorkingDirectory MUST be the repo root.
+WorkingDirectory=/opt/utter
+# Secrets ONLY here (gitignored). Mandatory (no `-` prefix) so a missing env file fails
+# loud rather than starting open: in production the deployer fails closed without
+# DEPLOYER_AUTH_SECRET (503) and throws at boot without REDIS_URL.
+EnvironmentFile=/opt/utter/.env.local
+# Non-secret operational config (NOT secrets), inline:
+#  - UTTER_SANDBOX_HOST=1 arms resolveDockerHandle (the real dockerode build/run) AND the
+#    host-gated reconcile loop (orphan reap + runaway quarantine + pairnet GC + the
+#    stale-deploying quarantine).
+#  - NODE_ENV=production forces the durability fail-closed (REDIS_URL required).
+Environment=UTTER_SANDBOX_HOST=1
+Environment=NODE_ENV=production
+# Optional knobs an operator may uncomment (defaults shown):
+#Environment=PORT=8788
+#Environment=RECONCILE_INTERVAL_MS=15000
+#Environment=MAX_CONCURRENT_RESOURCES=50
+#Environment=DEPLOY_TIMEOUT_MS=600000
+#Environment=SHUTDOWN_DRAIN_MS=10000
+#Environment=ALERT_WEBHOOK_URL=
+# Exactly the package.json `start` invocation in repo-root form. Use an absolute node
+# path so PATH is irrelevant under systemd; adjust to the host's node (an nvm/Volta shim
+# or /usr/bin/node).
+ExecStart=/usr/bin/node --import ./scripts/ts-resolver.mjs --experimental-strip-types services/deployer/src/server.ts
+Restart=always
+RestartSec=3
+# Give a slow Docker/dockerode connect room before counting a start as failed.
+TimeoutStartSec=60
+# Graceful shutdown: SIGTERM triggers the drain (an in-flight /deploy finishes, the
+# reconcile loop stops, redis closes). Allow more than SHUTDOWN_DRAIN_MS so the drain
+# completes before systemd escalates to SIGKILL.
+TimeoutStopSec=30
+# journald captures stdout/stderr; the server logs only host:port plus non-secret
+# reconcile status as JSON lines (it never logs secrets). Use `journalctl -u utter-deployer`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=utter-deployer
+# Light process hardening. This does NOT replace gVisor: the sandbox boundary is still
+# runsc. Keep Docker socket access, so do NOT add PrivateDevices or restrictive
+# namespaces that would break dockerode.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
