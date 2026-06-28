@@ -6,10 +6,12 @@
 //     production + EITHER URL missing              -> THROWS, naming the missing var (never its value)
 //     dev/test  + neither URL set                  -> in-memory default (unchanged dev default)
 //
-//   the spend-cap guard via buildDepsFromEnv (P1-4):
-//     production + cap ARMED + only in-memory store -> THROWS (free-compute reset vector)
-//     dev/test  + cap ARMED                         -> in-memory spendCapStore wired (no throw)
-//     production + cap NOT armed                    -> no spend-cap throw
+//   the spend-cap guard via buildDepsFromEnv (P1-4, durable Redis adapter now landed):
+//     production + cap ARMED + both URLs set  -> RedisSpendCapStore (durable, no throw)
+//     armed + REDIS_URL set (dev)             -> RedisSpendCapStore
+//     armed + dev + no REDIS_URL              -> in-memory spendCapStore (no throw)
+//     armed + production + no REDIS_URL       -> THROWS (defensive direct-call branch)
+//     production + cap NOT armed              -> no spend-cap throw / no store
 //
 // Fully offline: no real pg/redis query is ever issued. The pg+redis case asserts only
 // by CLASS (instanceof PgRedis*) and disconnects/ends every client it constructs in a
@@ -18,9 +20,15 @@
 // leak NODE_ENV / URLs / cap into siblings.
 import { describe, it, expect, afterEach } from "vitest";
 import { generatePrivateKey } from "viem/accounts";
-import { resolveFacilitatorStores, buildDepsFromEnv } from "../src/server";
+import {
+  resolveFacilitatorStores,
+  buildDepsFromEnv,
+  resolveSpendCapStore,
+} from "../src/server";
 import { createInMemoryStores } from "../src/stores/memory";
 import { PgRedisPaymentStore, PgRedisResultStore } from "../src/stores/pgRedis";
+import { RedisSpendCapStore } from "../src/stores/spend-cap-redis";
+import { InMemorySpendCapStore } from "@utter/data-proxy";
 
 const ENV_KEYS = [
   "NODE_ENV",
@@ -146,6 +154,8 @@ describe("resolveFacilitatorStores + spend-cap guard (production durability fail
 
   // Disconnect/end any pg/redis client a built deps object carries, so the worker has
   // no open handle. A no-op for in-memory deps. Returns the deps for assertions.
+  // AMENDMENT 2: also disconnect the RedisSpendCapStore's ioredis client (the prod +
+  // armed case now builds one) so the worker does not hang on an open handle.
   async function buildAndCleanup(): Promise<ReturnType<typeof buildDepsFromEnv>> {
     const deps = buildDepsFromEnv();
     const store = deps.store as unknown as {
@@ -156,10 +166,19 @@ describe("resolveFacilitatorStores + spend-cap guard (production durability fail
     store?.redis?.disconnect?.();
     await store?.pg?.end?.().catch(() => {});
     await resultStore?.pg?.end?.().catch(() => {});
+    await disconnectSpendCapStore(deps.spendCapStore);
     return deps;
   }
 
-  it("production + spend cap ARMED -> buildDepsFromEnv THROWS the spend-cap message", () => {
+  // Quit the ioredis client a RedisSpendCapStore wraps (via its disconnect()), so a
+  // test that builds one against a non-routable URL leaves no open handle. A no-op for
+  // an in-memory or undefined spend-cap store.
+  async function disconnectSpendCapStore(spendCapStore: unknown): Promise<void> {
+    const s = spendCapStore as { disconnect?: () => Promise<void> } | undefined;
+    await s?.disconnect?.().catch(() => {});
+  }
+
+  it("production + spend cap ARMED + both URLs -> buildDepsFromEnv SUCCEEDS with a RedisSpendCapStore (durable; AMENDMENT 1)", async () => {
     setEnv({
       NODE_ENV: "production",
       RELAYER_SIGNER_KEYS: generatePrivateKey(),
@@ -168,8 +187,56 @@ describe("resolveFacilitatorStores + spend-cap guard (production durability fail
       FACILITATOR_AUTH_SECRET: VALID_AUTH_SECRET,
       SPEND_CAP_PER_PAYER_24H_BASE_UNITS: PER_PAYER_DAY_CAP,
     });
-    // The store branch passes (both URLs set); the throw is the spend-cap guard.
-    expect(() => buildDepsFromEnv()).toThrow(/SPEND_CAP_PER_PAYER_24H_BASE_UNITS/);
+    // The durable Redis adapter now exists, so arming the cap in production no longer
+    // fails closed: it gets a RedisSpendCapStore (production already requires REDIS_URL
+    // via resolveFacilitatorStores, so REDIS_URL is always present here). Build once,
+    // clean up every pg/redis/ioredis client (incl. the spend-cap one), then assert.
+    const deps = await buildAndCleanup();
+    expect(deps.spendCapStore).toBeInstanceOf(RedisSpendCapStore);
+    expect(deps.perPayerDayCap).toBe(BigInt(PER_PAYER_DAY_CAP));
+  });
+
+  it("resolveSpendCapStore(cap, production + no REDIS_URL) -> THROWS (defensive direct-call branch; AMENDMENT 1)", () => {
+    // This branch is unreachable through buildDepsFromEnv (resolveFacilitatorStores
+    // fails first without REDIS_URL in production) but is correct on a direct call.
+    const env = { NODE_ENV: "production" } as NodeJS.ProcessEnv;
+    expect(() => resolveSpendCapStore(BigInt(PER_PAYER_DAY_CAP), env)).toThrow(/REDIS_URL/);
+  });
+
+  it("resolveSpendCapStore never echoes the REDIS_URL value in the thrown error", () => {
+    const env = { NODE_ENV: "production" } as NodeJS.ProcessEnv;
+    try {
+      resolveSpendCapStore(BigInt(PER_PAYER_DAY_CAP), env);
+      throw new Error("expected resolveSpendCapStore to throw");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // It may name REDIS_URL (the missing var) but never a URL value.
+      expect(msg).not.toContain(FAKE_REDIS);
+    }
+  });
+
+  it("resolveSpendCapStore(cap, REDIS_URL set) -> a RedisSpendCapStore (dev; AMENDMENT 1)", async () => {
+    const env = { NODE_ENV: "development", REDIS_URL: FAKE_REDIS } as NodeJS.ProcessEnv;
+    const store = resolveSpendCapStore(BigInt(PER_PAYER_DAY_CAP), env);
+    try {
+      expect(store).toBeInstanceOf(RedisSpendCapStore);
+    } finally {
+      // Disconnect the ioredis client constructed against the non-routable URL.
+      await (store as RedisSpendCapStore | undefined)?.disconnect?.().catch(() => {});
+    }
+  });
+
+  it("resolveSpendCapStore(cap, dev + no REDIS_URL) -> an InMemorySpendCapStore", () => {
+    const env = { NODE_ENV: "development" } as NodeJS.ProcessEnv;
+    const store = resolveSpendCapStore(BigInt(PER_PAYER_DAY_CAP), env);
+    expect(store).toBeInstanceOf(InMemorySpendCapStore);
+  });
+
+  it("resolveSpendCapStore(undefined) -> undefined (unarmed, unchanged)", () => {
+    expect(resolveSpendCapStore(undefined)).toBeUndefined();
+    expect(
+      resolveSpendCapStore(undefined, { NODE_ENV: "production" } as NodeJS.ProcessEnv),
+    ).toBeUndefined();
   });
 
   it("dev + spend cap ARMED -> in-memory spendCapStore wired (no throw)", async () => {
@@ -182,7 +249,7 @@ describe("resolveFacilitatorStores + spend-cap guard (production durability fail
     });
     // No pg/redis client constructed here (dev + no URLs -> in-memory stores).
     const deps = buildDepsFromEnv();
-    expect(deps.spendCapStore).toBeDefined();
+    expect(deps.spendCapStore).toBeInstanceOf(InMemorySpendCapStore);
     expect(deps.perPayerDayCap).toBe(BigInt(PER_PAYER_DAY_CAP));
   });
 
