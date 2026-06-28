@@ -40,6 +40,7 @@ import {
 } from "./live-deploy";
 import { validateSlug } from "./traefik-config";
 import { gateGeneratedBundle, BundleGateError } from "./gate-bundle";
+import { recordDeployment } from "./record-deploy";
 
 loadEnv({ path: ".env.local" });
 
@@ -243,6 +244,10 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       freePaths: b.freePaths,
     };
 
+    // The on-chain resource id, derived with the SAME label-or-slug rule defaultDeploy
+    // uses, so the persisted record's resourceId matches the deployed resource exactly.
+    const resourceId = resourceIdForLabel(b.resourceLabel?.trim() || b.slug);
+
     // (d) STREAM the progress events. The error frame carries err.message ONLY (no stack,
     // no secret). streamSSE closes the stream when the callback returns.
     //
@@ -263,6 +268,18 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
           if (e.phase === "done") sawDone = true;
           enqueue(e);
         });
+        // BEST-EFFORT desired-state persist (only reached when deploy RESOLVED; a deploy
+        // that threw is in the catch and writes no record). The resource is already live,
+        // so a store failure must NOT turn a successful deploy into a reported failure: it
+        // is logged non-secret and the done frame still emits.
+        try {
+          await recordDeployment(deps.stores.deployments, { resourceId, slug: req.slug });
+        } catch (storeErr) {
+          console.error(
+            "deploy succeeded but recording the deployment failed",
+            storeErr instanceof Error ? storeErr.message : storeErr,
+          );
+        }
         if (!sawDone) {
           enqueue({ phase: "done", status: "ok", message: "deploy complete", result });
         }

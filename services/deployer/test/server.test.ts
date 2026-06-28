@@ -275,6 +275,80 @@ describe("POST /deploy happy path + trust boundary (T-ny2-04)", () => {
   });
 });
 
+describe("POST /deploy persists the deployment record (Track A subtask 4)", () => {
+  it("a successful deploy writes a record GET /deployments returns (running, correct slug + derived resourceId)", async () => {
+    const fake = makeFakeDeploy();
+    const app = createDeployerApp({
+      stores: createInMemoryStores(),
+      authSecret: SECRET,
+      deploy: fake,
+    });
+
+    // Before any deploy the read-through is empty.
+    const before = await app.request("/deployments");
+    expect(await before.json()).toEqual([]);
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    // Drain the stream so the best-effort persist (after deploy resolves) has run.
+    await res.text();
+
+    const after = await app.request("/deployments");
+    const records = (await after.json()) as Array<{
+      slug: string;
+      resourceId: string;
+      status: string;
+      deployVersion: number;
+    }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.slug).toBe("gen");
+    expect(records[0]!.status).toBe("running");
+    expect(records[0]!.deployVersion).toBe(1);
+    // The persisted resourceId is the SAME derivation defaultDeploy uses (label over slug).
+    expect(records[0]!.resourceId).toBe(resourceIdForLabel("gen-label"));
+  });
+
+  it("a deploy that THROWS writes no record and still streams the error frame", async () => {
+    const fake = vi.fn(async (): Promise<LiveDeployResult> => {
+      throw new Error("simulated deploy failure");
+    });
+    const app = createDeployerApp({
+      stores: createInMemoryStores(),
+      authSecret: SECRET,
+      deploy: fake,
+    });
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    const events = await readSseEvents(res);
+    expect(events.some((e) => e.status === "error")).toBe(true);
+
+    // No record was written for the failed deploy.
+    const after = await app.request("/deployments");
+    expect(await after.json()).toEqual([]);
+  });
+
+  it("a store.put failure on a successful deploy still streams done (best-effort persist)", async () => {
+    const fake = makeFakeDeploy();
+    const stores = createInMemoryStores();
+    // Make the desired-state put throw to simulate a store-layer failure.
+    stores.deployments.put = vi.fn(async () => {
+      throw new Error("store unavailable");
+    });
+    const app = createDeployerApp({ stores, authSecret: SECRET, deploy: fake });
+
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    const events = await readSseEvents(res);
+    // The deploy still completes: the terminal done frame is present despite the store error.
+    const last = events.at(-1)!;
+    expect(last.phase).toBe("done");
+    expect(last.status).toBe("ok");
+    // No error frame: a store failure is best-effort, not a deploy failure.
+    expect(events.some((e) => e.status === "error")).toBe(false);
+  });
+});
+
 describe("POST /deploy error frame (T-ny2-06)", () => {
   it("(f) a rejecting deploy emits an error frame and leaks no secret/stack", async () => {
     const fake = vi.fn(async (): Promise<LiveDeployResult> => {
