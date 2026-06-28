@@ -47,6 +47,12 @@ export interface MarketplaceAppDeps {
    * boot is byte-unchanged.
    */
   storesClose?: () => Promise<void>;
+  /**
+   * Readiness probe for GET /ready (a cheap SELECT 1 over the durable pg pool). When set
+   * /ready resolves it; a throw becomes a value-free 503. Undefined for the in-memory
+   * default, where /ready always reports ready (the autonomous suite stays green).
+   */
+  storeProbe?: () => Promise<void>;
 }
 
 /**
@@ -142,6 +148,11 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
    * Undefined for the in-memory branch (nothing to close), so dev/test boot is unchanged.
    */
   close?: () => Promise<void>;
+  /**
+   * Readiness probe (a cheap SELECT 1 over the durable pg pool), threaded to GET /ready.
+   * Undefined for the in-memory branch, where /ready always reports ready in dev/test.
+   */
+  probe?: () => Promise<void>;
 } {
   const databaseUrl = (env.DATABASE_URL ?? "").trim();
   if (databaseUrl.length > 0) {
@@ -158,6 +169,8 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
     indexStore: new InMemoryIndexStore(),
     cardStore: new InMemoryCardStore(),
     moderationStore: new InMemoryModerationStore(),
+    // The in-memory backend is always reachable, so /ready reports ready in dev/test.
+    probe: async () => {},
   };
 }
 
@@ -170,7 +183,8 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
  * createCardApp serves as a 404; a published resource resolves its finalized card.
  */
 export function buildDepsFromEnv(): MarketplaceAppDeps {
-  const { indexStore, cardStore, moderationStore, close } = resolveMarketplaceStores(process.env);
+  const { indexStore, cardStore, moderationStore, close, probe } =
+    resolveMarketplaceStores(process.env);
   const cardSource: CardSource = {
     async getCard(resourceId) {
       // Serve the FINALIZED card the publish pipeline persisted to the CardStore. The
@@ -192,6 +206,8 @@ export function buildDepsFromEnv(): MarketplaceAppDeps {
     publishAuthSecret: process.env.MARKETPLACE_AUTH_SECRET,
     // Undefined for the in-memory branch (no close), so dev/test boot is byte-unchanged.
     storesClose: close,
+    // The readiness probe (durable: a SELECT 1; in-memory: a resolving no-op).
+    storeProbe: probe,
   };
 }
 
@@ -206,6 +222,23 @@ export function createMarketplaceApp(deps: MarketplaceAppDeps): Hono {
   const app = new Hono();
 
   app.get("/health", (c) => c.json({ ok: true, service: "marketplace" }));
+
+  // GET /ready - the store-aware readiness probe (a cheap SELECT 1 over the durable pg
+  // pool). It returns 200 {ready:true} only when the backend is reachable, 503
+  // {ready:false} when the probe throws, and 200 {ready:true} when no probe is wired
+  // (the in-memory dev/test default), so local up and the autonomous suite stay green.
+  // The 503 path is VALUE-FREE: the catch swallows the error so a connection string in
+  // err.message can never reach the response body. Registered BEFORE the createCardApp
+  // mount (mirroring /resources) so the card catch-all never shadows it.
+  app.get("/ready", async (c) => {
+    if (!deps.storeProbe) return c.json({ ready: true }, 200);
+    try {
+      await deps.storeProbe();
+      return c.json({ ready: true }, 200);
+    } catch {
+      return c.json({ ready: false }, 503);
+    }
+  });
 
   app.get("/resources", async (c) => {
     // Read only the known discovery criteria. bigint criteria are token base units

@@ -53,6 +53,14 @@ services:
     image: redis:7
     restart: unless-stopped
     networks: [redisnet]
+    # Readiness healthcheck so dependents can gate on redis being reachable, not merely
+    # started. redis-cli ships in the redis:7 image (unlike node:slim, which has no
+    # curl/wget), so a plain `redis-cli ping` is the cheap liveness probe here.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # The allowlisted egress proxy (PRX-01/PRX-02) - the ONLY permitted egress from
   # a sandboxed resource. It joins proxynet (the handler's sole data-plane peer)
@@ -75,7 +83,8 @@ services:
       upstreamnet: {}
       redisnet: {}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       # HMAC secret for the scoped JWT. EMPTY here; real value in .env.local only.
       - DATA_PROXY_TOKEN_SECRET=${DATA_PROXY_TOKEN_SECRET:-}
@@ -104,6 +113,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Compose-level readiness healthcheck (this block, NOT the image HEALTHCHECK, is what
+    # `condition: service_healthy` reads). node:22-bookworm-slim has no curl/wget, so the
+    # probe is `node -e` + the global fetch against GET /ready (store-aware): healthy only
+    # when the durable backends are reachable. start_period covers the boot window.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     environment:
       # Settlement relayer key(s). EMPTY here; real value in .env.local only, passed via --env-file.
       - RELAYER_SIGNER_KEYS=${RELAYER_SIGNER_KEYS:-}
@@ -145,9 +164,15 @@ services:
     networks: [ingress, controlplane, upstreamnet]
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Gate studio startup on the facilitator + marketplace being READY (store-aware
+    # service_healthy), not merely started, so the studio cannot accept a deploy before
+    # those control-plane services can reach their durable backends. service_healthy
+    # reads each service's compose healthcheck block above.
     depends_on:
-      - facilitator
-      - marketplace
+      facilitator:
+        condition: service_healthy
+      marketplace:
+        condition: service_healthy
     environment:
       # Production forces session.server.ts to require a >=32-char SESSION_SECRET.
       - NODE_ENV=production
@@ -218,6 +243,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Compose-level readiness healthcheck (this block, NOT the image HEALTHCHECK, is what
+    # `condition: service_healthy` reads). node:22-bookworm-slim has no curl/wget, so the
+    # probe is `node -e` + the global fetch against GET /ready (store-aware): healthy only
+    # when the durable backend is reachable. start_period covers the boot window.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8789/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     environment:
       # The marketplace HTTP port (server.ts default is 8789; set explicitly).
       - PORT=8789

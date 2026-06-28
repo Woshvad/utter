@@ -337,6 +337,9 @@ export function buildDepsFromEnv(): AppDeps {
     // Teardown-only: the durable stores' close (pg.end + redis.quit), threaded to
     // graceful shutdown. Undefined for the in-memory default. NO route reads it.
     storesClose: stores.close,
+    // The readiness probe (durable: a SELECT 1 + PING; in-memory: a resolving no-op),
+    // read only by GET /ready.
+    storeProbe: stores.probe,
   };
 }
 

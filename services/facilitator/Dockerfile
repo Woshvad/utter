@@ -30,6 +30,13 @@ RUN pnpm install --frozen-lockfile
 
 EXPOSE 8787
 
+# Container HEALTHCHECK over GET /ready (store-aware readiness). node:22-bookworm-slim
+# ships NEITHER curl NOR wget, so the probe uses `node -e` + the global fetch: exit 0
+# when /ready is 200 (stores reachable), exit 1 otherwise. The start-period covers the
+# pnpm-resolve + boot window. (The compose-level healthcheck block is what
+# `condition: service_healthy` reads; this image HEALTHCHECK is the standalone-run one.)
+HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=3 CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # Run the service the same way the start script does: native Node + the
 # ts-resolver --import hook + --experimental-strip-types, pointed at the
 # facilitator server entrypoint. The path is repo-root relative (the WORKDIR).

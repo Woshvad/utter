@@ -205,6 +205,25 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
 
   app.get("/health", (c) => c.json({ ok: true, service: "deployer" }));
 
+  // GET /ready - the store-aware readiness probe. The deployer is a HOST process (no
+  // Dockerfile, no compose service), so it gets no image HEALTHCHECK; instead the host
+  // supervisor (systemd) should health-probe http://127.0.0.1:8788/ready to gate the
+  // deployer behind store reachability. It returns 200 {ready:true} only when the
+  // durable store is reachable, 503 {ready:false} when the probe throws, and 200
+  // {ready:true} when no probe is wired (the in-memory dev/test default), so local up
+  // and the autonomous suite stay green. The 503 path is VALUE-FREE: the catch swallows
+  // the error so a connection string in err.message can never reach the response body.
+  app.get("/ready", async (c) => {
+    const probe = deps.stores.probe;
+    if (!probe) return c.json({ ready: true }, 200);
+    try {
+      await probe();
+      return c.json({ ready: true }, 200);
+    } catch {
+      return c.json({ ready: false }, 503);
+    }
+  });
+
   app.get("/deployments", async (c) => {
     const records = await deps.stores.deployments.list();
     // bigint cap is not JSON-serializable; surface it as a base-units string so the

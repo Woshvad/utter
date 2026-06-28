@@ -234,6 +234,12 @@ export function createPgStores(opts: PgStoresOptions): {
    * and moderation stores share it). Called only after the request drain completes.
    */
   close: () => Promise<void>;
+  /**
+   * Readiness probe for GET /ready: a cheap read-only SELECT 1 over the same pg pool the
+   * stores use. It never writes and never touches the resources/cards/moderation tables,
+   * so it cannot perturb route logic; a throw here turns /ready into a value-free 503.
+   */
+  probe: () => Promise<void>;
 } {
   const pg = new Pool({ connectionString: opts.databaseUrl });
   return {
@@ -242,6 +248,9 @@ export function createPgStores(opts: PgStoresOptions): {
     moderationStore: new PgModerationStore(pg),
     close: async () => {
       await pg.end();
+    },
+    probe: async () => {
+      await pg.query("SELECT 1");
     },
   };
 }

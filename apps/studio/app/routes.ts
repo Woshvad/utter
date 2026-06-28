@@ -26,6 +26,7 @@ export default [
   route("auth", "routes/auth.tsx"),
   // Resource routes (loader-only, no UI): the Prometheus exposition and the SSE
   // build-stream. They carry no shell and sit at distinct path segments.
+  route("health", "routes/health.ts"),
   route("metrics", "routes/metrics.ts"),
   route("resources/:id/events", "routes/resources.$id.events.ts"),
   route("resources/:id/run", "routes/resources.$id.run.ts"),

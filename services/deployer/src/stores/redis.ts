@@ -232,5 +232,11 @@ export function createRedisStores(opts: RedisStoreOptions): DeployerStores {
     close: async () => {
       await redis.quit();
     },
+    // Readiness probe for GET /ready: a cheap read-only PING over the same redis client
+    // the stores use. It never writes and never touches the deployment records, so it
+    // cannot perturb deploy/cache logic; a throw here turns /ready into a value-free 503.
+    probe: async () => {
+      await redis.ping();
+    },
   };
 }

@@ -316,5 +316,13 @@ export function createPgRedisStores(opts: PgRedisOptions): FacilitatorStores {
       await pg.end();
       await redis.quit();
     },
+    // Readiness probe for GET /ready: a cheap read-only SELECT 1 + PING over the same
+    // pg/redis clients the stores use. It never writes and never touches the
+    // payments/results/revenue tables, so it cannot perturb the money path; a throw
+    // here turns /ready into a value-free 503.
+    probe: async () => {
+      await pg.query("SELECT 1");
+      await redis.ping();
+    },
   };
 }
