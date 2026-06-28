@@ -133,6 +133,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - facilitator
+      - marketplace
     environment:
       # Production forces session.server.ts to require a >=32-char SESSION_SECRET.
       - NODE_ENV=production
@@ -147,10 +148,10 @@ services:
       # Bearer secret for POST /deploy. EMPTY here; real value in .env.local only.
       - DEPLOYER_AUTH_SECRET=${DEPLOYER_AUTH_SECRET:-}
       # The marketplace service the studio lists a deployed resource in (POST /resources).
-      # EMPTY disables the marketplace listing (the studio keeps its local-index Publish
-      # stage). The marketplace is not yet a compose service; point this at the running
-      # marketplace host once provisioned.
-      - MARKETPLACE_URL=${MARKETPLACE_URL:-}
+      # Defaults to the in-compose marketplace service on the shared controlplane net, so
+      # the discovery loop works with no operator config; an explicit env override still
+      # wins (e.g. a non-compose marketplace host). EMPTY disables the marketplace listing.
+      - MARKETPLACE_URL=${MARKETPLACE_URL:-http://marketplace:8789}
       # Shared Bearer for POST /resources. EMPTY here; real value in .env.local only. It
       # must match the marketplace service's own MARKETPLACE_AUTH_SECRET.
       - MARKETPLACE_AUTH_SECRET=${MARKETPLACE_AUTH_SECRET:-}
@@ -175,6 +176,36 @@ services:
       # Model used for generation. Defaults to the cheapest proven-to-pass-the-gates
       # model; override to claude-sonnet-4-6 or claude-opus-4-8 in .env.local.
       - DEFAULT_MODEL=${DEFAULT_MODEL:-claude-haiku-4-5-20251001}
+
+  # The trusted agent-facing marketplace (A2A card + discovery API). A first-party
+  # platform control-plane service, NOT the gVisor untrusted boundary. It joins
+  # ingress (Traefik routes to it over the shared ingress net via
+  # dynamic/marketplace.yml, so external agents can fetch deployed-resource cards +
+  # /resources discovery) and controlplane (where the studio reaches it at
+  # marketplace:8789 to POST a deployed resource). It is NEVER on edge, proxynet,
+  # redisnet, or upstreamnet, so it cannot weaken the resource-plane or money-path
+  # isolation, and it publishes no host port (Traefik fronts the public surface;
+  # the studio reaches it on the internal controlplane net). Its publish endpoint
+  # is Bearer-gated (fail-closed) so public Traefik exposure is safe; GET /resources
+  # and the card route are intentionally public for agent discovery. All
+  # secret-bearing env defaults to empty here; real values are supplied via
+  # --env-file .env.local.
+  marketplace:
+    build:
+      context: ..
+      dockerfile: apps/marketplace/Dockerfile
+    restart: unless-stopped
+    networks: [ingress, controlplane]
+    environment:
+      # The marketplace HTTP port (server.ts default is 8789; set explicitly).
+      - PORT=8789
+      # Durable index/card/moderation store. EMPTY here; real value in .env.local
+      # only. resolveMarketplaceStores fails closed in production without it.
+      - DATABASE_URL=${DATABASE_URL:-}
+      # The shared Bearer the studio presents to POST /resources. EMPTY here; real
+      # value in .env.local only. It must match the studio's MARKETPLACE_AUTH_SECRET.
+      - MARKETPLACE_AUTH_SECRET=${MARKETPLACE_AUTH_SECRET:-}
+      - NODE_ENV=${NODE_ENV:-}
 
   # Internal pull-through npm registry mirror (SBX-05). DEV-ONLY build tooling: it
   # stays OFF all six networks (it is on the compose default project net), so it is

@@ -1,0 +1,54 @@
+# The marketplace edge router. Operator-managed STATIC dynamic config.
+#
+# This file is hand-maintained by the operator, distinct from the per-resource
+# <slug>.yml files the deployer generates into this same directory. Traefik
+# hot-loads it through the existing file provider (traefik.yml providers.file,
+# watch: true), so adding it needs no Traefik restart.
+#
+# The router fronts the trusted marketplace container at
+# Host(marketplace.utter.technology). The `marketplace` host is RESERVED for the
+# marketplace and must NOT be used as a resource slug (like `app`), or the deployer
+# would generate a conflicting router for the same host. This route is what makes
+# deployed resources' agent cards + /resources discovery reachable by external
+# agents.
+#
+# Operator prerequisites: create a DNS A record marketplace.utter.technology -> the
+# host public IP, and keep the Namecheap creds (NAMECHEAP_API_USER /
+# NAMECHEAP_API_KEY) in .env.local so the le DNS-01 resolver can issue the cert.
+# Traefik derives the cert domain from the Host rule, so no wildcard SAN is needed
+# for this router.
+http:
+  routers:
+    # The marketplace over HTTPS. websecure + the le DNS-01 resolver terminate TLS.
+    marketplace:
+      rule: "Host(`marketplace.utter.technology`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: le
+      service: marketplace
+
+    # Plain HTTP for the same host redirects to HTTPS. No insecure entrypoint
+    # serves the marketplace.
+    marketplace-web:
+      rule: "Host(`marketplace.utter.technology`)"
+      entryPoints:
+        - web
+      middlewares:
+        - marketplace-https-redirect
+      service: marketplace
+
+  middlewares:
+    # Permanent redirect of plain http to https for the marketplace host.
+    marketplace-https-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+  services:
+    # Traefik resolves the compose service name `marketplace` over the shared
+    # ingress network via Docker embedded DNS; the container listens on PORT 8789.
+    marketplace:
+      loadBalancer:
+        servers:
+          - url: "http://marketplace:8789"

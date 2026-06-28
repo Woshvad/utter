@@ -566,6 +566,47 @@ container could not reach the deployer host process at all. Work through:
    env and the deployer host process env, or POST /deploy returns 401/503 (that
    shows as an HTTP error in the stream, not "fetch failed").
 
+## Host the marketplace (agent discovery)
+
+These steps put the Utter marketplace behind the existing Traefik at
+https://marketplace.utter.technology with automatic TLS, so external agents can
+discover deployed resources and fetch their agent cards, and so the studio's
+publish step lists each deployed resource in-compose. The marketplace is a trusted
+control-plane service placed on ingress + controlplane only; it never joins edge,
+proxynet, redisnet, or upstreamnet, so it does not weaken the resource or
+money-path isolation. Its publish endpoint is Bearer-gated (fail-closed); GET
+/resources and the card route are intentionally public for agent discovery.
+
+1. DNS. Create a DNS A record `marketplace.utter.technology` pointing at the host
+   public IP. Traefik derives the cert domain from the router Host rule, so a single
+   A record is enough; no wildcard SAN is needed for this host. The `marketplace`
+   host is reserved and must not be used as a resource slug.
+
+2. Secrets in .env.local. Ensure `.env.local` (gitignored, never committed) has:
+   - `MARKETPLACE_AUTH_SECRET` the shared Bearer the studio presents to the
+     marketplace POST /resources endpoint. Use the SAME value for the studio and the
+     marketplace; the studio reads the same `MARKETPLACE_AUTH_SECRET`.
+   - `DATABASE_URL` the durable index/card/moderation store. The production
+     marketplace fails closed without it (resolveMarketplaceStores refuses an
+     in-memory store in production).
+   - `NAMECHEAP_API_USER` and `NAMECHEAP_API_KEY` the same DNS-01 credentials the
+     wildcard cert already uses, so the le resolver can issue the marketplace cert.
+
+3. Build and bring up only the marketplace:
+   `docker compose -f infrastructure/docker-compose.yml --env-file .env.local up -d --build marketplace`
+   Traefik picks up `dynamic/marketplace.yml` through the file provider with no
+   restart and issues the cert on the first request, which can take a few seconds.
+
+4. Verify. Run `curl -I https://marketplace.utter.technology/health`, expecting a
+   200 with a valid Let's Encrypt cert. The very first request may briefly 404 or
+   show a cert-pending state while ACME completes; retry after a few seconds. After
+   a real create in the studio, the resource card is fetchable at
+   `https://marketplace.utter.technology/<resourceId>/.well-known/agent-card.json`.
+
+The studio now reaches the marketplace at `http://marketplace:8789` by default over
+the shared controlplane net, so no `MARKETPLACE_URL` override is needed in compose;
+set `MARKETPLACE_URL` only to point the studio at a non-compose marketplace host.
+
 ## Enable real AI generation
 
 This turns the studio Generate step from the deterministic scaffold generator into
