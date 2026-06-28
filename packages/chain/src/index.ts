@@ -5,6 +5,11 @@
 // Chain object + public client factory
 export { arcTestnet, createArcPublicClient } from "./arc";
 
+// The single source of truth for the Arc chain id + CAIP-2 network, both derived
+// from arcTestnet.id. The identity/card path imports these instead of re-typing
+// 5042002 / eip155:5042002, so a mainnet cut to arcTestnet.id reflows everywhere.
+export { ARC_CHAIN_ID, ARC_CAIP2_NETWORK } from "./arc";
+
 // Wallet (write-path) client factory for the relayer signer pool (Phase 2)
 export { createArcWalletClient } from "./wallet";
 

@@ -18,7 +18,7 @@
 // Phase 3/5 inject the finals.
 import Ajv, { type ValidateFunction } from "ajv";
 import addFormats from "ajv-formats";
-import { USDC, PAYMENT_ESCROW } from "@utter/chain";
+import { USDC, PAYMENT_ESCROW, ARC_CHAIN_ID, ARC_CAIP2_NETWORK } from "@utter/chain";
 import type { ResourceSpec } from "./types.js";
 
 /** The A2A protocol version this builder targets (the last flat-shape release). */
@@ -67,8 +67,8 @@ export function buildAgentCard(spec: ResourceSpec): Record<string, unknown> {
     // The Utter x402 payment block. asset/escrow from @utter/chain (never literal).
     x402: {
       scheme: "utter-escrow",
-      network: "eip155:5042002",
-      chainId: 5042002,
+      network: ARC_CAIP2_NETWORK,
+      chainId: ARC_CHAIN_ID,
       asset: USDC,
       escrow: PAYMENT_ESCROW,
       pricing: spec.pricing,
@@ -77,7 +77,7 @@ export function buildAgentCard(spec: ResourceSpec): Record<string, unknown> {
     },
     cache: { ttlSeconds: 30 },
     // Phase 5 placeholders - identity mint / health scorer / staking bond.
-    identity: { standard: "erc-8004", chainId: 5042002, agentId: "placeholder" },
+    identity: { standard: "erc-8004", chainId: ARC_CHAIN_ID, agentId: "placeholder" },
     health: { verified: false, score: null },
     bond: { posted: false },
   };
@@ -141,8 +141,8 @@ const A2A_V030_CARD_SCHEMA = {
       required: ["scheme", "network", "chainId", "asset", "escrow", "pricing"],
       properties: {
         scheme: { type: "string", const: "utter-escrow" },
-        network: { type: "string", const: "eip155:5042002" },
-        chainId: { type: "integer", const: 5042002 },
+        network: { type: "string", const: ARC_CAIP2_NETWORK },
+        chainId: { type: "integer", const: ARC_CHAIN_ID },
         asset: { type: "string" },
         escrow: { type: "string" },
         pricing: { type: "object" },

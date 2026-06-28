@@ -14,6 +14,7 @@
 //     registries AND REGISTRY_ADMIN_PRIVATE_KEY are set (operator-gated, undeployed on
 //     testnet). The live paths are offline-tested via injected mocks only.
 import { KeywordModerator } from "./moderation/classifier.js";
+import { ARC_CHAIN_ID } from "@utter/chain";
 import { selectProber } from "@utter/ai-scorer";
 import { resolveBondGate, resolveIdentity } from "./live-deps.js";
 import type { CardStore } from "./card-store.js";
@@ -58,7 +59,7 @@ export function createDeferredIdentity(): PipelineIdentity {
         identity: {
           ...prevIdentity,
           standard: "erc-8004",
-          chainId: 5042002,
+          chainId: ARC_CHAIN_ID,
           // The in-card agentId is the STRING form (mirrors the finalized-card shape).
           agentId: agentId.toString(),
         },

@@ -19,7 +19,7 @@
 // operator-gated; the autonomous proof injects a mock client + admin and runs the
 // REAL validateAgentCard.
 import { numberToHex, type Address, type Hex, type PublicClient, type WalletClient } from "viem";
-import { registryAbi } from "@utter/chain";
+import { registryAbi, ARC_CHAIN_ID } from "@utter/chain";
 import { validateAgentCard } from "@utter/ai-runtime";
 import type { Erc8004Client } from "./client.js";
 
@@ -144,7 +144,7 @@ export async function publishIdentity(
     identity: {
       ...prevIdentity,
       standard: "erc-8004",
-      chainId: 5042002,
+      chainId: ARC_CHAIN_ID,
       agentId: agentId.toString(),
     },
   };
