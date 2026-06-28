@@ -72,6 +72,71 @@ export function resolveAuthConfig(): { authSecret?: string; authEnforced: boolea
   return { authSecret: fromEnv as string, authEnforced: true };
 }
 
+/**
+ * Resolve the facilitator stores from the environment (P0-5). Mirrors
+ * resolveAuthConfig's fail-closed style.
+ *
+ * When BOTH DATABASE_URL and REDIS_URL are set (non-empty after trim) the real
+ * Postgres+Redis adapter is used. In production an incomplete durable config
+ * FAILS CLOSED at boot: the facilitator's reservations, the exactly-once result
+ * cache, and the strike counter MUST be durable, since an in-memory store loses
+ * live reservations + the exactly-once guard on restart. In dev/test (at least
+ * one URL missing, NODE_ENV not "production") the in-memory default is used so the
+ * autonomous suite needs no pg/redis. The thrown error is VALUE-FREE: it names
+ * which var is missing but NEVER echoes DATABASE_URL / REDIS_URL.
+ */
+export function resolveFacilitatorStores(): FacilitatorStores {
+  const databaseUrl = (process.env.DATABASE_URL ?? "").trim();
+  const redisUrl = (process.env.REDIS_URL ?? "").trim();
+
+  if (databaseUrl.length > 0 && redisUrl.length > 0) {
+    return createPgRedisStores({ databaseUrl, redisUrl });
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    // Fail loud. Name the missing var(s); never echo the values.
+    const missing: string[] = [];
+    if (databaseUrl.length === 0) missing.push("DATABASE_URL");
+    if (redisUrl.length === 0) missing.push("REDIS_URL");
+    throw new Error(
+      `set ${missing.join(" and ")} in production: the facilitator's reservations, ` +
+        "exactly-once result cache, and strike counter must be durable; an in-memory " +
+        "store loses live reservations and the exactly-once guard on restart.",
+    );
+  }
+
+  return createInMemoryStores();
+}
+
+/**
+ * Resolve the per-payer spend-cap store from the environment (P1-4). Mirrors
+ * resolveAuthConfig's fail-closed style.
+ *
+ * When the cap is ARMED (perPayerDayCap !== undefined) in production this FAILS
+ * CLOSED: the in-memory store resets the rolling-24h window on restart, a
+ * free-compute reset vector. In dev/test an armed cap uses the in-memory store
+ * exactly as before. When the cap is NOT armed (the default) no store is built and
+ * no error is thrown, so the unarmed path is unchanged. The thrown error is
+ * VALUE-FREE. P1-4 FOLLOW-UP: a Redis-backed SpendCapStore adapter (the contract
+ * already exists in @utter/data-proxy) will let the spend cap be armed in
+ * production; until it lands, arming the cap in production fails closed here.
+ */
+export function resolveSpendCapStore(perPayerDayCap: bigint | undefined): SpendCapStore | undefined {
+  if (perPayerDayCap === undefined) return undefined;
+
+  if (process.env.NODE_ENV === "production") {
+    // Fail loud. The message names no secret/value (the cap is the only input).
+    throw new Error(
+      "arming SPEND_CAP_PER_PAYER_24H_BASE_UNITS in production requires a durable " +
+        "Redis-backed spend-cap store; the in-memory store resets the rolling-24h " +
+        "window on restart, a free-compute reset vector. The Redis SpendCapStore adapter " +
+        "is a tracked follow-up; do not arm the spend cap in production until it lands.",
+    );
+  }
+
+  return new InMemorySpendCapStore();
+}
+
 /** Build the route deps from the environment (fail-fast on missing required env). */
 export function buildDepsFromEnv(): AppDeps {
   const relayerKeys = parseRelayerKeys(process.env.RELAYER_SIGNER_KEYS);
@@ -91,29 +156,25 @@ export function buildDepsFromEnv(): AppDeps {
   const publicClient = createArcPublicClient(rpcUrl) as PublicClient;
   const relayerPool = createRelayerPool(relayerKeys, rpcUrl, { publicClient });
 
-  // Store selection: real pg+redis when both URLs are set, else the in-memory default.
-  const databaseUrl = process.env.DATABASE_URL;
-  const redisUrl = process.env.REDIS_URL;
-  const stores: FacilitatorStores =
-    databaseUrl && redisUrl
-      ? createPgRedisStores({ databaseUrl, redisUrl })
-      : createInMemoryStores();
+  // Store selection (P0-5): real pg+redis when both URLs are set; fail-closed in
+  // production when the durable config is incomplete; in-memory default in dev/test.
+  const stores: FacilitatorStores = resolveFacilitatorStores();
 
   // CR-01: per-payer rolling-24h spend cap. EMPTY by default (no env -> no cap -> the
   // gate is NOT armed and /verify behaves exactly as before). Set the DOCUMENTED
   // SPEND_CAP_PER_PAYER_24H_BASE_UNITS (a USDC base-unit integer, the name in
   // .env.example) to arm the deny-by-default free-compute guard; SPEND_CAP_PER_PAYER_DAY
-  // is kept as a back-compat fallback for older .env.local files. The store is the
-  // in-memory default; a Redis-backed SpendCapStore drops in behind the same contract
-  // when REDIS_URL is configured (operator wiring).
+  // is kept as a back-compat fallback for older .env.local files.
   const perPayerDayCapRaw =
     process.env.SPEND_CAP_PER_PAYER_24H_BASE_UNITS ?? process.env.SPEND_CAP_PER_PAYER_DAY;
   const perPayerDayCap =
     perPayerDayCapRaw && perPayerDayCapRaw.trim().length > 0
       ? BigInt(perPayerDayCapRaw.trim())
       : undefined;
-  const spendCapStore: SpendCapStore | undefined =
-    perPayerDayCap !== undefined ? new InMemorySpendCapStore() : undefined;
+  // P1-4: the in-memory spend-cap store is fail-closed in production (an armed cap on
+  // an ephemeral store is a free-compute reset vector). The Redis SpendCapStore adapter
+  // is the remaining follow-up that will let the spend cap be armed in production.
+  const spendCapStore: SpendCapStore | undefined = resolveSpendCapStore(perPayerDayCap);
 
   // CR-02: the min-economical batching threshold. EMPTY by default (no env -> no
   // batching -> /settle settles immediately as before). Set MIN_ECONOMICAL_AMOUNT (a
@@ -135,8 +196,10 @@ export function buildDepsFromEnv(): AppDeps {
 
   // Per-resource revenue ledger for the studio dashboard (STU-04). DELIBERATELY the
   // in-memory adapter: revenue aggregation is process-local for this increment, so it
-  // resets on restart. A durable pg/redis-backed RevenueLedger (surviving restarts) is
-  // an explicit LATER increment, wired behind the same RevenueLedger contract.
+  // resets on restart. P2 FOLLOW-UP: a durable pg/redis-backed RevenueLedger (surviving
+  // restarts) is an explicit LATER increment, wired behind the same RevenueLedger
+  // contract. It is display-only aggregation (not the money path), so it is left as-is
+  // here and not gated by the production fail-closed checks above.
   const revenueLedger = new InMemoryRevenueLedger();
 
   return {
