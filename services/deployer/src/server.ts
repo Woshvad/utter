@@ -33,6 +33,7 @@ import { streamSSE } from "hono/streaming";
 import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { createInMemoryStores } from "./stores/memory";
 import type { DeployerStores } from "./stores/memory";
+import { createRedisStores } from "./stores/redis";
 import {
   deployGatedBundle,
   type DeployProgressEvent,
@@ -136,15 +137,45 @@ function bearerMatches(authHeader: string | undefined, secret: string): boolean 
 }
 
 /**
- * Build the deployer route deps from the environment. The autonomous/dev default is
- * the in-memory stores (no Redis, no dockerode, no secrets) - the SAME contract the
- * future Redis adapter implements, so this swaps by env without touching routes. The
- * deploy function is left undefined so the route uses defaultDeploy; authSecret reads
+ * Resolve the deployer stores from the environment, fail-closed on durability in
+ * production (mirrors the facilitator's resolveAuthConfig fail-closed style).
+ *
+ * REDIS_URL set + non-empty -> the durable Redis-backed adapter (the deployment
+ * records that drive the reconcile loop AND the M5 slug-uniqueness reverse index
+ * survive a restart). Otherwise, in production we THROW at boot: an in-memory store
+ * loses every record + the M5 guard on restart, so silently running ephemeral in
+ * prod is a correctness/security regression (a freed slug could be re-allocated to a
+ * different resourceId, re-opening the cross-tenant pairnet co-tenancy HIGH). In
+ * dev/test (NODE_ENV !== "production") the in-memory adapter stays the default so the
+ * autonomous suite needs no Redis. REDIS_URL may carry credentials and is NEVER
+ * logged or echoed in the error.
+ */
+export function resolveDeployerStores(env: NodeJS.ProcessEnv): DeployerStores {
+  const redisUrl = (env.REDIS_URL ?? "").trim();
+  if (redisUrl.length > 0) {
+    return createRedisStores({ redisUrl });
+  }
+  if (env.NODE_ENV === "production") {
+    throw new Error(
+      "REDIS_URL must be set in production: the deployer's deployment records and " +
+        "the M5 slug-uniqueness guard must be durable; an in-memory store loses " +
+        "every record and the guard on restart.",
+    );
+  }
+  return createInMemoryStores();
+}
+
+/**
+ * Build the deployer route deps from the environment. Stores come from
+ * resolveDeployerStores (Redis when REDIS_URL is set; in-memory dev/test default;
+ * fail-closed in production with no REDIS_URL) - the SAME contract either adapter
+ * implements, so this swaps by env without touching routes. The deploy function is
+ * left undefined so the route uses defaultDeploy; authSecret reads
  * DEPLOYER_AUTH_SECRET (never hardcoded; absent -> POST /deploy fails closed).
  */
 export function buildDepsFromEnv(): DeployerAppDeps {
   return {
-    stores: createInMemoryStores(),
+    stores: resolveDeployerStores(process.env),
     authSecret: process.env.DEPLOYER_AUTH_SECRET,
   };
 }
