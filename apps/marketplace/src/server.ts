@@ -22,6 +22,7 @@ import { InMemoryIndexStore } from "./index-store";
 import { InMemoryCardStore } from "./card-store";
 import { createPgStores } from "./stores/pg";
 import { InMemoryModerationStore } from "./moderation/review-queue";
+import type { ModerationStore } from "./moderation/review-queue";
 import { createPublishPipeline, PublishBlocked, PublishHeldForReview, PublishUnverified } from "./publish";
 import { createPublishPipelineDeps } from "./publish-deps";
 import type { CardSource } from "./card-route";
@@ -111,20 +112,24 @@ function parsePublishRequest(body: unknown): PublishRequest | null {
 }
 
 /**
- * Resolve the marketplace index + card stores from the environment, fail-closed on
- * durability in production (mirrors the deployer's resolveDeployerStores style).
+ * Resolve the marketplace index + card + moderation stores from the environment,
+ * fail-closed on durability in production (mirrors the deployer's resolveDeployerStores
+ * style).
  *
  * DATABASE_URL set + non-empty -> the durable Postgres-backed adapters (the discovery
- * index AND the served finalized cards survive a restart, so a deployed resource never
- * silently drops out of agent discovery). Otherwise, in production we THROW at boot: an
- * in-memory store loses every listing + served card on restart, so silently running
- * ephemeral in prod is a correctness regression. In dev/test (NODE_ENV !== "production")
- * the in-memory adapters stay the default so the autonomous suite needs no Postgres.
- * DATABASE_URL may carry credentials and is NEVER logged or echoed in the error.
+ * index, the served finalized cards, AND the moderation decision log + review queue all
+ * survive a restart, so a deployed resource never silently drops out of agent discovery
+ * and a held-for-review resource never silently drops out of the queue). Otherwise, in
+ * production we THROW at boot: an in-memory store loses every listing, served card, and
+ * pending review on restart, so silently running ephemeral in prod is a correctness
+ * regression. In dev/test (NODE_ENV !== "production") the in-memory adapters stay the
+ * default so the autonomous suite needs no Postgres. DATABASE_URL may carry credentials
+ * and is NEVER logged or echoed in the error.
  */
 export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
   indexStore: IndexStore;
   cardStore: CardStore;
+  moderationStore: ModerationStore;
 } {
   const databaseUrl = (env.DATABASE_URL ?? "").trim();
   if (databaseUrl.length > 0) {
@@ -132,11 +137,16 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
   }
   if (env.NODE_ENV === "production") {
     throw new Error(
-      "DATABASE_URL must be set in production: the marketplace index and served " +
-        "cards must be durable; an in-memory store drops every listing on restart.",
+      "DATABASE_URL must be set in production: the marketplace index, served " +
+        "cards, and moderation queue must be durable; an in-memory store drops " +
+        "every listing on restart.",
     );
   }
-  return { indexStore: new InMemoryIndexStore(), cardStore: new InMemoryCardStore() };
+  return {
+    indexStore: new InMemoryIndexStore(),
+    cardStore: new InMemoryCardStore(),
+    moderationStore: new InMemoryModerationStore(),
+  };
 }
 
 /**
@@ -148,8 +158,7 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
  * createCardApp serves as a 404; a published resource resolves its finalized card.
  */
 export function buildDepsFromEnv(): MarketplaceAppDeps {
-  const { indexStore, cardStore } = resolveMarketplaceStores(process.env);
-  const moderationStore = new InMemoryModerationStore();
+  const { indexStore, cardStore, moderationStore } = resolveMarketplaceStores(process.env);
   const cardSource: CardSource = {
     async getCard(resourceId) {
       // Serve the FINALIZED card the publish pipeline persisted to the CardStore. The

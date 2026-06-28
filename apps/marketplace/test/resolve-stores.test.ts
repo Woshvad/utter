@@ -12,9 +12,10 @@
 // non-routing host).
 import { describe, it, expect } from "vitest";
 import { resolveMarketplaceStores } from "../src/server";
-import { PgIndexStore, PgCardStore } from "../src/stores/pg";
+import { PgIndexStore, PgCardStore, PgModerationStore } from "../src/stores/pg";
 import { InMemoryIndexStore } from "../src/index-store";
 import { InMemoryCardStore } from "../src/card-store";
+import { InMemoryModerationStore } from "../src/moderation/review-queue";
 
 /** A private-range host that does not route, so no connection ever establishes. */
 const NON_ROUTING_DATABASE_URL = "postgres://user:pw@10.255.255.1:5432/utter";
@@ -27,8 +28,9 @@ describe("resolveMarketplaceStores (env-driven selection, prod fail-closed)", ()
     try {
       expect(stores.indexStore).toBeInstanceOf(PgIndexStore);
       expect(stores.cardStore).toBeInstanceOf(PgCardStore);
+      expect(stores.moderationStore).toBeInstanceOf(PgModerationStore);
     } finally {
-      // Both stores share ONE Pool; end() it so there is no open handle.
+      // All three stores share ONE Pool; end() it so there is no open handle.
       const pool = (stores.indexStore as unknown as { pg: { end: () => Promise<void> } }).pg;
       await pool.end();
     }
@@ -53,6 +55,7 @@ describe("resolveMarketplaceStores (env-driven selection, prod fail-closed)", ()
     const stores = resolveMarketplaceStores({} as NodeJS.ProcessEnv);
     expect(stores.indexStore).toBeInstanceOf(InMemoryIndexStore);
     expect(stores.cardStore).toBeInstanceOf(InMemoryCardStore);
+    expect(stores.moderationStore).toBeInstanceOf(InMemoryModerationStore);
   });
 
   it("the production throw never echoes the (missing/blank) DATABASE_URL value", () => {

@@ -15,8 +15,9 @@
 // JS number for a base-unit amount, never a decimals literal.
 import { describe, it, expect, beforeEach } from "vitest";
 import type { Pool } from "pg";
-import { PgIndexStore, PgCardStore, createPgStores } from "../src/stores/pg";
+import { PgIndexStore, PgCardStore, PgModerationStore, createPgStores } from "../src/stores/pg";
 import type { IndexRecord, Hex } from "../src/index-store";
+import type { ModerationRecord, ReviewItem } from "../src/moderation/review-queue";
 
 // --------------------------------------------------------------------------- //
 // FakePgPool: one async query(sql, params) method backed by two Maps keyed on   //
@@ -42,15 +43,42 @@ interface CardRow {
   card: Record<string, unknown>;
 }
 
+// One appended moderation_decisions row (seq + the four columns the adapter writes).
+interface DecisionRow {
+  seq: number;
+  resource_id: string;
+  decision: ModerationRecord["decision"];
+  reason: string;
+  ts: number;
+}
+
+// One appended moderation_reviews row (seq + the four columns the adapter writes).
+interface ReviewRow {
+  seq: number;
+  resource_id: string;
+  prompt: string;
+  reason: string;
+  ts: number;
+}
+
 class FakePgPool {
   private readonly resources = new Map<string, ResourceRow>();
   private readonly cards = new Map<string, CardRow>();
+  // Append-only moderation logs (bigserial seq mirrored by a monotonic counter).
+  private readonly decisions: DecisionRow[] = [];
+  private readonly reviews: ReviewRow[] = [];
+  private seq = 0;
 
   // TEETH KNOB (test-only): when true, the resources INSERT ON CONFLICT IGNORES the
   // DO UPDATE and keeps the existing row instead of overwriting. Used to PROVE the
   // idempotent-re-upsert assertion reddens, then restored to false. NEVER a
   // production-logic change -- this is the fake's own knob.
   sabotageOnConflictIgnored = false;
+
+  // TEETH KNOB (test-only): when true, the moderation SELECTs honor the adapter's
+  // ORDER BY seq REVERSED instead of forward. Used to PROVE the insertion-order
+  // assertions redden, then restored to false. NEVER a production-logic change.
+  sabotageModerationOrderReversed = false;
 
   /** Test introspection: the raw stored resource row (post-jsonb-parse). */
   _resourceRow(resourceId: string): ResourceRow | undefined {
@@ -116,6 +144,53 @@ class FakePgPool {
       return { rows: row ? ([{ card: row.card }] as unknown as T[]) : [] };
     }
 
+    // moderation_decisions INSERT (plain append, no conflict clause)
+    if (sql.includes("INSERT INTO moderation_decisions")) {
+      const [resourceId, decision, reason, ts] = params as [
+        string,
+        ModerationRecord["decision"],
+        string,
+        number,
+      ];
+      this.decisions.push({ seq: ++this.seq, resource_id: resourceId, decision, reason, ts });
+      return { rows: [] };
+    }
+
+    // moderation_decisions SELECT ... ORDER BY seq
+    if (sql.includes("FROM moderation_decisions")) {
+      const ordered = this.sabotageModerationOrderReversed
+        ? [...this.decisions].reverse()
+        : [...this.decisions];
+      const rows = ordered.map((d) => ({
+        resource_id: d.resource_id,
+        decision: d.decision,
+        reason: d.reason,
+        ts: d.ts,
+      }));
+      return { rows: rows as unknown as T[] };
+    }
+
+    // moderation_reviews INSERT (plain append, no conflict clause)
+    if (sql.includes("INSERT INTO moderation_reviews")) {
+      const [resourceId, prompt, reason, ts] = params as [string, string, string, number];
+      this.reviews.push({ seq: ++this.seq, resource_id: resourceId, prompt, reason, ts });
+      return { rows: [] };
+    }
+
+    // moderation_reviews SELECT ... ORDER BY seq
+    if (sql.includes("FROM moderation_reviews")) {
+      const ordered = this.sabotageModerationOrderReversed
+        ? [...this.reviews].reverse()
+        : [...this.reviews];
+      const rows = ordered.map((r) => ({
+        resource_id: r.resource_id,
+        prompt: r.prompt,
+        reason: r.reason,
+        ts: r.ts,
+      }));
+      return { rows: rows as unknown as T[] };
+    }
+
     throw new Error(`FakePgPool.query: unmatched SQL: ${sql.slice(0, 48)}`);
   }
 }
@@ -149,7 +224,8 @@ function makeFakes() {
   const fakePg = new FakePgPool();
   const indexStore = new PgIndexStore(fakePg as unknown as Pool);
   const cardStore = new PgCardStore(fakePg as unknown as Pool);
-  return { fakePg, indexStore, cardStore };
+  const moderationStore = new PgModerationStore(fakePg as unknown as Pool);
+  return { fakePg, indexStore, cardStore, moderationStore };
 }
 
 // --------------------------------------------------------------------------- //
@@ -274,11 +350,94 @@ describe("PgCardStore (real adapter, hand-rolled pg fake)", () => {
 });
 
 // --------------------------------------------------------------------------- //
+// PgModerationStore conformance                                                 //
+// --------------------------------------------------------------------------- //
+
+describe("PgModerationStore (real adapter, hand-rolled pg fake)", () => {
+  let fakePg: FakePgPool;
+  let moderationStore: PgModerationStore;
+
+  beforeEach(() => {
+    ({ fakePg, moderationStore } = makeFakes());
+  });
+
+  function makeDecision(overrides: Partial<ModerationRecord> = {}): ModerationRecord {
+    return { resourceId: RES_A, decision: "allow", reason: "clean spec", timestamp: 1_700_000_000_000, ...overrides };
+  }
+
+  function makeReview(overrides: Partial<ReviewItem> = {}): ReviewItem {
+    return { resourceId: RES_A, prompt: "scrape public pages for research", reason: "ambiguous", timestamp: 1_700_000_000_001, ...overrides };
+  }
+
+  it("recordDecision then listDecisions round-trips the record (timestamp intact)", async () => {
+    const rec = makeDecision();
+    await moderationStore.recordDecision(rec);
+    const got = await moderationStore.listDecisions();
+    expect(got).toEqual([rec]);
+    // The timestamp survives the bigint ts column as a plain number.
+    expect(typeof got[0]?.timestamp).toBe("number");
+    expect(got[0]?.timestamp).toBe(1_700_000_000_000);
+  });
+
+  it("returns multiple decisions in INSERTION ORDER (append-only log)", async () => {
+    await moderationStore.recordDecision(makeDecision({ reason: "first", timestamp: 1 }));
+    await moderationStore.recordDecision(makeDecision({ resourceId: RES_B, decision: "block", reason: "second", timestamp: 2 }));
+    await moderationStore.recordDecision(makeDecision({ decision: "review", reason: "third", timestamp: 3 }));
+    const got = await moderationStore.listDecisions();
+    expect(got.map((d) => d.reason)).toEqual(["first", "second", "third"]);
+    expect(got.map((d) => d.decision)).toEqual(["allow", "block", "review"]);
+  });
+
+  it("enqueueReview then listReviewQueue returns the item in INSERTION ORDER", async () => {
+    await moderationStore.enqueueReview(makeReview({ reason: "one", timestamp: 10 }));
+    await moderationStore.enqueueReview(makeReview({ resourceId: RES_B, prompt: "another spec", reason: "two", timestamp: 20 }));
+    const queue = await moderationStore.listReviewQueue();
+    expect(queue.map((q) => q.reason)).toEqual(["one", "two"]);
+    expect(queue.map((q) => q.resourceId)).toEqual([RES_A, RES_B]);
+    expect(queue[1]?.prompt).toBe("another spec");
+    expect(typeof queue[0]?.timestamp).toBe("number");
+  });
+
+  it("an empty store lists [] for both logs", async () => {
+    expect(await moderationStore.listDecisions()).toEqual([]);
+    expect(await moderationStore.listReviewQueue()).toEqual([]);
+  });
+
+  it("the decision log and the review queue are INDEPENDENT (no cross-write)", async () => {
+    await moderationStore.recordDecision(makeDecision({ decision: "review", reason: "held" }));
+    await moderationStore.enqueueReview(makeReview({ reason: "queued" }));
+    const decisions = await moderationStore.listDecisions();
+    const queue = await moderationStore.listReviewQueue();
+    expect(decisions).toHaveLength(1);
+    expect(queue).toHaveLength(1);
+    expect(decisions[0]?.reason).toBe("held");
+    expect(queue[0]?.reason).toBe("queued");
+  });
+
+  it("TEETH: with ORDER BY seq reversed, the insertion-order reads flip (proves the suite reddens)", async () => {
+    fakePg.sabotageModerationOrderReversed = true;
+    try {
+      await moderationStore.recordDecision(makeDecision({ reason: "first", timestamp: 1 }));
+      await moderationStore.recordDecision(makeDecision({ reason: "second", timestamp: 2 }));
+      await moderationStore.enqueueReview(makeReview({ reason: "rev-one", timestamp: 10 }));
+      await moderationStore.enqueueReview(makeReview({ reason: "rev-two", timestamp: 20 }));
+      // With the order reversed the LAST write comes back first -- the opposite of the
+      // append-order contract. This asserts the teeth actually bite.
+      expect((await moderationStore.listDecisions()).map((d) => d.reason)).toEqual(["second", "first"]);
+      expect((await moderationStore.listReviewQueue()).map((q) => q.reason)).toEqual(["rev-two", "rev-one"]);
+    } finally {
+      // Restore the knob: production logic is ORDER BY seq (forward).
+      fakePg.sabotageModerationOrderReversed = false;
+    }
+  });
+});
+
+// --------------------------------------------------------------------------- //
 // createPgStores wiring                                                          //
 // --------------------------------------------------------------------------- //
 
 describe("createPgStores", () => {
-  it("constructs both stores over a single Pool from a databaseUrl (no real query)", async () => {
+  it("constructs all three stores over a single Pool from a databaseUrl (no real query)", async () => {
     // A non-routing host: new Pool() constructs lazily and connects only on the first
     // query, which this test never issues. end() releases the pool so there is no open
     // handle (the suite stays offline).
@@ -288,6 +447,7 @@ describe("createPgStores", () => {
     try {
       expect(stores.indexStore).toBeInstanceOf(PgIndexStore);
       expect(stores.cardStore).toBeInstanceOf(PgCardStore);
+      expect(stores.moderationStore).toBeInstanceOf(PgModerationStore);
     } finally {
       const pool = (stores.indexStore as unknown as { pg: { end: () => Promise<void> } }).pg;
       await pool.end();
