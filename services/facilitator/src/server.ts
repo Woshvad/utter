@@ -18,6 +18,10 @@ import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
 import { InMemorySpendCapStore, type SpendCapStore } from "@utter/data-proxy";
 import { createApp, type AppDeps } from "./app";
+import {
+  createPayerScreenFromList,
+  type PayerScreen,
+} from "./payer-screen";
 import { createRelayerPool } from "./relayer";
 import { createInMemoryBuyerLock } from "./verify";
 import { createInMemoryStores, type FacilitatorStores } from "./stores/memory";
@@ -156,6 +160,48 @@ export function resolveSpendCapStore(
   return new InMemorySpendCapStore();
 }
 
+/**
+ * Resolve the payer sanctions screen from the environment (Compliance track). Mirrors
+ * resolveSpendCapStore's prod-fail-closed style.
+ *
+ * SANCTIONS_DENYLIST is a comma/whitespace-separated list of 0x payer addresses to
+ * deny. The list is read from the environment only; its contents are NEVER logged.
+ *
+ *   - SANCTIONS_DENYLIST set (non-empty after parse) -> an InMemoryPayerScreen denying
+ *     those addresses (ARMED). POST /verify then 403s a sanctioned buyer before the
+ *     reserve.
+ *   - no list + NODE_ENV=production + SANCTIONS_REQUIRED=1 -> THROW a value-free error:
+ *     production was told to enforce sanctions screening but no denylist is configured,
+ *     so we fail closed rather than run an unscreened money path (mirrors the other
+ *     prod-fail-closed resolvers). The message names no addresses.
+ *   - else -> undefined (UNARMED): no screening, the current behavior. Dev/test with no
+ *     SANCTIONS_DENYLIST is unarmed, so the autonomous suite needs no list.
+ *
+ * `env` defaults to process.env; it is a parameter only so a direct unit test can
+ * exercise the production-required branch without mutating the real environment.
+ */
+export function resolvePayerScreen(env: NodeJS.ProcessEnv = process.env): PayerScreen | undefined {
+  const raw = (env.SANCTIONS_DENYLIST ?? "").trim();
+  if (raw.length > 0) {
+    const addresses = raw.split(/[,\s]+/).filter((a) => a.length > 0);
+    const screen = createPayerScreenFromList(addresses);
+    // Guard against an all-blank value (e.g. a stray comma) leaving an empty denylist
+    // while SANCTIONS_REQUIRED is set: re-check the parsed list is non-empty.
+    if (addresses.length > 0) return screen;
+  }
+
+  if (env.NODE_ENV === "production" && env.SANCTIONS_REQUIRED === "1") {
+    // Fail loud. The message names no address and echoes no value.
+    throw new Error(
+      "SANCTIONS_REQUIRED=1 in production but SANCTIONS_DENYLIST is empty: set " +
+        "SANCTIONS_DENYLIST to the payer sanctions denylist. Payer screening is never " +
+        "disabled when sanctions enforcement is required in production.",
+    );
+  }
+
+  return undefined;
+}
+
 /** Build the route deps from the environment (fail-fast on missing required env). */
 export function buildDepsFromEnv(): AppDeps {
   const relayerKeys = parseRelayerKeys(process.env.RELAYER_SIGNER_KEYS);
@@ -220,6 +266,11 @@ export function buildDepsFromEnv(): AppDeps {
   // in dev/test. It is display-only aggregation behind the same RevenueLedger contract.
   const revenueLedger = stores.revenueLedger;
 
+  // Compliance: the payer sanctions screen. UNARMED by default (no SANCTIONS_DENYLIST
+  // and not prod-required -> undefined -> /verify behaves exactly as before). Armed via
+  // SANCTIONS_DENYLIST; prod-fail-closed when SANCTIONS_REQUIRED=1 with no list.
+  const payerScreen: PayerScreen | undefined = resolvePayerScreen();
+
   return {
     store: stores.payments,
     resultStore: stores.results,
@@ -234,6 +285,7 @@ export function buildDepsFromEnv(): AppDeps {
     resultTtlSeconds,
     spendCapStore,
     perPayerDayCap,
+    payerScreen,
     minEconomicalAmount,
     revenueLedger,
     authSecret,

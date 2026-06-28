@@ -34,6 +34,21 @@ export const arcTestnet = defineChain({
 });
 
 /**
+ * The single source of truth for the Arc chain id, DERIVED from arcTestnet so it
+ * can never drift from the chain object. Every package that needs the numeric chain
+ * id (the ERC-8004 identity block, the agent-card x402 block) imports this rather
+ * than re-typing 5042002. A mainnet cut changes arcTestnet.id and this follows.
+ */
+export const ARC_CHAIN_ID = arcTestnet.id;
+
+/**
+ * The CAIP-2 network string for Arc, DERIVED from arcTestnet.id (the eip155 chain
+ * namespace). The agent card's x402 network field and the signed PaymentPayload
+ * network field both source this, so a mainnet cut to arcTestnet.id reflows here too.
+ */
+export const ARC_CAIP2_NETWORK = `eip155:${arcTestnet.id}` as const;
+
+/**
  * Build a Viem public client bound to Arc Testnet.
  *
  * The RPC URL is overridable so consumers can point at an alternate provider

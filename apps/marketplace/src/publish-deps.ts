@@ -1,17 +1,22 @@
 // publish-deps.ts - the publish pipeline bootstrap for the testnet discovery policy.
 //
 // createPublishPipelineDeps composes the PublishPipelineDeps the server wires into
-// createPublishPipeline. It reflects the chosen testnet policy: the publish gate is
-// MODERATION (the dependency-free KeywordModerator) plus a VERIFICATION PROBE (the
-// existing selectProber seam). The on-chain BOND gate and the ERC-8004 MINT are
-// DEFERRED to the mainnet/compliance track:
-//   - bondGate is a pass-through (no on-chain floor check) and bondReader reads 0n,
-//     so the index honestly projects an unbonded resource.
-//   - identity is a deferred PLACEHOLDER (createDeferredIdentity) that assigns a
-//     deterministic agentId WITHOUT minting on-chain.
-// The real BondGate + ERC-8004 mint replace these in the mainnet/compliance track.
+// createPublishPipeline. The publish gate is MODERATION (the dependency-free
+// KeywordModerator) plus a VERIFICATION PROBE (the existing selectProber seam). The
+// on-chain BOND gate and the ERC-8004 MINT are now ENV-GATED SEAMS (live-deps.ts), not
+// flat deferrals: they default to the current testnet behavior and arm ONLY under
+// explicit operator env, so nothing changes on testnet.
+//   - resolveBondGate(env): a pass-through gate + 0n bondReader by default; the real
+//     StakingVault floor check + bond reader only when BOND_GATE_ENABLED=1 (testnet has
+//     no posted bonds, so auto-arming would reject every publish).
+//   - resolveIdentity(env): the deferred PLACEHOLDER (deterministic agentId, NO on-chain
+//     mint) by default; the real ERC-8004 update-only mint only when the ERC8004_*
+//     registries AND REGISTRY_ADMIN_PRIVATE_KEY are set (operator-gated, undeployed on
+//     testnet). The live paths are offline-tested via injected mocks only.
 import { KeywordModerator } from "./moderation/classifier.js";
+import { ARC_CHAIN_ID } from "@utter/chain";
 import { selectProber } from "@utter/ai-scorer";
+import { resolveBondGate, resolveIdentity } from "./live-deps.js";
 import type { CardStore } from "./card-store.js";
 import type { IndexStore, Hex } from "./index-store.js";
 import type { ModerationStore } from "./moderation/review-queue.js";
@@ -37,8 +42,14 @@ export interface PublishPipelineStores {
  * minted.agentId.toString()); the in-card identity.agentId is the string form.
  */
 export function createDeferredIdentity(): PipelineIdentity {
-  return {
-    async publishIdentity(resourceId, _cardUrl, card) {
+  // A structural `mode` marker rides alongside publishIdentity so resolveIdentity's
+  // selection (live vs deferred) is assertable in tests WITHOUT minting. The
+  // PipelineIdentity type is structural; the extra field is fine, so the literal is
+  // built then returned as a PipelineIdentity (publish.ts is unchanged). The live seam
+  // carries mode "live"; this one carries "deferred".
+  const deferred = {
+    mode: "deferred" as const,
+    async publishIdentity(resourceId: Hex, _cardUrl: string, card: Record<string, unknown>) {
       // A deterministic, strictly-positive placeholder id from the resourceId. The +1n
       // guarantees agentId > 0 even when the modulus is 0, so it is never a falsy id.
       const agentId = (BigInt(resourceId) % 1_000_000_000n) + 1n;
@@ -48,7 +59,7 @@ export function createDeferredIdentity(): PipelineIdentity {
         identity: {
           ...prevIdentity,
           standard: "erc-8004",
-          chainId: 5042002,
+          chainId: ARC_CHAIN_ID,
           // The in-card agentId is the STRING form (mirrors the finalized-card shape).
           agentId: agentId.toString(),
         },
@@ -58,30 +69,30 @@ export function createDeferredIdentity(): PipelineIdentity {
       return { agentId, registryTxHash, card: finalizedCard };
     },
   };
+  return deferred as PipelineIdentity;
 }
 
 /**
- * Compose the publish pipeline deps for the testnet discovery policy. Moderation runs
- * via the dependency-free KeywordModerator; verification runs via the existing
- * selectProber seam (the always-pass FixtureProber off-host, the LiveHttpsProber only
- * when SCORER_LIVE_HTTPS_HOST is set). The bond gate is a pass-through and bondReader
- * reads 0n (bond deferred); identity is the deferred placeholder (no on-chain mint).
+ * Compose the publish pipeline deps. Moderation runs via the dependency-free
+ * KeywordModerator; verification runs via the existing selectProber seam (the always-pass
+ * FixtureProber off-host, the LiveHttpsProber only when SCORER_LIVE_HTTPS_HOST is set).
+ * The bond gate + bond reader come from resolveBondGate(env) and the identity from
+ * resolveIdentity(env): both DEFAULT to the current testnet behavior (pass-through bond +
+ * 0n reader; deferred placeholder mint) and arm only under explicit operator env, so the
+ * default deps are byte-identical to before.
  */
 export function createPublishPipelineDeps(
   env: NodeJS.ProcessEnv,
   stores: PublishPipelineStores,
 ): PublishPipelineDeps {
+  const { bondGate, bondReader } = resolveBondGate(env);
   return {
     moderator: new KeywordModerator(),
     moderationStore: stores.moderationStore,
-    // Bond gate deferred: a pass-through that never rejects on the bond floor.
-    bondGate: {
-      async check() {},
-    },
-    // Bond read deferred: honestly project an unbonded resource (0n).
-    bondReader: async () => 0n,
+    bondGate,
+    bondReader,
     prober: selectProber(env),
-    identity: createDeferredIdentity(),
+    identity: resolveIdentity(env),
     indexStore: stores.indexStore,
     cardStore: stores.cardStore,
   };

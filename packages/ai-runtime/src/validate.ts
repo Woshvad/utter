@@ -37,7 +37,7 @@ import {
   type PublicClient,
 } from "viem";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
-import { PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC, arcTestnet } from "@utter/chain";
+import { PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC, arcTestnet, ARC_CAIP2_NETWORK } from "@utter/chain";
 import {
   buildClassifier,
   signDebitAuthorization,
@@ -563,7 +563,7 @@ async function signedHeader(opts: {
   const payload: PaymentPayload = {
     x402Version: 2,
     scheme: "utter-escrow",
-    network: "eip155:5042002",
+    network: ARC_CAIP2_NETWORK,
     authorization: {
       buyer: opts.buyer,
       resourceId: RESOURCE,
