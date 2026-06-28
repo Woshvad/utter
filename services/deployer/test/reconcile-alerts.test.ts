@@ -53,6 +53,17 @@ describe("buildReconcileLoop onError -> alert mapping", () => {
     expect(sink.events[0]!.kind).toBe("capacity_defer");
   });
 
+  it("maps deploy-timeout -> deploy_timeout (stale-deploying quarantine)", () => {
+    const sink = new CaptureReconcileSink();
+    handleReconcileError(
+      { phase: "deploy-timeout", resourceId: "0xres", message: "deploying record stale" },
+      newLogger(),
+      sink,
+    );
+    expect(sink.events[0]!.kind).toBe("deploy_timeout");
+    expect(sink.events[0]!.phase).toBe("deploy-timeout");
+  });
+
   it("records NO secret-looking field: only phase/message/containerId/resourceId/ts/kind", () => {
     const sink = new CaptureReconcileSink();
     for (const e of [

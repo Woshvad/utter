@@ -446,6 +446,102 @@ describe("createReconcileLoop - runaway pass (H4 quarantine + reap)", () => {
   });
 });
 
+describe("createReconcileLoop - stale deploying quarantine (crash recovery)", () => {
+  const DEPLOY_TIMEOUT_MS = 600_000;
+
+  it("flips a stale deploying record to failed, reaps its container, surfaces 'deploy-timeout'", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"f1".repeat(32)}`;
+    // A record written at updatedAt=1000 then crashed mid-deploy (still "deploying").
+    await store.put(record(r1, { status: "deploying", updatedAt: 1000 }));
+    // Its partial container shares the resourceId, so it is NOT an orphan while the record
+    // is still "deploying" - only after the flip does it become reapable.
+    const partial = container(r1);
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [partial]);
+    const reaped: string[] = [];
+    const reapContainer = vi.fn(async (c: ActualContainer) => {
+      reaped.push(c.id);
+    });
+    const errors: { phase: string; resourceId?: Hex; message: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      deployTimeoutMs: DEPLOY_TIMEOUT_MS,
+      now: () => 1000 + DEPLOY_TIMEOUT_MS + 1, // just past the window
+      onError: (e) => errors.push({ phase: e.phase, resourceId: e.resourceId, message: e.message }),
+    });
+    await loop.tick();
+
+    // Quarantined to failed (identity fields preserved by the spread).
+    const rec = await store.get(r1);
+    expect(rec?.status).toBe("failed");
+    expect(rec?.resourceId).toBe(r1);
+    // Its container is now an orphan and was reaped the SAME tick.
+    expect(reapContainer).toHaveBeenCalledTimes(1);
+    expect(reaped).toEqual([partial.id]);
+    // A deploy-timeout event was surfaced for the resourceId (no bundle/cap/slug).
+    const dt = errors.filter((e) => e.phase === "deploy-timeout");
+    expect(dt.length).toBe(1);
+    expect(dt[0]!.resourceId).toBe(r1);
+  });
+
+  it("leaves a FRESH deploying record untouched (in-flight launch must finish)", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"f2".repeat(32)}`;
+    await store.put(record(r1, { status: "deploying", updatedAt: 1000 }));
+    const partial = container(r1);
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [partial]);
+    const reapContainer = vi.fn(async () => undefined);
+    const errors: { phase: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      deployTimeoutMs: DEPLOY_TIMEOUT_MS,
+      now: () => 1001, // well inside the window
+      onError: (e) => errors.push({ phase: e.phase }),
+    });
+    await loop.tick();
+
+    // Still deploying: not flipped, its container not reaped, no event.
+    expect((await store.get(r1))?.status).toBe("deploying");
+    expect(reapContainer).not.toHaveBeenCalled();
+    expect(errors.some((e) => e.phase === "deploy-timeout")).toBe(false);
+  });
+
+  it("is a complete no-op when deployTimeoutMs is ABSENT", async () => {
+    const store = new InMemoryDeploymentStore();
+    const r1: Hex = `0x${"f3".repeat(32)}`;
+    await store.put(record(r1, { status: "deploying", updatedAt: 1000 }));
+    const partial = container(r1);
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => [partial]);
+    const reapContainer = vi.fn(async () => undefined);
+    const errors: { phase: string }[] = [];
+
+    const loop = createReconcileLoop({
+      store,
+      listContainers,
+      intervalMs: 60_000,
+      reapContainer,
+      // deployTimeoutMs intentionally unset
+      now: () => 1_000_000_000, // far past any window, but the pass is off
+      onError: (e) => errors.push({ phase: e.phase }),
+    });
+    await loop.tick();
+
+    // The pass never runs: the deploying record (still desired-running) is untouched and
+    // its container is not an orphan, so nothing is reaped and no event is surfaced.
+    expect((await store.get(r1))?.status).toBe("deploying");
+    expect(reapContainer).not.toHaveBeenCalled();
+    expect(errors.some((e) => e.phase === "deploy-timeout")).toBe(false);
+  });
+});
+
 describe("createReconcileLoop - runaway sustained-CPU loop state (H4, DEFECT 3)", () => {
   const CPU_POLICY: RunawayPolicy = { maxRestartCount: 5, cpuFraction: 0.95, sustainedSamples: 3 };
 

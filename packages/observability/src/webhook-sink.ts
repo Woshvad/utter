@@ -25,7 +25,8 @@ export interface ReconcileAlertEvent {
     | "runaway_quarantine"
     | "capacity_defer"
     | "tick_failure"
-    | "launch_failure";
+    | "launch_failure"
+    | "deploy_timeout";
   /** The reconcile phase that produced it (non-secret). */
   phase: string;
   /** A short non-secret message (the reconcile error message). */

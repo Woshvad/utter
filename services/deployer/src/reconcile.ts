@@ -153,6 +153,22 @@ export interface ReconcileLoopOpts {
    * (phase "runaway"). Absent = no runaway pass.
    */
   runawayPolicy?: RunawayPolicy;
+  /**
+   * Stale-deploying quarantine timeout in ms (crash recovery). When set, the tick runs a
+   * pass that flips any record stuck at status "deploying" longer than this window to
+   * "failed" so its partial containers become reapable orphans the same tick. The deployer
+   * never auto-relaunches generated bundles, so a "deploying" record left after a crash
+   * would otherwise strand forever. Absent = the pass is a complete no-op (prior behavior).
+   * A generous value (the env default is 10 min) keeps a slow-but-live deploy from being
+   * wrongly failed. A host-timing number, never a money literal.
+   */
+  deployTimeoutMs?: number;
+  /**
+   * The clock, injectable for tests. Resolves to Date.now in prod. Used for BOTH the
+   * runaway quarantine timestamp and the stale-deploying comparison so there is a single
+   * now() source across the tick.
+   */
+  now?: () => number;
   /** Optional hook invoked with each tick's result (e.g. to act on drift / log health). */
   onTick?: (result: ReconcileResult) => void;
   /**
@@ -167,7 +183,7 @@ export interface ReconcileLoopOpts {
 /** A surfaced reconcile/enforcement failure (never carries secret material). */
 export interface ReconcileErrorEvent {
   /** What failed (or was deferred/quarantined). */
-  phase: "tick" | "reap" | "launch" | "capacity" | "runaway";
+  phase: "tick" | "reap" | "launch" | "capacity" | "runaway" | "deploy-timeout";
   /** The container id (for a reap failure), if known. */
   containerId?: string;
   /** The resourceId involved, if known. */
@@ -218,10 +234,20 @@ export interface ReconcileLoop {
  * endpoint-less per-resource pairnets AFTER the orphan-container reap (the safety net
  * that closes the pairnet leak under crashes / races). A sweep failure is surfaced
  * (phase "reap"), never propagated.
+ *
+ * Crash recovery: when `deployTimeoutMs` is set, the tick also runs a STALE-DEPLOYING
+ * quarantine pass (between the runaway pass and the desired read) - a record stuck at
+ * "deploying" past the timeout is flipped to "failed" so its partial container becomes a
+ * reapable orphan the same tick. It NEVER relaunches and NEVER touches a fresh deploying
+ * record (an in-flight launch must finish). Absent = a complete no-op. The whole tick uses
+ * a single injected `now` (`opts.now ?? Date.now`).
  */
 export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
   let timer: ReturnType<typeof setInterval> | null = null;
   const onError = opts.onError ?? defaultOnError;
+  // Single clock for the whole tick (runaway timestamp + stale-deploying compare).
+  // Unset in prod -> Date.now; tests inject a pinned clock.
+  const now = opts.now ?? Date.now;
   // Per-container consecutive high-CPU counts, kept across ticks so the sustained-
   // CPU runaway signal can accumulate. Pruned each tick to the live container set so
   // it cannot grow unbounded.
@@ -272,7 +298,7 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
           // to relaunch it. Only mark safeToReap on a DURABLE put - if the put throws,
           // leave the container running and try again next tick (never reap it now).
           try {
-            await opts.store.put({ ...rec, status: "failed", updatedAt: Date.now() });
+            await opts.store.put({ ...rec, status: "failed", updatedAt: now() });
             safeToReap = true;
           } catch (err) {
             safeToReap = false;
@@ -308,6 +334,43 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
       const liveIds = new Set(actual.map((c) => c.id));
       for (const id of [...consecutiveHighCpu.keys()]) {
         if (!liveIds.has(id)) consecutiveHighCpu.delete(id);
+      }
+    }
+
+    // STALE-DEPLOYING quarantine pass (crash recovery). A record stuck at "deploying"
+    // is treated as desired-running (the status filter), so it is never reaped, yet the
+    // deployer never auto-relaunches generated bundles - so a "deploying" record left
+    // behind by a crash (written before the deploy resolved) strands forever and its
+    // partial containers, sharing its resourceId, are never reaped. Flip any record older
+    // than the timeout to "failed" so the activeDesired filter drops it below and its
+    // partial container becomes a reapable orphan THIS tick. Runs BEFORE the desired read
+    // and BEFORE the orphan reap. A FRESH deploying record (inside the window) is left
+    // untouched so an in-flight launch can finish. There is NO relaunch path: a flip only
+    // removes the record from desired; untrusted generated code is never re-run. Absent
+    // timeout => the pass is a complete no-op (prior behavior byte-unchanged).
+    if (opts.deployTimeoutMs !== undefined) {
+      const deployTimeoutMs = opts.deployTimeoutMs;
+      const records = await opts.store.list();
+      for (const rec of records) {
+        if (rec.status !== "deploying") continue;
+        if (now() - rec.updatedAt <= deployTimeoutMs) continue;
+        try {
+          // The spread preserves agentId/resourceId/slug/deployVersion/cap; only status
+          // and updatedAt change.
+          await opts.store.put({ ...rec, status: "failed", updatedAt: now() });
+          onError({
+            phase: "deploy-timeout",
+            resourceId: rec.resourceId,
+            // WR-06: resourceId + a static message only. Never the bundle/cap/slug.
+            message: `deploying record stale > ${deployTimeoutMs}ms; quarantined to failed`,
+          });
+        } catch (err) {
+          onError({
+            phase: "deploy-timeout",
+            resourceId: rec.resourceId,
+            message: "quarantine failed: " + (err instanceof Error ? err.message : String(err)),
+          });
+        }
       }
     }
 

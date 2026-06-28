@@ -428,8 +428,11 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
  *
  * DELIBERATELY NO launchContainer: untrusted generated code is NEVER auto-relaunched (a
  * generated bundle cannot be re-run without its ephemeral bundle). The loop's job here is
- * orphan-container reap + runaway quarantine + pairnet GC only; it REPORTS toLaunch drift
- * but never acts on it. RECONCILE_INTERVAL_MS (default 15000) sets the tick interval;
+ * orphan-container reap + runaway quarantine + stale-deploying quarantine + pairnet GC
+ * only; it REPORTS toLaunch drift but never acts on it. RECONCILE_INTERVAL_MS (default
+ * 15000) sets the tick interval; DEPLOY_TIMEOUT_MS (default 600000, 10 min) sets the
+ * stale-deploying quarantine window - a record stuck at "deploying" past it (a crash
+ * before the deploy resolved) is flipped to "failed" so its partial container is reaped;
  * MAX_CONCURRENT_RESOURCES, when set, caps running resources (but with no launch hook it
  * only ever affects reporting). All values are host-capacity numbers, never money literals.
  *
@@ -455,6 +458,10 @@ export function buildReconcileLoop(
     reapContainer: (c) => reapResourceContainer(docker, c),
     reapOrphanNetworks: () => reapOrphanPairNetworks(docker),
     intervalMs: Number(env.RECONCILE_INTERVAL_MS ?? "15000"),
+    // Stale-deploying quarantine window (crash recovery). 10 min default - far above a
+    // real gVisor deploy, so a slow-but-live deploy is never wrongly failed. now is left
+    // unset here so it defaults to Date.now in prod (tests inject a pinned clock).
+    deployTimeoutMs: Number(env.DEPLOY_TIMEOUT_MS ?? "600000"),
     runawayPolicy: DEFAULT_RUNAWAY_POLICY,
     // reconcile.ts calls onError INLINE inside a tick, so this handler MUST NEVER throw
     // back into the loop: handleReconcileError wraps its whole body in try/catch.
@@ -473,9 +480,10 @@ export function buildReconcileLoop(
 }
 
 /**
- * Map a reconcile phase to its security-relevant alert kind. The five reconcile phases
- * (reap / runaway / capacity / tick / launch) map 1:1 onto the alert kinds the webhook
- * sink forwards. A pure function so the mapping is unit-testable in isolation.
+ * Map a reconcile phase to its security-relevant alert kind. The reconcile phases
+ * (reap / runaway / capacity / tick / launch / deploy-timeout) map 1:1 onto the alert
+ * kinds the webhook sink forwards. A pure function so the mapping is unit-testable in
+ * isolation.
  */
 function reconcilePhaseToAlertKind(phase: ReconcileErrorEvent["phase"]): ReconcileAlertEvent["kind"] {
   switch (phase) {
@@ -489,6 +497,8 @@ function reconcilePhaseToAlertKind(phase: ReconcileErrorEvent["phase"]): Reconci
       return "tick_failure";
     case "launch":
       return "launch_failure";
+    case "deploy-timeout":
+      return "deploy_timeout";
   }
 }
 
