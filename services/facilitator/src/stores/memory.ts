@@ -9,14 +9,18 @@
 import {
   InMemoryPaymentStore,
   InMemoryResultStore,
+  InMemoryRevenueLedger,
   type PaymentStore,
   type ResultStore,
+  type RevenueLedger,
 } from "@utter/x402-arc";
 
-/** The pair of stores the facilitator routes (`/verify`, `/release`, `/settle`). */
+/** The stores the facilitator routes (`/verify`, `/release`, `/settle`, `/revenue`). */
 export interface FacilitatorStores {
   payments: PaymentStore;
   results: ResultStore;
+  /** Per-resource revenue ledger the studio dashboard reads via GET /revenue. */
+  revenueLedger: RevenueLedger;
 }
 
 /**
@@ -28,6 +32,7 @@ export function createInMemoryStores(): FacilitatorStores {
   return {
     payments: new InMemoryPaymentStore(),
     results: new InMemoryResultStore(),
+    revenueLedger: new InMemoryRevenueLedger(),
   };
 }
 

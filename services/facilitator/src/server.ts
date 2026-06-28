@@ -17,7 +17,6 @@ import { serve } from "@hono/node-server";
 import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
 import { InMemorySpendCapStore, type SpendCapStore } from "@utter/data-proxy";
-import { InMemoryRevenueLedger } from "@utter/x402-arc";
 import { createApp, type AppDeps } from "./app";
 import { createRelayerPool } from "./relayer";
 import { createInMemoryBuyerLock } from "./verify";
@@ -215,13 +214,11 @@ export function buildDepsFromEnv(): AppDeps {
   // dev/test when unset (keeps the in-process money path + suite green).
   const { authSecret, authEnforced } = resolveAuthConfig();
 
-  // Per-resource revenue ledger for the studio dashboard (STU-04). DELIBERATELY the
-  // in-memory adapter: revenue aggregation is process-local for this increment, so it
-  // resets on restart. P2 FOLLOW-UP: a durable pg/redis-backed RevenueLedger (surviving
-  // restarts) is an explicit LATER increment, wired behind the same RevenueLedger
-  // contract. It is display-only aggregation (not the money path), so it is left as-is
-  // here and not gated by the production fail-closed checks above.
-  const revenueLedger = new InMemoryRevenueLedger();
+  // Per-resource revenue ledger for the studio dashboard (STU-04). Now selected by the
+  // SAME durability switch as the other stores (resolveFacilitatorStores): the durable
+  // PgRevenueLedger in production (so revenue survives a restart), the in-memory adapter
+  // in dev/test. It is display-only aggregation behind the same RevenueLedger contract.
+  const revenueLedger = stores.revenueLedger;
 
   return {
     store: stores.payments,

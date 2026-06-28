@@ -24,8 +24,9 @@ import type { Redis } from "ioredis";
 import {
   PgRedisPaymentStore,
   PgRedisResultStore,
+  PgRevenueLedger,
 } from "../src/stores/pgRedis";
-import type { ReservationLock, StoredResult } from "@utter/x402-arc";
+import type { ReservationLock, StoredResult, SettlementEntry } from "@utter/x402-arc";
 
 // --------------------------------------------------------------------------- //
 // FakeRedis: emulates ONLY the ioredis.Redis command surface pgRedis.ts calls.  //
@@ -234,14 +235,35 @@ interface ResultRow {
   expires_at: string;
 }
 
+interface RevenueRow {
+  idem_key: Hex;
+  resource_id: Hex;
+  kind: string;
+  amount: string;
+  creator_share: string;
+  platform_share: string;
+  tx: Hex;
+  recorded_at: string;
+  seq: number; // auto bigserial -- record order within the table
+}
+
 class FakePgPool {
   private readonly payments = new Map<string, PaymentRow>();
   private readonly results = new Map<string, ResultRow>();
+  // The `revenue` table, keyed on idem_key (the PK). `seq` is the auto bigserial the
+  // adapter ORDER BYs on, so insertion order is preserved across resources.
+  private readonly revenue = new Map<string, RevenueRow>();
+  private revenueSeq = 0;
 
   // TEETH KNOB (test-only): when true, the results INSERT ON CONFLICT OVERWRITES
   // the existing row instead of DO NOTHING. Used to PROVE the idempotent-put
   // assertion reddens, then restored to false. NEVER a production-logic change.
   sabotageResultsOverwrite = false;
+
+  // TEETH KNOB (test-only): when true, the revenue INSERT ON CONFLICT OVERWRITES (a
+  // second seq row) instead of DO NOTHING, so a re-record DOUBLE-COUNTS. Used to PROVE
+  // the idempotent-record assertion reddens, then restored. NEVER a production change.
+  sabotageRevenueOverwrite = false;
 
   /** Test introspection. */
   _paymentRow(idemKey: string): PaymentRow | undefined {
@@ -306,6 +328,44 @@ class FakePgPool {
       const [idemKey] = params as [string];
       const row = this.results.get(idemKey);
       return { rows: row ? ([row] as unknown as T[]) : [] };
+    }
+
+    // revenue INSERT ... ON CONFLICT (idem_key) DO NOTHING
+    if (sql.includes("INSERT INTO revenue")) {
+      const [idemKey, resourceId, kind, amount, creatorShare, platformShare, tx, recordedAtMs] =
+        params as [Hex, Hex, string, string, string, string, Hex, number];
+      const existing = this.revenue.get(idemKey);
+      if (existing && !this.sabotageRevenueOverwrite) {
+        // ON CONFLICT DO NOTHING -- the idempotency guarantee under test (no double-count).
+        return { rows: [] };
+      }
+      // to_timestamp($8 / 1000.0): persist an ISO string the adapter recovers via
+      // new Date(recorded_at).getTime(). seq auto-increments (bigserial) per insert.
+      this.revenueSeq += 1;
+      // With the teeth knob ON we DEFEAT the idem_key PK: a re-record lands under a
+      // distinct map key so byResource sees a second (duplicate) row -- a double-count.
+      const storeKey = existing && this.sabotageRevenueOverwrite ? `${idemKey}#${this.revenueSeq}` : idemKey;
+      this.revenue.set(storeKey, {
+        idem_key: idemKey,
+        resource_id: resourceId,
+        kind,
+        amount,
+        creator_share: creatorShare,
+        platform_share: platformShare,
+        tx,
+        recorded_at: new Date(recordedAtMs).toISOString(),
+        seq: this.revenueSeq,
+      });
+      return { rows: [] };
+    }
+
+    // revenue SELECT ... WHERE resource_id = $1 ORDER BY seq
+    if (sql.includes("FROM revenue")) {
+      const [resourceId] = params as [string];
+      const rows = [...this.revenue.values()]
+        .filter((r) => r.resource_id === resourceId)
+        .sort((a, b) => a.seq - b.seq);
+      return { rows: rows as unknown as T[] };
     }
 
     throw new Error(`FakePgPool.query: unmatched SQL: ${sql.slice(0, 40)}`);
@@ -519,5 +579,135 @@ describe("PgRedisResultStore (real adapter, hand-rolled pg fake)", () => {
       await results.get(NONCE),
       "an expired idemKey must 404 (return null) past its TTL",
     ).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// PgRevenueLedger conformance (durable per-resource revenue, offline pg fake)  //
+//                                                                              //
+// Asserts the SAME RevenueLedger contract InMemoryRevenueLedger satisfies in   //
+// packages/x402-arc/test: idempotent record (no double-count on a settle       //
+// retry), byResource in record order filtered by resourceId, money round-trips //
+// as base-unit bigint, a refund kind round-trips, an unknown resource -> [].   //
+// --------------------------------------------------------------------------- //
+
+describe("PgRevenueLedger (real adapter, hand-rolled pg fake)", () => {
+  let fakePg: FakePgPool;
+  let ledger: PgRevenueLedger;
+
+  beforeEach(() => {
+    fakePg = new FakePgPool();
+    ledger = new PgRevenueLedger(fakePg as unknown as Pool);
+  });
+
+  const RESOURCE_A: Hex = `0x${"a1".repeat(32)}`;
+  const RESOURCE_B: Hex = `0x${"b2".repeat(32)}`;
+  const UNKNOWN: Hex = `0x${"cc".repeat(32)}`;
+
+  /** A settle entry helper (amount === creatorShare + platformShare). */
+  function settle(
+    resourceId: Hex,
+    idemKey: Hex,
+    amount: bigint,
+    creatorShare: bigint,
+    tx: Hex,
+  ): SettlementEntry {
+    return {
+      idemKey,
+      resourceId,
+      amount,
+      creatorShare,
+      platformShare: amount - creatorShare,
+      tx,
+      kind: "settle",
+      at: Date.now(),
+    };
+  }
+
+  it("record then byResource returns the entry with money intact as base-unit bigint", async () => {
+    const entry = settle(RESOURCE_A, `0x${"01".repeat(32)}`, 20_000n, 14_000n, `0x${"11".repeat(32)}`);
+    await ledger.record(entry);
+    const rows = await ledger.byResource(RESOURCE_A);
+    expect(rows).toHaveLength(1);
+    const got = rows[0] as SettlementEntry;
+    // Money parsed back to bigint at the boundary (never a JS number, never a decimals literal).
+    expect(got.amount).toBe(20_000n);
+    expect(typeof got.amount).toBe("bigint");
+    expect(got.creatorShare).toBe(14_000n);
+    expect(got.platformShare).toBe(6_000n);
+    expect(got.creatorShare + got.platformShare).toBe(got.amount);
+    // The rest of the SettlementEntry shape round-trips as-is.
+    expect(got.idemKey).toBe(entry.idemKey);
+    expect(got.resourceId).toBe(RESOURCE_A);
+    expect(got.tx).toBe(entry.tx);
+    expect(got.kind).toBe("settle");
+  });
+
+  it("record is IDEMPOTENT on idemKey: a re-record of the SAME nonce is a NO-OP (no double-count)", async () => {
+    const entry = settle(RESOURCE_A, `0x${"02".repeat(32)}`, 10_000n, 7_000n, `0x${"12".repeat(32)}`);
+    await ledger.record(entry);
+    // A settle retry re-enters the record path with the same idemKey.
+    await ledger.record(entry);
+    const rows = await ledger.byResource(RESOURCE_A);
+    expect(
+      rows,
+      "a re-record of the same idemKey must be a no-op (ON CONFLICT DO NOTHING) -- no double-count",
+    ).toHaveLength(1);
+  });
+
+  it("byResource preserves RECORD ORDER across entries and FILTERS by resourceId", async () => {
+    // Interleave resource A and B records; A's rows must come back in record order,
+    // and B's settle must not bleed into A.
+    await ledger.record(settle(RESOURCE_A, `0x${"01".repeat(32)}`, 1_000n, 700n, `0x${"a1".repeat(32)}`));
+    await ledger.record(settle(RESOURCE_B, `0x${"02".repeat(32)}`, 9_000n, 6_000n, `0x${"b1".repeat(32)}`));
+    await ledger.record(settle(RESOURCE_A, `0x${"03".repeat(32)}`, 2_000n, 1_400n, `0x${"a2".repeat(32)}`));
+    await ledger.record(settle(RESOURCE_A, `0x${"04".repeat(32)}`, 3_000n, 2_100n, `0x${"a3".repeat(32)}`));
+
+    const rows = await ledger.byResource(RESOURCE_A);
+    expect(rows.map((r) => r.idemKey)).toEqual([
+      `0x${"01".repeat(32)}`,
+      `0x${"03".repeat(32)}`,
+      `0x${"04".repeat(32)}`,
+    ]);
+    expect(rows.map((r) => r.amount)).toEqual([1_000n, 2_000n, 3_000n]);
+    // The RESOURCE_B settle did not bleed into RESOURCE_A.
+    expect(await ledger.byResource(RESOURCE_B)).toHaveLength(1);
+  });
+
+  it("a refund kind round-trips", async () => {
+    await ledger.record({
+      idemKey: `0x${"05".repeat(32)}`,
+      resourceId: RESOURCE_A,
+      amount: 5_000n,
+      creatorShare: 0n,
+      platformShare: 0n,
+      tx: `0x${"13".repeat(32)}`,
+      kind: "refund",
+      at: Date.now(),
+    });
+    const rows = await ledger.byResource(RESOURCE_A);
+    expect(rows).toHaveLength(1);
+    expect((rows[0] as SettlementEntry).kind).toBe("refund");
+    expect((rows[0] as SettlementEntry).amount).toBe(5_000n);
+  });
+
+  it("byResource of an UNKNOWN resource returns [] (never an error)", async () => {
+    await ledger.record(settle(RESOURCE_A, `0x${"06".repeat(32)}`, 1n, 1n, `0x${"14".repeat(32)}`));
+    expect(await ledger.byResource(UNKNOWN)).toEqual([]);
+  });
+
+  it("TEETH: with ON CONFLICT sabotaged (overwrite), a re-record DOUBLE-COUNTS -- proving the idempotency assertion has teeth", async () => {
+    fakePg.sabotageRevenueOverwrite = true;
+    const entry = settle(RESOURCE_A, `0x${"07".repeat(32)}`, 8_000n, 5_600n, `0x${"15".repeat(32)}`);
+    await ledger.record(entry);
+    await ledger.record(entry);
+    // With the conflict guard defeated the re-record inserts a second seq row.
+    expect(
+      (await ledger.byResource(RESOURCE_A)).length,
+      "sabotaged ON CONFLICT must double-count -- this is the teeth proof",
+    ).toBe(2);
+    // Restore the knob (no production-logic change leaks across tests).
+    fakePg.sabotageRevenueOverwrite = false;
+    expect(fakePg.sabotageRevenueOverwrite).toBe(false);
   });
 });
