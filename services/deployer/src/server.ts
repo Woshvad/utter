@@ -30,7 +30,14 @@ import { timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { runGracefulShutdown } from "@utter/observability";
+import {
+  runGracefulShutdown,
+  JsonLogger,
+  stdoutSink,
+  selectReconcileEventSink,
+  type ReconcileEventSink,
+  type ReconcileAlertEvent,
+} from "@utter/observability";
 import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { createInMemoryStores } from "./stores/memory";
 import type { DeployerStores } from "./stores/memory";
@@ -51,7 +58,11 @@ import {
   reapOrphanPairNetworks,
   type DockerHandle,
 } from "./orchestrate";
-import { createReconcileLoop, type ReconcileLoop } from "./reconcile";
+import {
+  createReconcileLoop,
+  type ReconcileLoop,
+  type ReconcileErrorEvent,
+} from "./reconcile";
 import { DEFAULT_RUNAWAY_POLICY } from "./reaper";
 
 loadEnv({ path: ".env.local" });
@@ -430,6 +441,14 @@ export function buildReconcileLoop(
   deps: DeployerAppDeps,
   env: NodeJS.ProcessEnv,
 ): ReconcileLoop {
+  // Structured JSON-lines logger pinned to this component. Distinct from the OBS-02
+  // money-path StructuredLogger; this is operational logging only (counts + the typed
+  // non-secret reconcile fields).
+  const logger = new JsonLogger(stdoutSink, { service: "deployer", component: "reconcile" });
+  // Best-effort reconcile alert sink. ALERT_WEBHOOK_URL unset/blank -> a pure no-op
+  // (no fetch, no network) so the autonomous suite never reaches a network path.
+  const eventSink = selectReconcileEventSink(env, logger);
+
   return createReconcileLoop({
     store: deps.stores.deployments,
     listContainers: () => listResourceContainers(docker),
@@ -437,10 +456,75 @@ export function buildReconcileLoop(
     reapOrphanNetworks: () => reapOrphanPairNetworks(docker),
     intervalMs: Number(env.RECONCILE_INTERVAL_MS ?? "15000"),
     runawayPolicy: DEFAULT_RUNAWAY_POLICY,
+    // reconcile.ts calls onError INLINE inside a tick, so this handler MUST NEVER throw
+    // back into the loop: handleReconcileError wraps its whole body in try/catch.
+    onError: (e) => handleReconcileError(e, logger, eventSink),
+    // onTick logs counts only (never the records, which could carry resource detail).
+    onTick: (r) =>
+      logger.info("reconcile tick", {
+        healthy: r.healthy,
+        toLaunch: r.toLaunch.length,
+        toReap: r.toReap.length,
+      }),
     ...(env.MAX_CONCURRENT_RESOURCES
       ? { maxConcurrent: Number(env.MAX_CONCURRENT_RESOURCES) }
       : {}),
   });
+}
+
+/**
+ * Map a reconcile phase to its security-relevant alert kind. The five reconcile phases
+ * (reap / runaway / capacity / tick / launch) map 1:1 onto the alert kinds the webhook
+ * sink forwards. A pure function so the mapping is unit-testable in isolation.
+ */
+function reconcilePhaseToAlertKind(phase: ReconcileErrorEvent["phase"]): ReconcileAlertEvent["kind"] {
+  switch (phase) {
+    case "reap":
+      return "reap_failure";
+    case "runaway":
+      return "runaway_quarantine";
+    case "capacity":
+      return "capacity_defer";
+    case "tick":
+      return "tick_failure";
+    case "launch":
+      return "launch_failure";
+  }
+}
+
+/**
+ * The reconcile onError handler used by buildReconcileLoop. It (a) logs the event via
+ * the JSON-lines logger (only the typed non-secret fields: phase / containerId /
+ * resourceId / message) and (b) maps the phase to a ReconcileAlertEvent and emits it to
+ * the event sink. reconcile.ts calls onError INLINE inside a tick, so the WHOLE body is
+ * wrapped in try/catch: a failure here (a logger or sink throw) must NEVER propagate
+ * back into the loop. Exported so a test can drive the mapping with a CaptureReconcileSink.
+ */
+export function handleReconcileError(
+  e: ReconcileErrorEvent,
+  logger: JsonLogger,
+  eventSink: ReconcileEventSink,
+): void {
+  try {
+    // Forward ONLY the typed reconcile fields (reconcile.ts documents these as never
+    // carrying secret material). No addresses, keys, tokens, or credential URLs.
+    logger.warn("reconcile event", {
+      phase: e.phase,
+      containerId: e.containerId,
+      resourceId: e.resourceId,
+      message: e.message,
+    });
+    eventSink.emit({
+      kind: reconcilePhaseToAlertKind(e.phase),
+      phase: e.phase,
+      message: e.message,
+      containerId: e.containerId,
+      resourceId: e.resourceId,
+      ts: Date.now(),
+    });
+  } catch {
+    // Inline inside a tick: never throw back into the loop.
+  }
 }
 
 /** Start the deployer HTTP server on the given port (default 8788). */
