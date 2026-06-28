@@ -79,6 +79,79 @@ describe("recordDeployment", () => {
     expect(stored?.resourceId).toBe(RESOURCE);
   });
 
+  it("records the given status on the first write (write-then-launch: deploying)", async () => {
+    const store = new InMemoryDeploymentStore();
+
+    const record = await recordDeployment(store, {
+      resourceId: RESOURCE,
+      slug: "weather-bot",
+      status: "deploying",
+      now: () => 1_000,
+    });
+
+    expect(record.status).toBe("deploying");
+    expect(record.deployVersion).toBe(1);
+    const stored = await store.get(RESOURCE);
+    expect(stored?.status).toBe("deploying");
+  });
+
+  it("defaults the first write to running when status is omitted (subtask-4 regression)", async () => {
+    const store = new InMemoryDeploymentStore();
+
+    const record = await recordDeployment(store, {
+      resourceId: RESOURCE,
+      slug: "weather-bot",
+    });
+
+    expect(record.status).toBe("running");
+    const stored = await store.get(RESOURCE);
+    expect(stored?.status).toBe("running");
+  });
+
+  it("a redeploy carrying a status updates the record's status (deploying -> running)", async () => {
+    const store = new InMemoryDeploymentStore();
+
+    const first = await recordDeployment(store, {
+      resourceId: RESOURCE,
+      slug: "weather-bot",
+      status: "deploying",
+      now: () => 1_000,
+    });
+    expect(first.status).toBe("deploying");
+
+    const second = await recordDeployment(store, {
+      resourceId: RESOURCE,
+      slug: "weather-bot",
+      status: "running",
+      now: () => 2_000,
+    });
+
+    expect(second.status).toBe("running");
+    expect(second.deployVersion).toBe(2);
+    const stored = await store.get(RESOURCE);
+    expect(stored?.status).toBe("running");
+    expect(stored?.deployVersion).toBe(2);
+  });
+
+  it("a redeploy carrying a failed status marks the record failed", async () => {
+    const store = new InMemoryDeploymentStore();
+
+    await recordDeployment(store, {
+      resourceId: RESOURCE,
+      slug: "weather-bot",
+      status: "deploying",
+    });
+    const failed = await recordDeployment(store, {
+      resourceId: RESOURCE,
+      slug: "weather-bot",
+      status: "failed",
+    });
+
+    expect(failed.status).toBe("failed");
+    const stored = await store.get(RESOURCE);
+    expect(stored?.status).toBe("failed");
+  });
+
   it("carries the cap on the first write and preserves it across a redeploy", async () => {
     const store = new InMemoryDeploymentStore();
 

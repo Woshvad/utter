@@ -22,6 +22,15 @@ export interface RecordDeployParams {
   slug: string;
   /** The optional signed spend cap for this version (USDC base units). */
   cap?: bigint;
+  /**
+   * The desired lifecycle status to record (the reconcile loop's desired state).
+   * Defaults to "running" so callers/tests that omit it are unchanged. The
+   * write-then-launch lifecycle (subtask 7) passes "deploying" before launch, then
+   * "running" on success / "failed" on error, so a reconcile tick during the launch
+   * window treats the launching containers as desired (not orphans) and a failed
+   * deploy's partial containers become reapable.
+   */
+  status?: DeploymentRecord["status"];
   /** Clock injection for `updatedAt` (tests pin it). Defaults to `Date.now`. */
   now?: () => number;
 }
@@ -41,10 +50,17 @@ export async function recordDeployment(
 ): Promise<DeploymentRecord> {
   const existing = await store.get(params.resourceId);
   if (existing) {
+    // A repeat deploy is an idempotent redeploy: pass the requested status through
+    // (redeploy keeps the prior status when status is undefined). Default the FIRST
+    // deploy below to "running"; here the absence of a status preserves the existing
+    // one rather than forcing it back to "running" on every redeploy.
     return redeploy({
       store,
       resourceId: params.resourceId,
-      config: { cap: params.cap ?? existing.cap, status: "running" },
+      config: {
+        cap: params.cap ?? existing.cap,
+        status: params.status ?? "running",
+      },
       now: params.now,
     });
   }
@@ -58,7 +74,7 @@ export async function recordDeployment(
     resourceId: params.resourceId,
     slug: params.slug,
     deployVersion: 1,
-    status: "running",
+    status: params.status ?? "running",
     updatedAt: (params.now ?? Date.now)(),
     ...(params.cap !== undefined ? { cap: params.cap } : {}),
   };
