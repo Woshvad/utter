@@ -20,6 +20,7 @@ import { createCardApp } from "./card-route";
 import { filterResources } from "./query";
 import { InMemoryIndexStore } from "./index-store";
 import { InMemoryCardStore } from "./card-store";
+import { createPgStores } from "./stores/pg";
 import { InMemoryModerationStore } from "./moderation/review-queue";
 import { createPublishPipeline, PublishBlocked, PublishHeldForReview, PublishUnverified } from "./publish";
 import { createPublishPipelineDeps } from "./publish-deps";
@@ -110,14 +111,44 @@ function parsePublishRequest(body: unknown): PublishRequest | null {
 }
 
 /**
- * Build the marketplace route deps. The autonomous/dev default is the in-memory
- * IndexStore (empty at boot) with a CardSource backed by that store: an unknown
- * resource resolves to null, which createCardApp serves as a 404. The future
- * Postgres adapter implements the same IndexStore contract, so this swaps by env.
+ * Resolve the marketplace index + card stores from the environment, fail-closed on
+ * durability in production (mirrors the deployer's resolveDeployerStores style).
+ *
+ * DATABASE_URL set + non-empty -> the durable Postgres-backed adapters (the discovery
+ * index AND the served finalized cards survive a restart, so a deployed resource never
+ * silently drops out of agent discovery). Otherwise, in production we THROW at boot: an
+ * in-memory store loses every listing + served card on restart, so silently running
+ * ephemeral in prod is a correctness regression. In dev/test (NODE_ENV !== "production")
+ * the in-memory adapters stay the default so the autonomous suite needs no Postgres.
+ * DATABASE_URL may carry credentials and is NEVER logged or echoed in the error.
+ */
+export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
+  indexStore: IndexStore;
+  cardStore: CardStore;
+} {
+  const databaseUrl = (env.DATABASE_URL ?? "").trim();
+  if (databaseUrl.length > 0) {
+    return createPgStores({ databaseUrl });
+  }
+  if (env.NODE_ENV === "production") {
+    throw new Error(
+      "DATABASE_URL must be set in production: the marketplace index and served " +
+        "cards must be durable; an in-memory store drops every listing on restart.",
+    );
+  }
+  return { indexStore: new InMemoryIndexStore(), cardStore: new InMemoryCardStore() };
+}
+
+/**
+ * Build the marketplace route deps. Stores come from resolveMarketplaceStores
+ * (Postgres when DATABASE_URL is set; in-memory dev/test default; fail-closed in
+ * production with no DATABASE_URL) - the SAME IndexStore / CardStore contract either
+ * adapter implements, so this swaps by env without touching route logic. The CardSource
+ * reads through the resolved cardStore: an unknown resource resolves to null, which
+ * createCardApp serves as a 404; a published resource resolves its finalized card.
  */
 export function buildDepsFromEnv(): MarketplaceAppDeps {
-  const indexStore = new InMemoryIndexStore();
-  const cardStore = new InMemoryCardStore();
+  const { indexStore, cardStore } = resolveMarketplaceStores(process.env);
   const moderationStore = new InMemoryModerationStore();
   const cardSource: CardSource = {
     async getCard(resourceId) {
