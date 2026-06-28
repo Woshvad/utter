@@ -130,6 +130,14 @@ export interface AppDeps {
    * default), the routes pass through unchanged (the current behavior).
    */
   authEnforced?: boolean;
+
+  /**
+   * Teardown for the durable stores (pg.end + redis.quit), threaded from
+   * resolveFacilitatorStores().close to graceful shutdown. NO route reads this; it is
+   * teardown-only metadata. Undefined for the in-memory default (nothing to close), so
+   * dev/test boot is byte-unchanged.
+   */
+  storesClose?: () => Promise<void>;
 }
 
 /**

@@ -194,6 +194,12 @@ export class InMemoryResponseCache implements ResponseCache {
 export interface DeployerStores {
   deployments: DeploymentStore;
   cache: ResponseCache;
+  /**
+   * Teardown for the durable adapter (redis.quit), called from graceful shutdown AFTER
+   * the request drain. Undefined for the in-memory default (nothing to close), so
+   * dev/test boot is byte-unchanged.
+   */
+  close?: () => Promise<void>;
 }
 
 /**

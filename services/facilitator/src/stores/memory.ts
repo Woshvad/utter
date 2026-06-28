@@ -21,6 +21,12 @@ export interface FacilitatorStores {
   results: ResultStore;
   /** Per-resource revenue ledger the studio dashboard reads via GET /revenue. */
   revenueLedger: RevenueLedger;
+  /**
+   * Teardown for the durable adapter (pg.end + redis.quit), called from graceful
+   * shutdown AFTER the request drain. Undefined for the in-memory default (nothing to
+   * close), so dev/test boot is byte-unchanged.
+   */
+  close?: () => Promise<void>;
 }
 
 /**

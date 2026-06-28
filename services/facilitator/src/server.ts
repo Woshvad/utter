@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { type Hex, type PublicClient } from "viem";
 import { createArcPublicClient, PAYMENT_ESCROW, PAYMENT_SPLITTER, USDC } from "@utter/chain";
+import { runGracefulShutdown } from "@utter/observability";
 import { InMemorySpendCapStore, type SpendCapStore } from "@utter/data-proxy";
 import { createApp, type AppDeps } from "./app";
 import {
@@ -333,6 +334,9 @@ export function buildDepsFromEnv(): AppDeps {
     revenueLedger,
     authSecret,
     authEnforced,
+    // Teardown-only: the durable stores' close (pg.end + redis.quit), threaded to
+    // graceful shutdown. Undefined for the in-memory default. NO route reads it.
+    storesClose: stores.close,
   };
 }
 
@@ -344,7 +348,27 @@ export function start(port = Number(process.env.PORT ?? "8787")): void {
   console.log(
     `facilitator listening on :${port} (relayer pool size ${deps.relayerPool.signers.length})`,
   );
-  serve({ fetch: app.fetch, port });
+  // Capture the serve() handle (previously discarded) so graceful shutdown can drain an
+  // in-flight /settle (the money path) to completion BEFORE closing any pool/client.
+  const server = serve({ fetch: app.fetch, port });
+  const drainTimeoutMs = Number(process.env.SHUTDOWN_DRAIN_MS ?? "10000");
+  // The closeables: the durable stores (pg.end + redis.quit), the spend-cap store's
+  // redis client, and the per-buyer lock's redis client. Each is guarded with typeof so
+  // the in-memory variants (which expose no close/disconnect) are skipped, leaving
+  // dev/test boot byte-unchanged. None closes until the drain above has finished.
+  const closeables: Array<() => Promise<void>> = [];
+  if (typeof deps.storesClose === "function") {
+    closeables.push(deps.storesClose);
+  }
+  const spendCapDisconnect = deps.spendCapStore?.disconnect;
+  if (typeof spendCapDisconnect === "function") {
+    closeables.push(() => spendCapDisconnect.call(deps.spendCapStore));
+  }
+  const buyerLockDisconnect = deps.perBuyerLock.disconnect;
+  if (typeof buyerLockDisconnect === "function") {
+    closeables.push(() => buyerLockDisconnect.call(deps.perBuyerLock));
+  }
+  runGracefulShutdown({ server, drainTimeoutMs, closeables }).register();
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.

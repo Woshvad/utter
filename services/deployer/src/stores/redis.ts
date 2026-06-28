@@ -227,5 +227,10 @@ export function createRedisStores(opts: RedisStoreOptions): DeployerStores {
   return {
     deployments: new RedisDeploymentStore(redis),
     cache: new RedisResponseCache(redis),
+    // Teardown for graceful shutdown: quit the single shared redis client (the
+    // deployment store + response cache share it). Called only after the request drain.
+    close: async () => {
+      await redis.quit();
+    },
   };
 }

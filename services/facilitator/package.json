@@ -21,6 +21,7 @@
     "@hono/node-server": "2.0.5",
     "@utter/chain": "workspace:*",
     "@utter/data-proxy": "workspace:*",
+    "@utter/observability": "workspace:*",
     "@utter/x402-arc": "workspace:*",
     "dotenv": "17.4.2",
     "hono": "4.12.26",

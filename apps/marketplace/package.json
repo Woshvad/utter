@@ -18,6 +18,7 @@
     "@utter/chain": "workspace:*",
     "@utter/erc8004": "workspace:*",
     "@utter/facilitator": "workspace:*",
+    "@utter/observability": "workspace:*",
     "@utter/sandbox": "workspace:*",
     "@utter/staking": "workspace:*",
     "@utter/x402-arc": "workspace:*",

@@ -46,6 +46,12 @@ import { escrowAbi } from "@utter/chain";
  */
 export interface PerBuyerLock {
   runExclusive<T>(buyer: Hex, fn: () => Promise<T>): Promise<T>;
+  /**
+   * OPTIONAL teardown for a durable adapter (the Redis-backed lock quits its client),
+   * called from graceful shutdown after the request drain. The in-memory default does
+   * not implement it (nothing to close), so callers guard the call with a typeof check.
+   */
+  disconnect?(): Promise<void>;
 }
 
 /**

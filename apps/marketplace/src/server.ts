@@ -11,6 +11,7 @@ import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { runGracefulShutdown } from "@utter/observability";
 import { PublishRejected } from "@utter/staking";
 // Extensionless relative specifiers (mirroring the facilitator server.ts template:
 // ./app, ./relayer). The native ts-resolver hook rewrites extensionless `./foo` to
@@ -40,6 +41,12 @@ export interface MarketplaceAppDeps {
   publishPipeline: PublishPipeline;
   /** The Bearer the authenticated POST /resources route checks; unset -> publish fails closed. */
   publishAuthSecret?: string;
+  /**
+   * Teardown for the durable stores (pg.end), called from graceful shutdown AFTER the
+   * request drain. Undefined for the in-memory default (nothing to close), so dev/test
+   * boot is byte-unchanged.
+   */
+  storesClose?: () => Promise<void>;
 }
 
 /**
@@ -130,6 +137,11 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
   indexStore: IndexStore;
   cardStore: CardStore;
   moderationStore: ModerationStore;
+  /**
+   * Teardown for the durable Postgres adapter (pg.end), threaded to graceful shutdown.
+   * Undefined for the in-memory branch (nothing to close), so dev/test boot is unchanged.
+   */
+  close?: () => Promise<void>;
 } {
   const databaseUrl = (env.DATABASE_URL ?? "").trim();
   if (databaseUrl.length > 0) {
@@ -158,7 +170,7 @@ export function resolveMarketplaceStores(env: NodeJS.ProcessEnv): {
  * createCardApp serves as a 404; a published resource resolves its finalized card.
  */
 export function buildDepsFromEnv(): MarketplaceAppDeps {
-  const { indexStore, cardStore, moderationStore } = resolveMarketplaceStores(process.env);
+  const { indexStore, cardStore, moderationStore, close } = resolveMarketplaceStores(process.env);
   const cardSource: CardSource = {
     async getCard(resourceId) {
       // Serve the FINALIZED card the publish pipeline persisted to the CardStore. The
@@ -178,6 +190,8 @@ export function buildDepsFromEnv(): MarketplaceAppDeps {
     cardSource,
     publishPipeline,
     publishAuthSecret: process.env.MARKETPLACE_AUTH_SECRET,
+    // Undefined for the in-memory branch (no close), so dev/test boot is byte-unchanged.
+    storesClose: close,
   };
 }
 
@@ -285,7 +299,14 @@ export function start(port = Number(process.env.PORT ?? "8789")): void {
   const app = createMarketplaceApp(deps);
   // Log only the service name + port (no env values; mirror the facilitator).
   console.log(`marketplace listening on :${port}`);
-  serve({ fetch: app.fetch, port });
+  // Capture the serve() handle (previously discarded) so graceful shutdown can drain
+  // in-flight requests before closing the durable stores. The only closeable is the
+  // store pool teardown, undefined for the in-memory default (so it is skipped).
+  const server = serve({ fetch: app.fetch, port });
+  const drainTimeoutMs = Number(process.env.SHUTDOWN_DRAIN_MS ?? "10000");
+  const closeables: Array<() => Promise<void>> = [];
+  if (deps.storesClose) closeables.push(deps.storesClose);
+  runGracefulShutdown({ server, drainTimeoutMs, closeables }).register();
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.

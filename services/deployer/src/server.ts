@@ -30,6 +30,7 @@ import { timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { runGracefulShutdown } from "@utter/observability";
 import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { createInMemoryStores } from "./stores/memory";
 import type { DeployerStores } from "./stores/memory";
@@ -435,7 +436,9 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   // operator who pins it to the docker bridge IP. Log only host:port (no env values).
   const hostname = process.env.HOST?.trim() || "0.0.0.0";
   console.log(`deployer listening on ${hostname}:${port}`);
-  serve({ fetch: app.fetch, hostname, port });
+  // Capture the serve() handle (previously discarded) so graceful shutdown can drain an
+  // in-flight POST /deploy stream before closing the store client.
+  const server = serve({ fetch: app.fetch, hostname, port });
 
   // HOST-GATED reconcile loop bootstrap (DEP-05 / T-03-19): start the orphan-reap +
   // runaway-quarantine + pairnet-GC loop ONLY on the provisioned gVisor host
@@ -444,9 +447,14 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   // never built and boot is byte-unchanged - no dockerode connection, no interval. The
   // loop interval is unref'd (reconcile.ts) so it never keeps the process alive. We
   // never store the handle to a closure for relaunch: the loop only reaps + GCs.
+  //
+  // `loop` is hoisted to function scope so the shutdown closure below can stop it after
+  // the request drain and before the store client closes (so no tick fires a store call
+  // against a closing client). loop?.stop() is idempotent and a no-op when undefined.
+  let loop: ReconcileLoop | undefined;
   const docker = process.env.UTTER_SANDBOX_HOST === "1" ? resolveDockerHandle() : undefined;
   if (docker) {
-    const loop = buildReconcileLoop(docker, deps, process.env);
+    loop = buildReconcileLoop(docker, deps, process.env);
     loop.start();
     const intervalMs = Number(process.env.RECONCILE_INTERVAL_MS ?? "15000");
     // Non-secret: interval only (no env values, no secrets).
@@ -454,6 +462,22 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   } else {
     console.log("reconcile loop not started (no sandbox host)");
   }
+
+  // Graceful shutdown: drain in-flight requests, THEN stop the reconcile loop, THEN close
+  // the store client. The store close is guarded with typeof so the in-memory default
+  // (no close) is skipped, leaving dev/test boot byte-unchanged.
+  const drainTimeoutMs = Number(process.env.SHUTDOWN_DRAIN_MS ?? "10000");
+  const closeables: Array<() => Promise<void>> = [];
+  if (typeof deps.stores.close === "function") {
+    const storesClose = deps.stores.close;
+    closeables.push(() => storesClose());
+  }
+  runGracefulShutdown({
+    server,
+    drainTimeoutMs,
+    beforeClosePools: () => loop?.stop(),
+    closeables,
+  }).register();
 }
 
 // Boot when run directly (node src/server.ts), not when imported by a test.

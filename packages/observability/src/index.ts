@@ -44,3 +44,13 @@ export {
   type AlertThresholds,
   type MetricSnapshot,
 } from "./alerts";
+
+// Provisioning track: the dependency-free graceful-shutdown sequencer (strict drain
+// order: stop intake -> drain -> stop loop -> close pools/clients -> exit).
+export {
+  runGracefulShutdown,
+  type HttpServerLike,
+  type ShutdownLogger,
+  type GracefulShutdownOptions,
+  type GracefulShutdown,
+} from "./shutdown";
