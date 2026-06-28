@@ -24,6 +24,11 @@
 import { Pool } from "pg";
 import type { IndexStore, IndexRecord, Hex } from "../index-store.js";
 import type { CardStore } from "../card-store.js";
+import type {
+  ModerationStore,
+  ModerationRecord,
+  ReviewItem,
+} from "../moderation/review-queue.js";
 
 // The jsonb payload shape: the full IndexRecord with its two bigint fields carried as
 // decimal strings (reputation, bond). Everything else is JSON-native already.
@@ -135,24 +140,100 @@ export class PgCardStore implements CardStore {
   }
 }
 
+/**
+ * Postgres-backed ModerationStore over two append-only tables:
+ *   moderation_decisions: seq bigserial PRIMARY KEY, resource_id text, decision text,
+ *                         reason text, ts bigint (the ModerationRecord.timestamp ms epoch).
+ *   moderation_reviews:   seq bigserial PRIMARY KEY, resource_id text, prompt text,
+ *                         reason text, ts bigint.
+ * Both logs are plain appends (no idempotency key); the bigserial seq preserves
+ * insertion order so listDecisions/listReviewQueue read back ORDER BY seq, matching the
+ * in-memory adapter's push semantics. Implements the SAME ModerationStore contract the
+ * in-memory adapter satisfies, so the publish gate swaps by env without change. ts is a
+ * plain ms-epoch number, not a money amount, so there is no decimals concern.
+ */
+export class PgModerationStore implements ModerationStore {
+  private readonly pg: Pool;
+
+  constructor(pg: Pool) {
+    this.pg = pg;
+  }
+
+  async recordDecision(record: ModerationRecord): Promise<void> {
+    await this.pg.query(
+      `INSERT INTO moderation_decisions (resource_id, decision, reason, ts)
+       VALUES ($1, $2, $3, $4)`,
+      [record.resourceId, record.decision, record.reason, record.timestamp],
+    );
+  }
+
+  async listDecisions(): Promise<ModerationRecord[]> {
+    const { rows } = await this.pg.query<{
+      resource_id: string;
+      decision: ModerationRecord["decision"];
+      reason: string;
+      ts: number;
+    }>(
+      `SELECT resource_id, decision, reason, ts
+         FROM moderation_decisions
+        ORDER BY seq`,
+    );
+    return rows.map((r) => ({
+      resourceId: r.resource_id,
+      decision: r.decision,
+      reason: r.reason,
+      timestamp: Number(r.ts),
+    }));
+  }
+
+  async enqueueReview(item: ReviewItem): Promise<void> {
+    await this.pg.query(
+      `INSERT INTO moderation_reviews (resource_id, prompt, reason, ts)
+       VALUES ($1, $2, $3, $4)`,
+      [item.resourceId, item.prompt, item.reason, item.timestamp],
+    );
+  }
+
+  async listReviewQueue(): Promise<ReviewItem[]> {
+    const { rows } = await this.pg.query<{
+      resource_id: string;
+      prompt: string;
+      reason: string;
+      ts: number;
+    }>(
+      `SELECT resource_id, prompt, reason, ts
+         FROM moderation_reviews
+        ORDER BY seq`,
+    );
+    return rows.map((r) => ({
+      resourceId: r.resource_id,
+      prompt: r.prompt,
+      reason: r.reason,
+      timestamp: Number(r.ts),
+    }));
+  }
+}
+
 /** Options for wiring the pg marketplace stores from env (DATABASE_URL). */
 export interface PgStoresOptions {
   databaseUrl: string;
 }
 
 /**
- * Build the real pg-backed marketplace stores. Both the index and card store share
- * ONE Pool. Exposes the same { indexStore, cardStore } shape the in-memory default
- * does, so server.ts swaps adapters by env without touching route logic.
- * Behavior-unverified against live Postgres (see file header).
+ * Build the real pg-backed marketplace stores. The index, card, and moderation stores
+ * all share ONE Pool. Exposes the same { indexStore, cardStore, moderationStore } shape
+ * the in-memory default does, so server.ts swaps adapters by env without touching route
+ * logic. Behavior-unverified against live Postgres (see file header).
  */
 export function createPgStores(opts: PgStoresOptions): {
   indexStore: PgIndexStore;
   cardStore: PgCardStore;
+  moderationStore: PgModerationStore;
 } {
   const pg = new Pool({ connectionString: opts.databaseUrl });
   return {
     indexStore: new PgIndexStore(pg),
     cardStore: new PgCardStore(pg),
+    moderationStore: new PgModerationStore(pg),
   };
 }

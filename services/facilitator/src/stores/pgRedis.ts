@@ -28,6 +28,9 @@ import {
   type ResultStore,
   type ReservationLock,
   type StoredResult,
+  type RevenueLedger,
+  type SettlementEntry,
+  InMemoryRevenueLedger,
   DEFAULT_RESULT_TTL_SECONDS,
 } from "@utter/x402-arc";
 import type { FacilitatorStores } from "./memory";
@@ -213,6 +216,79 @@ export class PgRedisResultStore implements ResultStore {
   }
 }
 
+/**
+ * Postgres-backed RevenueLedger (durable per-resource settlement log). Mirrors the
+ * InMemoryRevenueLedger contract so a facilitator restart no longer zeroes a
+ * creator's revenue history (the studio dashboard reads this via GET /revenue):
+ *   - record is IDEMPOTENT on idemKey (INSERT ... ON CONFLICT (idem_key) DO NOTHING),
+ *     so a settle retry that re-enters the record path never double-counts revenue
+ *     (the exactly-once money guard's sibling).
+ *   - byResource returns the entries for one resource in RECORD ORDER (ORDER BY seq).
+ *
+ * Shares the same pg Pool as the payment/result stores (no second Pool). Parameterized
+ * queries only; never string-concatenated SQL. Every USDC amount is stored as TEXT and
+ * parsed back to bigint at the boundary - never a JS number (no precision loss), never
+ * a decimals literal. The `revenue` table (idem_key PK, resource_id, kind, amount,
+ * creator_share, platform_share, tx, seq bigserial, recorded_at) carries an auto seq
+ * for stable record order.
+ */
+export class PgRevenueLedger implements RevenueLedger {
+  private readonly pg: Pool;
+
+  constructor(pg: Pool) {
+    this.pg = pg;
+  }
+
+  async record(entry: SettlementEntry): Promise<void> {
+    // Idempotent on idem_key: a settle retry re-enters here, but the revenue for that
+    // nonce must be counted exactly once. ON CONFLICT DO NOTHING drops the duplicate.
+    await this.pg.query(
+      `INSERT INTO revenue
+         (idem_key, resource_id, kind, amount, creator_share, platform_share, tx, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8 / 1000.0))
+       ON CONFLICT (idem_key) DO NOTHING`,
+      [
+        entry.idemKey,
+        entry.resourceId,
+        entry.kind,
+        entry.amount.toString(),
+        entry.creatorShare.toString(),
+        entry.platformShare.toString(),
+        entry.tx,
+        entry.at,
+      ],
+    );
+  }
+
+  async byResource(resourceId: Hex): Promise<SettlementEntry[]> {
+    const { rows } = await this.pg.query<{
+      idem_key: Hex;
+      resource_id: Hex;
+      kind: string;
+      amount: string;
+      creator_share: string;
+      platform_share: string;
+      tx: Hex;
+      recorded_at: string;
+    }>(
+      `SELECT idem_key, resource_id, kind, amount, creator_share, platform_share, tx, recorded_at
+       FROM revenue WHERE resource_id = $1 ORDER BY seq`,
+      [resourceId],
+    );
+    // Reconstruct each SettlementEntry: money strings -> bigint at the boundary.
+    return rows.map((row) => ({
+      idemKey: row.idem_key,
+      resourceId: row.resource_id,
+      amount: BigInt(row.amount),
+      creatorShare: BigInt(row.creator_share),
+      platformShare: BigInt(row.platform_share),
+      tx: row.tx,
+      kind: row.kind === "refund" ? "refund" : "settle",
+      at: new Date(row.recorded_at).getTime(),
+    }));
+  }
+}
+
 /** Options for wiring the pg+redis stores from env (DATABASE_URL / REDIS_URL). */
 export interface PgRedisOptions {
   databaseUrl: string;
@@ -230,5 +306,8 @@ export function createPgRedisStores(opts: PgRedisOptions): FacilitatorStores {
   return {
     payments: new PgRedisPaymentStore(pg, redis),
     results: new PgRedisResultStore(pg),
+    // The revenue ledger SHARES the same pg Pool (no second Pool). It is durable, so a
+    // facilitator restart no longer zeroes a creator's revenue history.
+    revenueLedger: new PgRevenueLedger(pg),
   };
 }
