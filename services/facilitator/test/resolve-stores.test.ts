@@ -24,7 +24,9 @@ import {
   resolveFacilitatorStores,
   buildDepsFromEnv,
   resolveSpendCapStore,
+  resolvePayerScreen,
 } from "../src/server";
+import { InMemoryPayerScreen } from "../src/payer-screen";
 import { createInMemoryStores } from "../src/stores/memory";
 import { PgRedisPaymentStore, PgRedisResultStore } from "../src/stores/pgRedis";
 import { RedisSpendCapStore } from "../src/stores/spend-cap-redis";
@@ -268,5 +270,62 @@ describe("resolveFacilitatorStores + spend-cap guard (production durability fail
     // pg/redis clients, then assert the spend-cap store stayed unset.
     const deps = await buildAndCleanup();
     expect(deps.spendCapStore).toBeUndefined();
+  });
+});
+
+// --- resolvePayerScreen (Compliance track) ------------------------------------------
+//
+//   SANCTIONS_DENYLIST set                         -> InMemoryPayerScreen denying those
+//   production + SANCTIONS_REQUIRED=1 + no list     -> THROWS (value-free, fail-closed)
+//   dev + no list                                  -> undefined (UNARMED, unchanged)
+//
+// resolvePayerScreen takes an env parameter, so each case passes an explicit env object
+// and never mutates process.env (no save/restore machinery needed here).
+describe("resolvePayerScreen (payer sanctions screen, prod-fail-closed)", () => {
+  it("SANCTIONS_DENYLIST set -> an InMemoryPayerScreen denying those addresses", async () => {
+    const denied = "0xAbCdEf0000000000000000000000000000000001";
+    const allowed = "0x0000000000000000000000000000000000000002";
+    const env = { SANCTIONS_DENYLIST: `${denied}, 0xDEAD000000000000000000000000000000000003` } as NodeJS.ProcessEnv;
+    const screen = resolvePayerScreen(env);
+    expect(screen).toBeInstanceOf(InMemoryPayerScreen);
+    // Denies the listed address case-insensitively; allows a non-listed one.
+    expect(await screen!.isAllowed(denied.toUpperCase())).toBe(false);
+    expect(await screen!.isAllowed(allowed)).toBe(true);
+  });
+
+  it("production + SANCTIONS_REQUIRED=1 + no list -> THROWS (fail-closed, value-free)", () => {
+    const env = { NODE_ENV: "production", SANCTIONS_REQUIRED: "1" } as NodeJS.ProcessEnv;
+    expect(() => resolvePayerScreen(env)).toThrow(/SANCTIONS_DENYLIST/);
+  });
+
+  it("production + SANCTIONS_REQUIRED=1 + only-blank list -> THROWS (empty denylist is no enforcement)", () => {
+    const env = {
+      NODE_ENV: "production",
+      SANCTIONS_REQUIRED: "1",
+      SANCTIONS_DENYLIST: "   ,  , ",
+    } as NodeJS.ProcessEnv;
+    expect(() => resolvePayerScreen(env)).toThrow(/SANCTIONS_DENYLIST/);
+  });
+
+  it("dev + no list -> undefined (UNARMED, current behavior preserved)", () => {
+    expect(resolvePayerScreen({ NODE_ENV: "development" } as NodeJS.ProcessEnv)).toBeUndefined();
+    // Even an empty object (no SANCTIONS_* at all) is unarmed.
+    expect(resolvePayerScreen({} as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it("production WITHOUT SANCTIONS_REQUIRED + no list -> undefined (not forced)", () => {
+    // Production alone does not force screening; only SANCTIONS_REQUIRED=1 does.
+    expect(resolvePayerScreen({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it("a list set in production armed regardless of SANCTIONS_REQUIRED", async () => {
+    const denied = "0x0000000000000000000000000000000000000abc";
+    const env = {
+      NODE_ENV: "production",
+      SANCTIONS_DENYLIST: denied,
+    } as NodeJS.ProcessEnv;
+    const screen = resolvePayerScreen(env);
+    expect(screen).toBeInstanceOf(InMemoryPayerScreen);
+    expect(await screen!.isAllowed(denied)).toBe(false);
   });
 });

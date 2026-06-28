@@ -39,6 +39,7 @@ import {
 } from "./settle";
 import type { RelayerPool } from "./relayer";
 import { spendCapPreReserveGate } from "./spend-cap-gate";
+import type { PayerScreen } from "./payer-screen";
 import { routeDebit } from "./batch-route";
 import type { BatchSettler } from "./batch-settler";
 import type { SpendCapStore } from "@utter/data-proxy";
@@ -91,6 +92,17 @@ export interface AppDeps {
   perPayerDayCap?: bigint;
   /** Injected clock (ms since epoch) for the spend-cap window + expiry. Defaults to Date.now. */
   now?: () => number;
+
+  // ---- Compliance: payer (buyer) sanctions screening ----
+  /**
+   * OPTIONAL payer-address sanctions screen. When set, POST /verify screens the claimed
+   * buyer address against it BEFORE the spend-cap gate and BEFORE the reserve, so a
+   * screened payer makes NO reservation and consumes ZERO compute. A screened buyer is a
+   * 403 `payer_screened`; a screen throw DENIES (fail-closed). UNSET (the default) = no
+   * screening, so existing deployments and tests are unchanged. This is an address
+   * DENYLIST screen (sanctions), NOT KYC. server.ts wires it from SANCTIONS_DENYLIST.
+   */
+  payerScreen?: PayerScreen;
 
   // ---- CR-02: sub-cent batching (route sub-threshold debits to a BatchSettler) ----
   /**
@@ -225,6 +237,24 @@ export function createApp(deps: AppDeps): Hono {
         maxTimeoutSeconds: requirements.maxTimeoutSeconds,
         settleBufferSeconds: deps.settleBufferSeconds,
       });
+
+    // Compliance: payer sanctions screen. When a screen is configured, deny a sanctioned
+    // buyer BEFORE the spend-cap gate and BEFORE the reserve so a screened payer makes NO
+    // reservation and consumes ZERO compute. A screen throw DENIES (fail-closed): a feed
+    // read failure must never open an unscreened money path. Screens the CLAIMED buyer
+    // (the same key the spend-cap gate uses); the real signer is screened when it reserves
+    // as itself, and a forged clean-buyer claim fails the signature check at reserve. A
+    // no-op when unconfigured. Never logs the address.
+    if (deps.payerScreen) {
+      const buyer = (payment.authorization.buyer as string).toLowerCase();
+      let allowed = false;
+      try {
+        allowed = await deps.payerScreen.isAllowed(buyer);
+      } catch {
+        allowed = false; // fail-closed: a screen error denies
+      }
+      if (!allowed) return c.json({ valid: false, reason: "payer_screened" }, 403);
+    }
 
     // CR-01: per-payer rolling-24h spend cap. When a store + cap are configured, run the
     // deny-by-default gate BEFORE the reserve so an over-cap payer consumes ZERO compute
