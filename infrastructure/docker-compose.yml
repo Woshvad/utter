@@ -109,6 +109,10 @@ services:
       context: ..
       dockerfile: services/facilitator/Dockerfile
     restart: unless-stopped
+    # Drain margin: SHUTDOWN_DRAIN_MS defaults to 10s, which equals Docker's default
+    # stop grace, leaving zero headroom before SIGKILL. 15s gives the request drain
+    # room to finish on a plain `docker stop` (compose enforces it; no -t 15 needed).
+    stop_grace_period: 15s
     networks: [controlplane, upstreamnet, redisnet, backendnet]
     depends_on:
       postgres:
@@ -239,6 +243,10 @@ services:
       context: ..
       dockerfile: apps/marketplace/Dockerfile
     restart: unless-stopped
+    # Drain margin: SHUTDOWN_DRAIN_MS defaults to 10s, which equals Docker's default
+    # stop grace, leaving zero headroom before SIGKILL. 15s gives the request drain
+    # room to finish on a plain `docker stop` (compose enforces it; no -t 15 needed).
+    stop_grace_period: 15s
     networks: [ingress, controlplane, backendnet]
     depends_on:
       postgres:

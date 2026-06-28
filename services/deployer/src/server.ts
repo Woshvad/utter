@@ -588,7 +588,12 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   runGracefulShutdown({
     server,
     drainTimeoutMs,
-    beforeClosePools: () => loop?.stop(),
+    // Await loop.stop() so the live reconcile tick settles BEFORE the closeable quits
+    // redis: no in-flight store call survives into the client close (the loop's own
+    // documented invariant). loop?.stop() is idempotent and a no-op when undefined.
+    beforeClosePools: async () => {
+      await loop?.stop();
+    },
     closeables,
   }).register();
 }

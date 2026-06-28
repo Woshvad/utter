@@ -264,6 +264,59 @@ describe("createReconcileLoop (DEP-05)", () => {
     // Idempotent stop.
     expect(() => loop.stop()).not.toThrow();
   });
+
+  it("stop() returns a resolved promise when the loop was never started", async () => {
+    const store = new InMemoryDeploymentStore();
+    const listContainers = vi.fn(async (): Promise<ActualContainer[]> => []);
+    const loop = createReconcileLoop({ store, listContainers, intervalMs: 60_000 });
+    // No start, no tick: stop() must resolve immediately (no pending tick to await).
+    await expect(loop.stop()).resolves.toBeUndefined();
+  });
+
+  it("stop() AWAITS an in-flight interval tick before resolving (shutdown race fix)", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new InMemoryDeploymentStore();
+      const r1: Hex = `0x${"e7".repeat(32)}`;
+      await store.put(record(r1));
+
+      // A controlled deferred: the in-flight tick's listContainers blocks here until we
+      // resolve it, so the tick is provably still running when stop() is called.
+      let releaseList!: (v: ActualContainer[]) => void;
+      const listGate = new Promise<ActualContainer[]>((resolve) => {
+        releaseList = resolve;
+      });
+      const listContainers = vi.fn((): Promise<ActualContainer[]> => listGate);
+
+      const loop = createReconcileLoop({ store, listContainers, intervalMs: 10_000 });
+      loop.start();
+
+      // Fire exactly one interval tick. The tick now hangs inside listContainers().
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listContainers).toHaveBeenCalledTimes(1);
+
+      // stop() is called while the tick is in flight. Its promise MUST NOT resolve until
+      // the deferred settles. Race it against a microtask tick to prove it is pending.
+      const stopped = loop.stop();
+      let stopResolved = false;
+      void stopped.then(() => {
+        stopResolved = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(stopResolved).toBe(false); // still awaiting the live tick
+
+      // Release the in-flight tick. NOW stop() resolves (it awaited the tick to settle).
+      releaseList([container(r1)]);
+      await expect(stopped).resolves.toBeUndefined();
+
+      // The interval was cleared by stop(): no further ticks fire even after more time.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(listContainers).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("reconcile - status filter (only active records are desired-running, H4)", () => {

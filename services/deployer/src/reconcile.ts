@@ -206,8 +206,15 @@ export interface ReconcileLoop {
   tick(): Promise<ReconcileResult>;
   /** Begin ticking on the interval. Idempotent (a second start is a no-op). */
   start(): void;
-  /** Stop the interval. Idempotent. */
-  stop(): void;
+  /**
+   * Stop the interval. Idempotent. Returns a promise that resolves once any
+   * in-flight tick has settled, so a shutdown sequencer can AWAIT the live tick
+   * before it closes the shared store client (no store call survives into the
+   * close). Resolves immediately when no tick is in flight (or the loop was
+   * never started). Backward compatible: callers that ignore the return are
+   * unaffected.
+   */
+  stop(): Promise<void>;
 }
 
 /**
@@ -252,8 +259,15 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
   // CPU runaway signal can accumulate. Pruned each tick to the live container set so
   // it cannot grow unbounded.
   const consecutiveHighCpu = new Map<string, number>();
+  // The in-flight tick, tracked so stop() can await it before the shutdown sequencer
+  // closes the shared store client. Set at the top of run() and cleared in its finally
+  // (only when it is still the same promise, so an overlapping run never clears a peer).
+  // Covers BOTH interval-driven and direct tick() calls.
+  let current: Promise<ReconcileResult> | null = null;
 
-  async function tick(): Promise<ReconcileResult> {
+  // The reconcile pass body. tick() wraps this so the in-flight promise is tracked
+  // around the whole run regardless of how it was invoked.
+  async function runTick(): Promise<ReconcileResult> {
     // Read actual FIRST so the runaway pass can quarantine wedged containers before
     // we read desired state (a quarantined record is then excluded from toLaunch).
     const actual = await opts.listContainers();
@@ -458,9 +472,26 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
     return result;
   }
 
+  // Track the in-flight run so stop() can await it. The run is set as `current` at
+  // entry and cleared in the finally only if it is still the same promise (an
+  // overlapping run must never clear a peer's tracking). Both interval-driven ticks
+  // and direct tick() calls flow through here, so the guarantee holds for both.
+  function tick(): Promise<ReconcileResult> {
+    const run = runTick();
+    current = run;
+    void run.finally(() => {
+      if (current === run) current = null;
+    });
+    return run;
+  }
+
   function start(): void {
     if (timer !== null) return; // idempotent: already running
     timer = setInterval(() => {
+      // RE-ENTRANCY GUARD (interval only): skip a new interval tick while one is
+      // still in flight so ticks never overlap. This guard lives ONLY in the
+      // interval callback - a direct tick() call always runs (tests rely on that).
+      if (current !== null) return;
       // A transient dockerode error must never crash the loop, but it MUST be
       // visible (WR-06): surface it via onError instead of swallowing. The next
       // tick re-reads fresh state.
@@ -475,10 +506,18 @@ export function createReconcileLoop(opts: ReconcileLoopOpts): ReconcileLoop {
     (timer as { unref?: () => void }).unref?.();
   }
 
-  function stop(): void {
-    if (timer === null) return; // idempotent: already stopped
-    clearInterval(timer);
-    timer = null;
+  // Stop the interval AND return the in-flight tick so a caller can await it before
+  // closing the shared store client. Idempotent: clearing a null timer is a no-op and
+  // a never-started loop has no `current`, so it resolves immediately. The tick is not
+  // cancelled - it is allowed to finish so a partial store write never tears mid-call.
+  function stop(): Promise<void> {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+    // Await the live tick (resolve/reject swallowed: stop() only needs the tick to
+    // SETTLE, and a tick's own errors are already surfaced via onError on its path).
+    return current ? current.then(() => undefined, () => undefined) : Promise.resolve();
   }
 
   return { tick, start, stop };
