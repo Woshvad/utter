@@ -11,7 +11,13 @@
 // native gas token and the 6-dp ERC-20. Every amount formatted here reads
 // `decimals()` from USDC at call time via viem `formatUnits` - exactly like
 // readUsdcBalance. There is intentionally no numeric decimals literal below.
-import { formatUnits, isAddress, type Address, type PublicClient } from "viem";
+import {
+  formatUnits,
+  getAbiItem,
+  isAddress,
+  type Address,
+  type PublicClient,
+} from "viem";
 import { erc20Abi, escrowAbi, stakingVaultAbi } from "./abis";
 import { USDC, PAYMENT_ESCROW, STAKING_VAULT } from "./addresses";
 import { type UsdcBalance } from "./usdc";
@@ -26,6 +32,24 @@ type Hex = `0x${string}`;
  * name the escrow balance distinctly while the structure stays identical.
  */
 export type EscrowBalance = UsdcBalance;
+
+/** One on-chain PaymentEscrow.Withdrawn record - a creator's money OUT. */
+export interface WithdrawalRecord {
+  /** The on-chain tx hash of the withdraw (for the ArcScan TxLink). */
+  tx: Hex;
+  /** The withdrawn amount in USDC base units (bigint). */
+  amount: bigint;
+  /** The block number the withdraw landed in (drives newest-first ordering). */
+  blockNumber: bigint;
+}
+
+/** An account's withdrawal history: the records (newest-first) + runtime decimals. */
+export interface WithdrawalHistory {
+  /** Withdrawal records, newest-first. */
+  records: WithdrawalRecord[];
+  /** Decimals read from USDC at runtime (never a literal). */
+  decimals: number;
+}
 
 /** A resource's bond status as read from the StakingVault, amounts in base units. */
 export interface BondStatus {
@@ -80,6 +104,66 @@ export async function readEscrowBalance(
     decimals,
     formatted: formatUnits(raw, decimals),
   };
+}
+
+/**
+ * Read an account's PaymentEscrow.Withdrawn events - the outflows that
+ * `escrow.withdraw` emitted - formatted with USDC's runtime decimals. The `account`
+ * is the indexed topic, so the getLogs filter is exact. The full account history is
+ * scanned by default (fromBlock 0n, no silent window cap); fromBlock is pinnable for
+ * RPCs that limit the block range. This is a pure read - it mirrors readEscrowBalance
+ * (the local Hex alias, the isAddress guard, the runtime decimals discipline) and
+ * never touches a write path.
+ *
+ * @throws if `account` is not a valid EVM address (ASVS V5 input validation).
+ */
+export async function readWithdrawals(
+  client: PublicClient,
+  account: Address,
+  opts?: { escrowAddress?: Address; fromBlock?: bigint },
+): Promise<WithdrawalHistory> {
+  if (!isAddress(account)) {
+    throw new Error(`readWithdrawals: invalid account address: ${account}`);
+  }
+
+  const escrowAddress = opts?.escrowAddress ?? PAYMENT_ESCROW;
+  // Full history by default - the documented no-silent-cap choice. fromBlock is
+  // pinnable for RPCs that limit the scan range.
+  const fromBlock = opts?.fromBlock ?? 0n;
+
+  // Resolve the Withdrawn event item from escrowAbi so the fragment stays single-
+  // sourced (the same ABI the facilitator decodes against), never re-typed here.
+  const withdrawnEvent = getAbiItem({ abi: escrowAbi, name: "Withdrawn" });
+
+  // Read USDC decimals() and the account's Withdrawn logs together. `decimals` comes
+  // from chain, never a literal - the CHAIN-03 enforcement point. The logs are
+  // filtered by the indexed `account` topic (viem's house filter) against the escrow.
+  const [decimals, logs] = await Promise.all([
+    client.readContract({
+      address: USDC,
+      abi: erc20Abi,
+      functionName: "decimals",
+    }),
+    client.getLogs({
+      address: escrowAddress,
+      event: withdrawnEvent,
+      args: { account },
+      fromBlock,
+      toBlock: "latest",
+    }),
+  ]);
+
+  // Drop pending logs (no blockNumber / txHash yet), map to records, sort newest-first.
+  const records: WithdrawalRecord[] = logs
+    .filter((l) => l.blockNumber != null && l.transactionHash != null)
+    .map((l) => ({
+      tx: l.transactionHash as Hex,
+      amount: l.args.amount as bigint,
+      blockNumber: l.blockNumber as bigint,
+    }))
+    .sort((a, b) => (a.blockNumber < b.blockNumber ? 1 : a.blockNumber > b.blockNumber ? -1 : 0));
+
+  return { records, decimals };
 }
 
 /**
