@@ -484,4 +484,22 @@ describe("selectProber (env-driven, mirrors selectGenerator)", () => {
       "live-https",
     );
   });
+
+  it("threads an injected validateCard override into the live prober (still live-https)", () => {
+    // A caller MAY override the live prober's light default with the authoritative
+    // validator. selectProber cannot inject a fetcher, so it cannot drive an offline
+    // network probe through the returned prober (its LiveHttpsProber uses the real
+    // default fetch). We assert only the two honest, offline facts: the override is
+    // accepted and the backend is still the operator-gated live prober. The real proof
+    // that the injected validateAgentCard runs inside the publish gate is the marketplace
+    // end-to-end suite (publish-live-probe.test.ts), which injects both a fake fetcher
+    // and the authoritative validator into a directly-constructed LiveHttpsProber.
+    const validateCard: ProbeCardValidator = () => ({ valid: false, errors: ["override"] });
+    const prober = selectProber(
+      { SCORER_LIVE_HTTPS_HOST: "x.resources.example" },
+      undefined,
+      { validateCard },
+    );
+    expect(prober.backend).toBe("live-https");
+  });
 });

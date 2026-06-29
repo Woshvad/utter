@@ -428,17 +428,33 @@ function errMsg(e: unknown): string {
  * not explicitly forced to fixture. The FixtureProber needs a fixture spec, so the
  * default fixture uses a benign always-pass result when none is supplied; callers
  * that drive a synthetic stream construct FixtureProber directly.
+ *
+ * A caller MAY pass `opts.validateCard` to override the live prober's dependency-free
+ * light default with the authoritative card validator (the marketplace passes
+ * @utter/ai-runtime validateAgentCard, the same validator the card route and the buyer
+ * pay flow use), so the publish-time probe validates an attacker-served card with the
+ * real ajv A2A v0.3.0 schema, not just the light structural check. Off-host (the
+ * FixtureProber branch) the override is simply unused, and omitting it is byte-identical
+ * to before: LiveHttpsProber's constructor falls back to the light default
+ * (opts.validateCard ?? lightValidateCard), so `validateCard: undefined` is the prior
+ * behavior. The FixtureProber branch is unchanged.
  */
 export function selectProber(
   env: NodeJS.ProcessEnv = process.env,
   fixture: FixtureSpec = ALWAYS_PASS,
+  opts?: { validateCard?: ProbeCardValidator },
 ): ResourceProber {
   if (env.SCORER_PROBER === "fixture" || !env.SCORER_LIVE_HTTPS_HOST) {
     return new FixtureProber(fixture);
   }
   // Bind the live prober to the operator's resources domain so it only ever probes
-  // *.resources.<domain> endpoints (SSRF guard), never an internal host.
-  return new LiveHttpsProber({ allowedHost: env.SCORER_LIVE_HTTPS_HOST });
+  // *.resources.<domain> endpoints (SSRF guard), never an internal host. The optional
+  // validateCard override threads the authoritative validator through when the caller
+  // supplies it; undefined falls back to the light default inside the constructor.
+  return new LiveHttpsProber({
+    allowedHost: env.SCORER_LIVE_HTTPS_HOST,
+    validateCard: opts?.validateCard,
+  });
 }
 
 /** A benign always-pass fixture result (the selectProber default with no live host). */
