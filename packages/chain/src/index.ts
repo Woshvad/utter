@@ -10,8 +10,10 @@ export { arcTestnet, createArcPublicClient } from "./arc";
 // 5042002 / eip155:5042002, so a mainnet cut to arcTestnet.id reflows everywhere.
 export { ARC_CHAIN_ID, ARC_CAIP2_NETWORK } from "./arc";
 
-// Wallet (write-path) client factory for the relayer signer pool (Phase 2)
-export { createArcWalletClient } from "./wallet";
+// Wallet (write-path) client factory for the relayer signer pool (Phase 2) +
+// the from-key buyer/signer factory that keeps viem's privateKeyToAccount
+// encapsulated in @utter/chain (so consumers need no runtime viem import).
+export { createArcWalletClient, createArcWalletClientFromKey } from "./wallet";
 
 // Pinned Arc Testnet address constants (SPEC §6)
 export {

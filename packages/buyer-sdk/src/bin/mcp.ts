@@ -31,7 +31,8 @@ import { createBuyerClient } from "../client.js";
 import { createDemoWiring } from "../demo.js";
 import { createMcpServerAsync } from "../mcp/server.js";
 import { createBudgetGuard, readBudgetCapsFromEnv } from "../mcp/budget.js";
-import type { CardListSource, DiscoveredCard } from "../mcp/tools.js";
+import type { CardListSource } from "../mcp/tools.js";
+import { createLiveCardSource } from "../mcp/live-discovery.js";
 
 /**
  * Build the buyer wallet from the .env.local key. The key is read ONCE here and held in
@@ -54,25 +55,23 @@ function buyerWalletFromEnv(env: NodeJS.ProcessEnv) {
 }
 
 /**
- * The live discovery source reads the deployed marketplace index. It is operator-gated
- * (no marketplace URL provisioned in the autonomous build) and fail-louds rather than
- * fabricate a card list.
+ * The live discovery source reads the deployed marketplace index. It is operator-gated:
+ * the operator must set MARKETPLACE_INDEX_URL in .env.local (we fail loud when absent).
+ * Once set, it delegates to createLiveCardSource, which reads the PUBLIC marketplace
+ * GET /resources (global fetch) and projects each row to a DiscoveredCard using the TRUSTED
+ * @utter/chain constants for escrow/asset and the resourceId for payTo. The live PATH is
+ * still gated upstream by selectBuyerTransport (RequiresLiveBuyerError); this only makes the
+ * discovery READ real. Diagnostics on stderr only - never stdout.
  */
 function liveCardSource(env: NodeJS.ProcessEnv): CardListSource {
-  return async (): Promise<DiscoveredCard[]> => {
-    const url = env.MARKETPLACE_INDEX_URL;
-    if (!url || url.trim() === "") {
-      throw new Error(
-        "utter-buyer-mcp: live discovery requires MARKETPLACE_INDEX_URL in .env.local " +
-          "(operator-gated; the live BUY-03 demo is provisioned separately).",
-      );
-    }
-    // The live marketplace read is wired here when provisioned; until then, fail loud.
+  const url = env.MARKETPLACE_INDEX_URL;
+  if (!url || url.trim() === "") {
     throw new Error(
-      "utter-buyer-mcp: the live marketplace discovery read is operator-gated and not " +
-        "provisioned in this build (BUY-03 live demo is a Deferred Item).",
+      "utter-buyer-mcp: live discovery requires MARKETPLACE_INDEX_URL in .env.local " +
+        "(operator-gated; the live BUY-03 demo is provisioned separately).",
     );
-  };
+  }
+  return createLiveCardSource({ marketplaceIndexUrl: url.trim() });
 }
 
 /**

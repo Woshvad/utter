@@ -25,9 +25,11 @@ import {
 } from "@utter/ai-runtime";
 import type { Pricing } from "@utter/x402-arc";
 import { runPlaygroundHarness, type PlaygroundHarnessResult } from "./playground-harness.js";
+import { resolvePlaygroundHarness } from "./playground-live.server.js";
 import { BuildEventChannel } from "./build-channel.js";
 import { streamDeploy } from "./deployer-client.server.js";
 import { publishResource, type PublishParams } from "./marketplace-client.server.js";
+import { queryMarketplaceResources } from "./marketplace-discovery-client.server.js";
 import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
 import type { BuildEvent, Hex, RevenueSummary } from "./types.js";
 
@@ -99,6 +101,16 @@ export interface LiveDeps {
   publishToMarketplace?: (
     params: PublishParams,
   ) => Promise<{ listed: boolean; agentId?: string }>;
+  /**
+   * The live discovery READ seam. GETs the marketplace SERVICE's public GET /resources and
+   * reconstructs the IndexRecord[] (bigint money fields). Bound ONLY when MARKETPLACE_URL
+   * is set: reads are PUBLIC, so unlike publishToMarketplace this does NOT require
+   * MARKETPLACE_AUTH_SECRET. When bound, listMarketplace reads the live marketplace service
+   * (the single source of discovery truth); when unbound, listMarketplace falls back to the
+   * seeded module-singleton IndexStore (local-dev). The studio authors no money/identity
+   * value either way.
+   */
+  listResources?: () => Promise<IndexRecord[]>;
 }
 
 /**
@@ -224,8 +236,15 @@ function seedRecords(env: NodeJS.ProcessEnv): IndexRecord[] {
  *      route share the same per-resource stage buffers.
  *   4. Bind generate to selectGenerator(env).generate (scaffold by default, no
  *      ANTHROPIC key) and validate to validateBundle, so the adapter stays env-free.
- *   5. Bind runPlayground to runPlaygroundHarness verbatim (reused like the fixture),
- *      keeping the reserve-before-run escrow gate intact (T-mdx-02).
+ *   5. Bind runPlayground to the RESOLVED playground harness (resolvePlaygroundHarness):
+ *      the in-process runPlaygroundHarness mock by default (the dev/demo/"test it" path,
+ *      reserve-before-run escrow gate intact, T-mdx-02), or the real liveTestEndpoint
+ *      buyer pay flow when PLAYGROUND_HARNESS=live. The live branch resolves the
+ *      resource's deployed card URL (the live marketplace list when bound, else the
+ *      seeded local index) and stays operator-armed (TEST_BUYER_PRIVATE_KEY).
+ *   6. Bind the discovery READ seam listResources when MARKETPLACE_URL is set (public,
+ *      no secret), so listMarketplace reads the live marketplace SERVICE; unbound, it
+ *      falls back to the seeded local-dev index.
  */
 /** The default facilitator base URL (mirrors the buyer/middleware in-process default). */
 const DEFAULT_FACILITATOR_URL = "http://localhost:8787";
@@ -312,15 +331,43 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
           publishResource(p, { marketplaceUrl, authSecret: marketplaceAuthSecret })
       : undefined;
 
+  // Bind the discovery READ seam when MARKETPLACE_URL is set. Reads are PUBLIC, so this
+  // does NOT require MARKETPLACE_AUTH_SECRET (unlike publishToMarketplace above): when the
+  // marketplace URL is configured, listMarketplace reads the live marketplace SERVICE;
+  // unbound, it falls back to the seeded local-dev index. No bearer is read or passed here.
+  const listResources = marketplaceUrl
+    ? () => queryMarketplaceResources({ marketplaceUrl })
+    : undefined;
+
+  // Capture the module-singleton index store once so both the deps `indexStore` field and
+  // the playground card-URL resolver below read the SAME seeded instance.
+  const indexStore = getSharedIndexStore(env);
+
   return {
     publicClient,
-    indexStore: getSharedIndexStore(env),
+    indexStore,
     buildChannel: getSharedBuildChannel(),
     // selectGenerator returns the scaffold backend whenever ANTHROPIC_API_KEY is
     // absent (the autonomous default), so generate stays offline with no model call.
     generate: (spec) => selectGenerator(env).generate(spec),
     validate: (bundle, spec) => validateBundle(bundle, spec),
-    runPlayground: runPlaygroundHarness,
+    // The resolved playground harness: the in-process mock (runPlaygroundHarness) by
+    // default; the real liveTestEndpoint buyer pay flow when PLAYGROUND_HARNESS=live. The
+    // card-URL resolver prefers the live marketplace list when bound (subtask A), else the
+    // seeded module-singleton index, and returns null when the resource is unknown.
+    runPlayground: resolvePlaygroundHarness(env, {
+      getCardUrl: async (resourceId) => {
+        if (listResources) {
+          const rows = await listResources();
+          const hit = rows.find(
+            (r) => r.resourceId.toLowerCase() === resourceId.toLowerCase(),
+          );
+          return hit?.cardUrl ?? null;
+        }
+        const rec = await indexStore.get(resourceId as Hex);
+        return rec?.cardUrl ?? null;
+      },
+    }),
     // Real revenue aggregation: GET FACILITATOR_URL/revenue/:resourceId (fail-loud).
     getRevenue: (resourceId) => fetchRevenue(resourceId, facilitatorUrl),
     // Bind the cardUrl builder to this env so live.ts stays free of process.env. The
@@ -331,5 +378,8 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     // Marketplace publish seam: bound only when MARKETPLACE_URL + MARKETPLACE_AUTH_SECRET
     // are both set; undefined otherwise (the local-index-only Publish stage).
     publishToMarketplace,
+    // Discovery read seam: bound only when MARKETPLACE_URL is set (reads are public, no
+    // secret); undefined otherwise so listMarketplace reads the seeded local-dev index.
+    listResources,
   };
 }

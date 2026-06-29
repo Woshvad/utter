@@ -20,7 +20,17 @@ import type { Context } from "hono";
 // at build, no runtime resolution), so the package keeps no runtime viem coupling - it
 // only borrows the PublicClient shape the injected chain client must satisfy.
 import type { PublicClient } from "viem";
-import { erc20Abi, USDC, PAYMENT_ESCROW, PAYMENT_SPLITTER } from "@utter/chain";
+import {
+  erc20Abi,
+  USDC,
+  PAYMENT_ESCROW,
+  PAYMENT_SPLITTER,
+  createArcPublicClient,
+  createArcWalletClientFromKey,
+} from "@utter/chain";
+// validateAgentCard is the STRUCTURAL A2A-shape HARD gate run BEFORE any pay input
+// is read from an UNTRUSTED card (already a marketplace dep, used in card-route/publish).
+import { validateAgentCard } from "@utter/ai-runtime";
 import {
   buildClassifier,
   requirePayment,
@@ -138,6 +148,96 @@ function readCardInputs(card: Record<string, unknown>, cap: bigint): CardPayInpu
     payTo: x402.payTo as Hex,
     pricing,
     cap,
+    bondPosted: bond.posted === true,
+    verified: health.verified === true,
+  };
+}
+
+/** Case-insensitive 0x-address equality (addresses are not case-significant). */
+function eqAddr(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * The STRICT card reader for the buyer-side live runner. The deployed resource's
+ * card is UNTRUSTED JSON crossing a trust boundary. This MIRRORS buyer-sdk's
+ * discover.ts (the marketplace cannot import buyer-sdk: circular dep): it HARD-gates
+ * on validateAgentCard, then PINS the money fields against the TRUSTED @utter/chain
+ * constants BEFORE reading a single pay input (T-07-CARDPOISON / CR-01 / WR-05):
+ *   - x402.escrow MUST equal the canonical PAYMENT_ESCROW (case-insensitive)
+ *   - x402.asset MUST equal the canonical USDC (case-insensitive)
+ *   - x402.payTo MUST be a well-formed bytes32 resourceId
+ *   - pricing.max MUST be a plain base-unit integer (`^\d+$`) BEFORE BigInt() so a
+ *     poisoned non-numeric cap yields a clean rejection, never a raw SyntaxError
+ * A card that fails any check throws and NEVER pays. The EXISTING (trusting)
+ * readCardInputs stays UNCHANGED for the in-process runTestEndpoint proof.
+ */
+function readCardInputsStrict(card: Record<string, unknown>): CardPayInputs {
+  // (1) HARD GATE - validate BEFORE trusting. An invalid/poisoned card throws here
+  // and NO pay input below is read (a poisoned card never pays).
+  const check = validateAgentCard(card);
+  if (!check.valid) {
+    throw new Error(
+      `liveTestEndpoint: invalid agent card (never pays): ${JSON.stringify(check.errors)}`,
+    );
+  }
+
+  const x402 = (card.x402 as Record<string, unknown> | undefined) ?? {};
+  const pricingRaw = (x402.pricing as Record<string, unknown> | undefined) ?? {};
+  const health = (card.health as Record<string, unknown> | undefined) ?? {};
+  const bond = (card.bond as Record<string, unknown> | undefined) ?? {};
+  const pricing: Pricing = {
+    model: "metered",
+    base: typeof pricingRaw.base === "string" ? pricingRaw.base : "0",
+    perKB: typeof pricingRaw.perKB === "string" ? pricingRaw.perKB : "0",
+    // The card's ProjectedPricing carries no computeMultiplier; a 0 compute term keeps
+    // the metered amount bounded by the signed cap regardless (deterministic + safe).
+    computeMultiplier:
+      typeof pricingRaw.computeMultiplier === "string" ? pricingRaw.computeMultiplier : "0",
+    maxResponseBytes:
+      typeof pricingRaw.maxResponseBytes === "number" ? pricingRaw.maxResponseBytes : 1_048_576,
+  };
+
+  // (2) WR-05: the cap string is UNTRUSTED. Validate it is a plain base-unit integer
+  // BEFORE BigInt() so a hostile non-numeric pricing.max ("1e9", "0x10", " 5 ", "abc")
+  // yields a clean rejection (fail-closed: never pays), not a raw SyntaxError.
+  const capRaw = typeof pricingRaw.max === "string" ? pricingRaw.max : "0";
+  if (!/^\d+$/.test(capRaw)) {
+    throw new Error(
+      `liveTestEndpoint: card pricing.max ${JSON.stringify(capRaw)} is not a base-unit ` +
+        `integer (refusing to pay)`,
+    );
+  }
+
+  // (3) CR-01: PIN the money fields against the TRUSTED on-chain constants. A
+  // structurally valid card can still carry an attacker-chosen escrow/asset/payTo;
+  // reject any card whose escrow != the canonical PaymentEscrow or asset != the
+  // canonical USDC, and require payTo to be a well-formed bytes32. After this gate the
+  // buyer only ever signs a DebitAuthorization whose verifyingContract is the real
+  // escrow and whose payTo came solely from the pinned card.
+  const escrow = x402.escrow;
+  const asset = x402.asset;
+  const payTo = x402.payTo;
+  if (typeof escrow !== "string" || !eqAddr(escrow, PAYMENT_ESCROW)) {
+    throw new Error(
+      "liveTestEndpoint: card escrow does not match the trusted PaymentEscrow (refusing to pay)",
+    );
+  }
+  if (typeof asset !== "string" || !eqAddr(asset, USDC)) {
+    throw new Error(
+      "liveTestEndpoint: card asset does not match the trusted USDC (refusing to pay)",
+    );
+  }
+  if (typeof payTo !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(payTo)) {
+    throw new Error("liveTestEndpoint: card payTo is not a bytes32 resourceId (refusing to pay)");
+  }
+
+  return {
+    escrow: escrow as `0x${string}`,
+    asset: asset as `0x${string}`,
+    payTo: payTo as Hex,
+    pricing,
+    cap: BigInt(capRaw),
     bondPosted: bond.posted === true,
     verified: health.verified === true,
   };
@@ -371,57 +471,195 @@ export async function runTestEndpoint(opts: RunTestEndpointOptions): Promise<Tes
   };
 }
 
-// --- The OPERATOR-GATED live runner shape (mirrors live-money-path.ts gating) -------
+// --- The buyer-side live runner (implemented; injectable seams; offline-proven) -----
 //
-// liveTestEndpoint runs the SAME pay flow over a DEPLOYED HTTPS endpoint with a real
-// funded buyer EOA - it broadcasts an irreversible on-chain debit. It is OPERATOR-
-// GATED exactly like live-money-path.ts: it reads TEST_BUYER_PRIVATE_KEY +
-// RELAYER_SIGNER_KEYS from .env.local (NEVER logged), targets the live Arc RPC (not a
-// fork - Pitfall 4), and is NEVER executed by the autonomous suite. It is written +
-// type-checked here so the operator can run it post-deploy; calling it without the
-// funded keys throws RequiresFundedWalletError.
+// liveTestEndpoint runs the SAME pay flow over a DEPLOYED HTTPS endpoint, but it is the
+// BUYER-SIDE HALF only: it pays a resource whose gate already calls the DEPLOYED
+// facilitator (which owns the relayer and settles). So there is NO relayer here - just
+// discover -> runtime decimals -> GET 402 -> sign DebitAuthorization(cap) -> POST
+// X-PAYMENT -> 200 + receipt. The chain/wallet/fetch are INJECTABLE seams: the offline
+// test injects an in-process gated endpoint + a mock chain + an ephemeral wallet,
+// proving the orchestration WITHOUT a real tx. The operator path builds the real funded
+// wallet + real Arc client + global fetch from env and broadcasts a real debit. The
+// live on-chain broadcast is operator-armed via TEST_BUYER_PRIVATE_KEY + a deployed
+// resource; with no injected wallet AND no funded key the runner throws
+// RequiresFundedWalletError before any network or chain call, so the autonomous suite
+// (which never sets the key) can never broadcast a tx. The buyer key is read only from
+// env (.env.local) and is NEVER logged or placed in a thrown message.
 
-/** Thrown when liveTestEndpoint is invoked without the operator-provided funded keys. */
+/** Thrown when liveTestEndpoint is invoked without an injected wallet AND no funded buyer key. */
 export class RequiresFundedWalletError extends Error {
   readonly code = "requiresFundedWallet" as const;
   constructor() {
     super(
-      "liveTestEndpoint requires a funded buyer EOA (TEST_BUYER_PRIVATE_KEY) + " +
-        "RELAYER_SIGNER_KEYS in .env.local and a DEPLOYED resource over HTTPS. The live " +
-        "funded-wallet pay flow is operator-gated; it is NOT run autonomously.",
+      "liveTestEndpoint requires a funded buyer EOA (TEST_BUYER_PRIVATE_KEY in " +
+        ".env.local) and a DEPLOYED resource over HTTPS, or an injected buyer wallet + " +
+        "public client. The live funded-wallet pay flow is operator-gated; it is NOT run " +
+        "autonomously.",
     );
     this.name = "RequiresFundedWalletError";
   }
 }
 
-/** Options for the operator-gated live run (the deployed endpoint + the resource card URL). */
+/** A minimal HTTP fetch shape (injectable; defaults to the global fetch in the operator path). */
+type HttpFetch = (
+  input: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+) => Promise<Response>;
+
+/** Options for the buyer-side live run (the deployed card + pay URLs, plus offline seams). */
 export interface LiveTestEndpointOptions {
-  /** The deployed resource's card URL (the live discovery source). */
+  /** The deployed resource's agent-card URL (the discovery source). */
   cardUrl: string;
-  /** The deployed resource endpoint base URL (the live pay target). */
+  /** The deployed resource's pay URL (the full POST target, e.g. .../call). */
   endpointUrl: string;
-  /** The env carrying the funded keys (read ONLY from .env.local; never logged). */
+  /** Optional override request payload sent to the resource (defaults to a benign echo body). */
+  requestBody?: unknown;
+  /** The env carrying the funded buyer key (read ONLY from .env.local; never logged). */
   env?: NodeJS.ProcessEnv;
+  /** Injectable HTTP transport (the OFFLINE test seam). Omitted -> the global fetch. */
+  fetcher?: HttpFetch;
+  /** Injectable chain read client (the OFFLINE test seam). Omitted -> built real from env. */
+  publicClient?: RunnerPublicClient;
+  /** Injectable buyer wallet (the OFFLINE test seam). Omitted -> built real from the funded key. */
+  buyerWallet?: SignerWalletClient;
 }
 
+/** The A2A card path suffix (EXACTLY this - never agent.json; Pitfall 5). */
+const CARD_PATH = "/.well-known/agent-card.json";
+
 /**
- * The operator-gated live "test this endpoint" run. It is a Deferred Item: it needs a
- * funded buyer EOA + the deployed resource over HTTPS, and it broadcasts a real
- * on-chain debit on Arc. Without the funded keys it throws RequiresFundedWalletError
- * so the autonomous suite can never mistake it for a live run. The real implementation
- * fetches the live card, signs against the live escrow, and settles through the
- * standalone facilitator over the live Arc RPC - the autonomous proof above already
- * proves the debit<=cap + exactly-once LOGIC against the mock chain.
+ * The buyer-side live "test this endpoint" run. It discovers the deployed resource's
+ * card, validates + pins it (readCardInputsStrict: a poisoned card throws and NEVER
+ * pays), derives token precision from a RUNTIME decimals() read (no decimals literal in
+ * any amount path), then runs GET 402 -> signDebitAuthorization(cap) -> POST X-PAYMENT
+ * -> 200 + the X-PAYMENT-RESPONSE receipt against the DEPLOYED gate (which owns the
+ * relayer and enforces reserve-before-run / exactly-once - unchanged here). The signed
+ * maxAmount is the card cap, so the on-chain debit is min(computed, cap).
+ *
+ * Seams: the offline test injects fetcher + publicClient + buyerWallet to prove the
+ * orchestration with NO real tx. The operator path omits them: it builds the real funded
+ * wallet from TEST_BUYER_PRIVATE_KEY + a real Arc public client + the global fetch and
+ * broadcasts a real debit. With no injected wallet AND no funded key it throws
+ * RequiresFundedWalletError BEFORE any network or chain call (the autonomous guard).
  */
-export async function liveTestEndpoint(opts: LiveTestEndpointOptions): Promise<never> {
+export async function liveTestEndpoint(
+  opts: LiveTestEndpointOptions,
+): Promise<TestEndpointResult> {
   const env = opts.env ?? process.env;
-  const buyerKey = env.TEST_BUYER_PRIVATE_KEY?.trim();
-  const relayerKeys = env.RELAYER_SIGNER_KEYS?.trim();
-  if (!buyerKey || !relayerKeys) {
-    throw new RequiresFundedWalletError();
+  const fetcher: HttpFetch =
+    opts.fetcher ?? ((input, init) => fetch(input, init as RequestInit));
+
+  // (0) Resolve the buyer wallet + chain read client. If either is missing we build it
+  // from the operator-provided funded key; with NO key AND nothing injected we throw
+  // BEFORE any network or chain call so the autonomous suite can never broadcast a tx.
+  // RELAYER_SIGNER_KEYS is NOT needed here - the DEPLOYED facilitator owns the relayer;
+  // this is buyer-side only. The key is read only from env and is never logged.
+  let buyerWallet = opts.buyerWallet;
+  let publicClient = opts.publicClient;
+  if (!buyerWallet || !publicClient) {
+    const key = env.TEST_BUYER_PRIVATE_KEY?.trim();
+    if (!key) throw new RequiresFundedWalletError();
+    const rpc = env.ARC_RPC_URL;
+    publicClient = publicClient ?? (createArcPublicClient(rpc) as RunnerPublicClient);
+    buyerWallet = buyerWallet ?? createArcWalletClientFromKey(key as Hex, rpc);
   }
-  // The live broadcast path is operator-gated and intentionally not implemented in the
-  // autonomous build (it broadcasts irreversible txs). The operator wires it post-deploy
-  // mirroring packages/x402-arc/examples/echo/live-money-path.ts against opts.endpointUrl.
-  throw new RequiresFundedWalletError();
+
+  // (1) DISCOVER - fetch the deployed resource's card (the SOLE source of every pay
+  // input). Append the A2A card path only if absent (mirrors discover.ts).
+  const cardUrl = opts.cardUrl.endsWith(CARD_PATH) ? opts.cardUrl : opts.cardUrl + CARD_PATH;
+  const res = await fetcher(cardUrl, { method: "GET" });
+  if (res.status !== 200) {
+    throw new Error(`liveTestEndpoint: ${opts.cardUrl} is not discoverable (status ${res.status})`);
+  }
+  const card = (await res.json()) as Record<string, unknown>;
+  // VALIDATE + PIN BEFORE any pay input is used (T-07-CARDPOISON). A poisoned card
+  // throws here and the buyer never signs or pays.
+  const cardInputs = readCardInputsStrict(card);
+
+  // (2) CAP + runtime decimals (Pitfall 3 - never a decimals literal in the amount
+  // path). The cap value is the card's base-unit pricing.max; the runtime decimals()
+  // read is the precision witness that token precision is resolved at runtime, not 6.
+  const decimals = (await publicClient.readContract({
+    address: USDC,
+    abi: erc20Abi,
+    functionName: "decimals",
+  })) as number;
+  void (10n ** BigInt(decimals));
+  const cap = cardInputs.cap;
+  if (cap <= 0n) {
+    throw new Error(`liveTestEndpoint: card pricing.max ${cap} is not a positive cap`);
+  }
+
+  // (3) The request payload (a benign echo body unless overridden).
+  const reqInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" } as Record<string, string>,
+    body: JSON.stringify(opts.requestBody ?? { text: "hello" }),
+  };
+
+  // (3a) GET with no X-PAYMENT -> expect 402 with the accepts quote (sanity).
+  const unpaid = await fetcher(opts.endpointUrl, reqInit);
+  if (unpaid.status !== 402) {
+    throw new Error(`liveTestEndpoint: expected 402 on the unpaid call, got ${unpaid.status}`);
+  }
+
+  // (3b) Sign the DebitAuthorization for the CARD-DERIVED cap and the discovered payTo.
+  // The signed maxAmount is the cap, so the deployed gate debits min(computed, cap).
+  const nonce = randomNonce();
+  const validBefore = computeValidBefore(MAX_TIMEOUT_SECONDS, SETTLE_BUFFER_SECONDS);
+  const buyer = buyerWallet.account.address as Hex;
+  const signed = await signDebitAuthorization(buyerWallet, {
+    buyer,
+    resourceId: cardInputs.payTo,
+    maxAmount: cap,
+    nonce,
+    validBefore,
+  });
+  const payload: PaymentPayload = {
+    x402Version: 2,
+    scheme: "utter-escrow",
+    network: "eip155:5042002",
+    authorization: {
+      buyer,
+      resourceId: cardInputs.payTo,
+      maxAmount: cap.toString(),
+      nonce,
+      validBefore: validBefore.toString(),
+    },
+    signature: signed.signature,
+  };
+  const header = encodePayment(payload);
+
+  // (3c) Re-POST with X-PAYMENT -> 200 + the X-PAYMENT-RESPONSE receipt. The DEPLOYED
+  // gate + facilitator trigger the single escrow debit via /settle (the only money move).
+  const paidRes = await fetcher(opts.endpointUrl, {
+    ...reqInit,
+    headers: { ...reqInit.headers, "X-PAYMENT": header },
+  });
+  const status = paidRes.status;
+  let receipt: unknown = null;
+  let debitAmount = 0n;
+  if (status === 200) {
+    const receiptHeader = paidRes.headers.get("X-PAYMENT-RESPONSE");
+    if (receiptHeader) {
+      receipt = JSON.parse(Buffer.from(receiptHeader, "base64").toString("utf8"));
+      const amt = (receipt as { amount?: string }).amount;
+      if (typeof amt === "string") debitAmount = BigInt(amt);
+    }
+  }
+
+  // `recovered` is null here: the disconnect-recovery assertion is a
+  // runTestEndpoint-internal-store check; the DEPLOYED facilitator's /results is not
+  // addressed by this buyer-side runner (exactly-once is enforced by the deployed gate).
+  return {
+    paid: status === 200,
+    status,
+    cap,
+    debitAmount,
+    idemKey: nonce,
+    receipt,
+    cardInputs,
+    recovered: null,
+  };
 }

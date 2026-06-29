@@ -11,9 +11,11 @@ import {
   http,
   type Account,
   type Chain,
+  type Hex,
   type HttpTransport,
   type WalletClient,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { arcTestnet } from "./arc";
 
 /**
@@ -39,4 +41,21 @@ export function createArcWalletClient(
     chain: arcTestnet,
     transport: http(url),
   });
+}
+
+/**
+ * Build a buyer/signer wallet from a raw private key the CALLER read from
+ * `.env.local`. The key is never logged here. This keeps `privateKeyToAccount`
+ * (viem) encapsulated in @utter/chain so consumers (the marketplace) need no
+ * direct runtime viem import to construct a buyer wallet from a key.
+ *
+ * A buyer wallet only SIGNS typed data (the DebitAuthorization); it never
+ * broadcasts a settle, so no nonce manager is attached to the account. The RPC
+ * URL has the same override + chain-default fallback as `createArcWalletClient`.
+ */
+export function createArcWalletClientFromKey(
+  privateKey: Hex,
+  rpcUrl?: string,
+): WalletClient<HttpTransport, Chain, Account> {
+  return createArcWalletClient(privateKeyToAccount(privateKey), rpcUrl);
 }
