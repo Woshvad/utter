@@ -18,8 +18,9 @@ import {
   FixtureProber,
   LiveHttpsProber,
   selectProber,
-  RequiresProvisionedHostError,
   type ProbeResult,
+  type ProbeFetch,
+  type ProbeCardValidator,
 } from "../src/prober";
 
 // A minimal openapi doc with the resource-named *Success / *Error component
@@ -210,15 +211,205 @@ describe("FixtureProber (the autonomous test default)", () => {
   });
 });
 
-describe("LiveHttpsProber (operator-gated)", () => {
+describe("LiveHttpsProber (operator-gated no-pay liveness + conformance probe)", () => {
+  const CARD_PATH = "/.well-known/agent-card.json";
+  const BASE = "https://echo.resources.example";
+  const CARD_URL = `${BASE}${CARD_PATH}`;
+  const CALL_URL = `${BASE}/call`;
+
+  // A plausible Utter A2A v0.3.0 card the light default validator accepts.
+  const VALID_CARD = {
+    protocolVersion: "0.3.0",
+    name: "echo",
+    description: "echo",
+    version: "1.0.0",
+    capabilities: { streaming: false },
+    defaultInputModes: ["application/json"],
+    defaultOutputModes: ["application/json"],
+    skills: [{ id: "echo", name: "echo", description: "echo" }],
+    x402: {
+      scheme: "utter-escrow",
+      network: "eip155:5042002",
+      chainId: 5042002,
+      asset: "0x3600000000000000000000000000000000000000",
+      escrow: "0xescrow",
+      pricing: { model: "flat", base: "10000", perKB: "0", max: "10000" },
+    },
+  };
+
+  /** Build a fake ProbeFetch from a per-URL response map. Records every call. */
+  function fakeFetch(routes: Record<string, { status: number; body?: unknown; throws?: boolean }>) {
+    const calls: Array<{ url: string; init?: Parameters<ProbeFetch>[1] }> = [];
+    const fetcher: ProbeFetch = async (url, init) => {
+      calls.push({ url, init });
+      const hit = routes[url];
+      if (!hit || hit.throws) throw new Error(`fake fetch: no route / forced throw for ${url}`);
+      return { status: hit.status, json: async () => hit.body };
+    };
+    return { fetcher, calls };
+  }
+
+  /** A clock that yields the supplied values in order (default delta under budget). */
+  function clockOf(values: number[]): () => number {
+    let i = 0;
+    return () => values[Math.min(i++, values.length - 1)] ?? 0;
+  }
+
   it("has the live-https backend discriminator", () => {
     expect(new LiveHttpsProber().backend).toBe("live-https");
   });
 
-  it("throws RequiresProvisionedHostError when probed autonomously", async () => {
-    await expect(new LiveHttpsProber().probe({ resourceId: "0xabc" })).rejects.toBeInstanceOf(
-      RequiresProvisionedHostError,
-    );
+  it("PASSES when the card is 200+valid and the unpaid /call returns 402 within budget", async () => {
+    const { fetcher, calls } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 402 },
+    });
+    const prober = new LiveHttpsProber({ fetcher, now: clockOf([1000, 1050]) });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r).toEqual({
+      passed: true,
+      schemaOk: true,
+      latencyOk: true,
+      correctnessOk: true,
+      latencyMs: 50,
+    });
+    // GET the normalized card url first, then POST the derived /call url.
+    expect(calls[0]).toMatchObject({ url: CARD_URL, init: { method: "GET" } });
+    expect(calls[1]).toMatchObject({
+      url: CALL_URL,
+      init: { method: "POST", headers: { "content-type": "application/json" } },
+    });
+  });
+
+  it("normalizes a base url (no card path) by appending the card path", async () => {
+    const { fetcher, calls } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 402 },
+    });
+    const prober = new LiveHttpsProber({ fetcher, now: clockOf([0, 10]) });
+    const r = await prober.probe({ resourceId: "0xabc", url: BASE });
+    expect(r.passed).toBe(true);
+    expect(calls[0]?.url).toBe(CARD_URL);
+    expect(calls[1]?.url).toBe(CALL_URL);
+  });
+
+  it("fails (schemaOk:false) when the card is not served (status 500)", async () => {
+    const { fetcher } = fakeFetch({ [CARD_URL]: { status: 500 } });
+    const prober = new LiveHttpsProber({ fetcher });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(false);
+    expect(r.reason).toMatch(/card not served/i);
+  });
+
+  it("fails (schemaOk:false) when the card fetch throws", async () => {
+    const { fetcher } = fakeFetch({ [CARD_URL]: { status: 200, throws: true } });
+    const prober = new LiveHttpsProber({ fetcher });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(false);
+    expect(r.reason).toMatch(/card fetch failed/i);
+  });
+
+  it("fails (schemaOk:false) when the served card is invalid (no x402 / wrong scheme)", async () => {
+    const bad = { ...VALID_CARD, x402: { ...VALID_CARD.x402, scheme: "exact" } };
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: bad },
+      [CALL_URL]: { status: 402 },
+    });
+    const prober = new LiveHttpsProber({ fetcher });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(false);
+    expect(r.reason).toMatch(/invalid card/i);
+  });
+
+  it("fails (correctnessOk:false) when the unpaid /call leaks a 200 (free-serve money leak)", async () => {
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 200 },
+    });
+    const prober = new LiveHttpsProber({ fetcher, now: clockOf([0, 5]) });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(true);
+    expect(r.correctnessOk).toBe(false);
+    expect(r.reason).toMatch(/pay gate not enforced/i);
+  });
+
+  it("fails (correctnessOk:false) when the unpaid /call returns a 500", async () => {
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 500 },
+    });
+    const prober = new LiveHttpsProber({ fetcher, now: clockOf([0, 5]) });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(true);
+    expect(r.correctnessOk).toBe(false);
+  });
+
+  it("fails (correctnessOk:false) when the unpaid /call is unreachable", async () => {
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 0, throws: true },
+    });
+    const prober = new LiveHttpsProber({ fetcher, now: clockOf([0, 5]) });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(true);
+    expect(r.correctnessOk).toBe(false);
+    expect(r.reason).toMatch(/\/call unreachable/i);
+  });
+
+  it("fails (latencyOk:false) when the /call round-trip exceeds the budget", async () => {
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 402 },
+    });
+    // /call still 402 (correctnessOk:true) but the clock advances 99999ms.
+    const prober = new LiveHttpsProber({
+      fetcher,
+      budgetMs: 1000,
+      now: clockOf([0, 99999]),
+    });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.correctnessOk).toBe(true);
+    expect(r.latencyOk).toBe(false);
+    expect(r.latencyMs).toBe(99999);
+    expect(r.reason).toMatch(/latency/i);
+  });
+
+  it("fails on a non-https url (minimal SSRF guard)", async () => {
+    const { fetcher, calls } = fakeFetch({});
+    const prober = new LiveHttpsProber({ fetcher });
+    const r = await prober.probe({ resourceId: "0xabc", url: "http://echo.resources.example" });
+    expect(r.passed).toBe(false);
+    expect(r.reason).toMatch(/non-https/i);
+    // No fetch happened (guarded before any network).
+    expect(calls).toHaveLength(0);
+  });
+
+  it("fails when no target url is supplied", async () => {
+    const { fetcher } = fakeFetch({});
+    const prober = new LiveHttpsProber({ fetcher });
+    const r = await prober.probe({ resourceId: "0xabc" });
+    expect(r.passed).toBe(false);
+    expect(r.reason).toMatch(/no target url/i);
+  });
+
+  it("honors an injected validateCard seam (proves the seam)", async () => {
+    const rejectAll: ProbeCardValidator = () => ({ valid: false, errors: ["seam rejected"] });
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 402 },
+    });
+    const prober = new LiveHttpsProber({ fetcher, validateCard: rejectAll });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(false);
+    expect(r.reason).toMatch(/seam rejected/i);
   });
 });
 
