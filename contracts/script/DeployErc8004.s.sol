@@ -43,8 +43,7 @@ contract DeployErc8004 is Script {
     /// @notice Anvil account 0 private key. Used ONLY as the dry-run default so a
     /// keyless `forge script` simulates the deploy. A live broadcast must supply a
     /// real funded REGISTRY_ADMIN_PRIVATE_KEY in .env.local (never committed).
-    uint256 internal constant DEFAULT_DRY_RUN_PK =
-        0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+    uint256 internal constant DEFAULT_DRY_RUN_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
     /// @notice Fixed per-contract CREATE2 salts. Stable salts make the derived
     /// addresses reproducible across runs and across operators (ID-03).
@@ -60,6 +59,10 @@ contract DeployErc8004 is Script {
         address deployer = vm.addr(deployerPk);
         address owner = vm.envOr("CONTRACT_OWNER", deployer);
 
+        // adminDelay is the 2-step DEFAULT_ADMIN_ROLE transfer delay (default 2
+        // days), mirroring Deploy.s.sol. IdentityRegistry now uses AccessControl.
+        uint48 adminDelay = uint48(vm.envOr("ADMIN_TRANSFER_DELAY", uint256(2 days)));
+
         if (owner == deployer) {
             console.log("WARNING: CONTRACT_OWNER unset, defaulting to deployer. Set it for production.");
         }
@@ -70,7 +73,7 @@ contract DeployErc8004 is Script {
 
         // Deterministic CREATE2 deploys: the address is a pure function of the
         // deployer, the fixed salt, and the initcode (constructor args included).
-        IdentityRegistry identity = new IdentityRegistry{salt: IDENTITY_SALT}(owner);
+        IdentityRegistry identity = new IdentityRegistry{salt: IDENTITY_SALT}(adminDelay, owner);
         ReputationRegistry reputation = new ReputationRegistry{salt: REPUTATION_SALT}();
         ValidationRegistry validation = new ValidationRegistry{salt: VALIDATION_SALT}();
 
@@ -81,6 +84,7 @@ contract DeployErc8004 is Script {
         console.log("IdentityRegistry:  ", address(identity));
         console.log("ReputationRegistry:", address(reputation));
         console.log("ValidationRegistry:", address(validation));
-        console.log("owner:             ", owner);
+        console.log("owner (DEFAULT_ADMIN):", owner);
+        console.log("admin transfer delay:", uint256(adminDelay));
     }
 }

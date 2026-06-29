@@ -3,7 +3,9 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @notice Bespoke flat-path splitter for the exact / EIP-3009 scheme
@@ -14,7 +16,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///
 /// This is a custom contract. OpenZeppelin removed its deprecated splitter in
 /// v5.x; there is no OZ import to clash with and none is used here.
-contract PaymentSplitter is Ownable, ReentrancyGuard {
+///
+/// Admin model: the split config setters (setSplit, setTreasury) are gated by
+/// DEFAULT_ADMIN_ROLE, which is handed over through the 2-step, time-delayed,
+/// non-brickable transfer of AccessControlDefaultAdminRules so the admin key can
+/// move to a multisig (01-RESEARCH Pitfall 4). distribute is permissionless.
+contract PaymentSplitter is AccessControlDefaultAdminRules, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Basis-point denominator. creatorBps is expressed against 10000.
@@ -37,7 +44,7 @@ contract PaymentSplitter is Ownable, ReentrancyGuard {
     /// @notice Emitted on every distribute() that flushes the held balance.
     event Distributed(address indexed creator, address indexed treasury, uint256 toCreator, uint256 toTreasury);
 
-    /// @notice Emitted when the owner mutates the split config.
+    /// @notice Emitted when the admin mutates the split config.
     event SplitConfigured(uint16 creatorBps, address treasury);
 
     /// @notice creatorBps exceeds the 10000 denominator.
@@ -46,9 +53,14 @@ contract PaymentSplitter is Ownable, ReentrancyGuard {
     /// @notice A required address argument was the zero address.
     error ZeroAddress();
 
-    constructor(IERC20 _usdc, address _creator, address _treasury, uint16 _creatorBps, address initialOwner)
-        Ownable(initialOwner)
-    {
+    constructor(
+        IERC20 _usdc,
+        address _creator,
+        address _treasury,
+        uint16 _creatorBps,
+        uint48 initialAdminDelay,
+        address initialAdmin
+    ) AccessControlDefaultAdminRules(initialAdminDelay, initialAdmin) {
         if (address(_usdc) == address(0) || _creator == address(0) || _treasury == address(0)) {
             revert ZeroAddress();
         }
@@ -79,15 +91,15 @@ contract PaymentSplitter is Ownable, ReentrancyGuard {
         emit Distributed(creator, treasury, toCreator, toTreasury);
     }
 
-    /// @notice Owner-gated update of the creator basis-point share.
-    function setSplit(uint16 newBps) external onlyOwner {
+    /// @notice DEFAULT_ADMIN_ROLE-gated update of the creator basis-point share.
+    function setSplit(uint16 newBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newBps > BPS_DENOMINATOR) revert InvalidBps();
         creatorBps = newBps;
         emit SplitConfigured(newBps, treasury);
     }
 
-    /// @notice Owner-gated update of the treasury recipient.
-    function setTreasury(address newTreasury) external onlyOwner {
+    /// @notice DEFAULT_ADMIN_ROLE-gated update of the treasury recipient.
+    function setTreasury(address newTreasury) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newTreasury == address(0)) revert ZeroAddress();
         treasury = newTreasury;
         emit SplitConfigured(creatorBps, newTreasury);

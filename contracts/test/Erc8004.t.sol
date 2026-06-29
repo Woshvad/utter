@@ -27,17 +27,10 @@ contract Erc8004Test is Test {
     // Mirror the contract events so vm.expectEmit can match them.
     event Registered(uint256 indexed agentId, string agentURI, address indexed owner);
     event NewFeedback(
-        uint256 indexed agentId,
-        address indexed clientAddress,
-        uint64 feedbackIndex,
-        int128 value,
-        uint8 valueDecimals
+        uint256 indexed agentId, address indexed clientAddress, uint64 feedbackIndex, int128 value, uint8 valueDecimals
     );
     event ValidationRequested(
-        address indexed validator,
-        uint256 indexed agentId,
-        string requestURI,
-        bytes32 requestHash
+        address indexed validator, uint256 indexed agentId, string requestURI, bytes32 requestHash
     );
     event ValidationResponded(
         bytes32 indexed requestHash,
@@ -49,7 +42,9 @@ contract Erc8004Test is Test {
     );
 
     function setUp() public {
-        identity = new IdentityRegistry(owner);
+        // owner holds DEFAULT_ADMIN_ROLE. Zero delay: no admin transfer is
+        // exercised here. register is not role-gated in this reference.
+        identity = new IdentityRegistry(uint48(0), owner);
         reputation = new ReputationRegistry();
         validation = new ValidationRegistry();
     }
@@ -94,7 +89,14 @@ contract Erc8004Test is Test {
 
         vm.prank(client);
         reputation.giveFeedback(
-            agentId, value, valueDecimals, "quality", "latency", "/predict", "https://fb.example/1", bytes32(uint256(0xabc))
+            agentId,
+            value,
+            valueDecimals,
+            "quality",
+            "latency",
+            "/predict",
+            "https://fb.example/1",
+            bytes32(uint256(0xabc))
         );
 
         assertEq(reputation.feedbackCount(agentId), 1, "feedbackIndex not incremented");
@@ -104,7 +106,14 @@ contract Erc8004Test is Test {
         emit NewFeedback(agentId, client, 2, value, valueDecimals);
         vm.prank(client);
         reputation.giveFeedback(
-            agentId, value, valueDecimals, "quality", "latency", "/predict", "https://fb.example/2", bytes32(uint256(0xdef))
+            agentId,
+            value,
+            valueDecimals,
+            "quality",
+            "latency",
+            "/predict",
+            "https://fb.example/2",
+            bytes32(uint256(0xdef))
         );
         assertEq(reputation.feedbackCount(agentId), 2, "second feedbackIndex wrong");
     }

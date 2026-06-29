@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PaymentEscrow} from "../src/PaymentEscrow.sol";
 import {ResourceRegistry} from "../src/ResourceRegistry.sol";
@@ -57,8 +58,11 @@ contract PaymentEscrowTest is Test, EIP712SignHelper {
         (buyer, buyerPk) = makeAddrAndKey("buyer");
 
         usdc = new MockERC20();
-        registry = new ResourceRegistry(owner);
-        escrow = new PaymentEscrow(IERC20(address(usdc)), IResourceRegistry(address(registry)), admin, owner);
+        // The single owner holds DEFAULT_ADMIN_ROLE plus the registry's specific
+        // roles, mirroring the old single owner. Zero delay: no admin transfer is
+        // exercised in this suite.
+        registry = new ResourceRegistry(uint48(0), owner, owner, owner);
+        escrow = new PaymentEscrow(IERC20(address(usdc)), IResourceRegistry(address(registry)), admin, uint48(0), owner);
 
         vm.prank(owner);
         registry.register(RESOURCE_ID, creator, treasury, CREATOR_BPS, AGENT_ID, PRICING_HASH);
@@ -255,6 +259,45 @@ contract PaymentEscrowTest is Test, EIP712SignHelper {
         vm.prank(buyer);
         vm.expectRevert(PaymentEscrow.NotAdmin.selector);
         escrow.debit(buyer, RESOURCE_ID, amount, amount, nonce, validBefore, sig);
+    }
+
+    /// @notice setAdmin is DEFAULT_ADMIN_ROLE-gated: a non-admin caller reverts
+    /// with AccessControlUnauthorizedAccount and the relayer admin is unchanged.
+    function test_setAdmin_onlyDefaultAdmin() public {
+        address newRelayer = makeAddr("newRelayer");
+        bytes32 adminRole = escrow.DEFAULT_ADMIN_ROLE();
+
+        vm.prank(admin); // the relayer is not the DEFAULT_ADMIN
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, adminRole)
+        );
+        escrow.setAdmin(newRelayer);
+        assertEq(escrow.admin(), admin, "relayer admin must be unchanged after a rejected setAdmin");
+    }
+
+    /// @notice The DEFAULT_ADMIN can rotate the relayer admin via setAdmin, and
+    /// the new relayer can then submit debits while the old one cannot.
+    function test_setAdmin_rotatesRelayer() public {
+        (address newRelayer,) = makeAddrAndKey("newRelayer");
+
+        vm.prank(owner);
+        escrow.setAdmin(newRelayer);
+        assertEq(escrow.admin(), newRelayer, "relayer admin not rotated");
+
+        uint256 amount = 100_000;
+        bytes32 nonce = keccak256("nonce-rotated");
+        uint256 validBefore = block.timestamp + 1 hours;
+        bytes memory sig = _signDebit(buyerPk, address(escrow), buyer, RESOURCE_ID, amount, nonce, validBefore);
+
+        // The old relayer can no longer submit.
+        vm.prank(admin);
+        vm.expectRevert(PaymentEscrow.NotAdmin.selector);
+        escrow.debit(buyer, RESOURCE_ID, amount, amount, nonce, validBefore, sig);
+
+        // The new relayer can.
+        vm.prank(newRelayer);
+        escrow.debit(buyer, RESOURCE_ID, amount, amount, nonce, validBefore, sig);
+        assertTrue(escrow.usedNonce(nonce), "new relayer debit did not consume the nonce");
     }
 
     /// @notice a paused resource reverts (ResourceInactive).
