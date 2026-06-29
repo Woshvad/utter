@@ -643,3 +643,102 @@ describe("LiveAdapter create flow with the marketplace publish seam (injected pu
     expect(collected.at(-1)?.stage).toBe("Live");
   });
 });
+
+describe("LiveAdapter listMarketplace with the discovery read seam (injected listResources)", () => {
+  /** A bytes32-shaped id that is NOT in the seeded fixture store, so a result containing it
+   *  proves the records came from the live seam, not the seeded index. */
+  const LIVE_ONLY_ID =
+    "0x000000000000000000000000000000000000000000000000000000000000aa01" as const;
+
+  /** Two live-source IndexRecords the injected listResources returns. Distinct from the
+   *  seeded fixtures (different ids/slugs) so the assertion proves the live source, and one
+   *  is category "data" + one "compute" so the filter assertion is meaningful. Money is
+   *  base-unit bigint (no decimals literal); pricing stays string base units. */
+  function liveRecords(): IndexRecord[] {
+    return [
+      {
+        resourceId: LIVE_ONLY_ID as Hex,
+        agentId: "42",
+        slug: "live-weather",
+        category: "data",
+        pricing: { model: "metered", base: "20000", perKB: "0", max: "20000" },
+        reputation: 9n,
+        uptime: 1,
+        health: { verified: true, score: 1 },
+        bond: 7_000_000n,
+        cardUrl: "https://live-weather.resources.example.com/.well-known/agent-card.json",
+        active: true,
+      },
+      {
+        resourceId:
+          "0x000000000000000000000000000000000000000000000000000000000000aa02" as Hex,
+        agentId: "43",
+        slug: "live-summarize",
+        category: "compute",
+        pricing: { model: "metered", base: "30000", perKB: "0", max: "30000" },
+        reputation: 4n,
+        uptime: 1,
+        health: { verified: true, score: 1 },
+        bond: 6_000_000n,
+        cardUrl: "https://live-summarize.resources.example.com/.well-known/agent-card.json",
+        active: true,
+      },
+    ];
+  }
+
+  /** Build a LiveAdapter whose injected indexStore holds the SEEDED fixtures, with an
+   *  optional listResources seam. When the seam is bound, listMarketplace must read it and
+   *  IGNORE the seeded indexStore (the live marketplace is the source of discovery truth). */
+  async function makeAdapterWithListResources(
+    listResources?: LiveDeps["listResources"],
+  ): Promise<LiveAdapter> {
+    const indexStore = new InMemoryIndexStore();
+    for (const rec of seedRecords()) await indexStore.upsert(rec);
+    return new LiveAdapter({
+      publicClient: makeStubPublicClient(),
+      indexStore,
+      buildChannel: new BuildEventChannel(),
+      generate: scaffoldGenerate,
+      validate: validateBundle,
+      runPlayground: runPlaygroundHarness,
+      getRevenue: async () => ({ ...STUB_REVENUE, receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })) }),
+      buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
+      listResources,
+    });
+  }
+
+  it("reads the live-source records (not the seeded store) when listResources is bound", async () => {
+    let calls = 0;
+    const adapter = await makeAdapterWithListResources(async () => {
+      calls += 1;
+      return liveRecords().map((r) => ({ ...r }));
+    });
+
+    const all = await adapter.listMarketplace({});
+    // The live seam was used exactly once.
+    expect(calls).toBe(1);
+    // The result contains the live-only id and NOT the seeded fixture id (proving the
+    // records came from the live marketplace SERVICE, not the seeded local index).
+    const ids = all.map((c) => c.resourceId);
+    expect(ids).toContain(LIVE_ONLY_ID);
+    expect(ids).not.toContain(FIXTURE_RESOURCE_ID);
+  });
+
+  it("applies the SAME pure filterResources to the live-source records", async () => {
+    const adapter = await makeAdapterWithListResources(async () => liveRecords().map((r) => ({ ...r })));
+    const dataOnly = await adapter.listMarketplace({ category: "data" });
+    // Only the category-data live record survives the shared filter.
+    expect(dataOnly.length).toBe(1);
+    expect(dataOnly[0]?.resourceId).toBe(LIVE_ONLY_ID);
+    expect(dataOnly.every((c) => c.category === "data")).toBe(true);
+  });
+
+  it("falls back to the seeded indexStore when listResources is undefined (existing behavior)", async () => {
+    const adapter = await makeAdapterWithListResources(undefined);
+    const all = await adapter.listMarketplace({});
+    // No live seam: the seeded fixtures are read exactly as today, and the live-only id is
+    // absent.
+    expect(all.map((c) => c.resourceId)).toContain(FIXTURE_RESOURCE_ID);
+    expect(all.map((c) => c.resourceId)).not.toContain(LIVE_ONLY_ID);
+  });
+});

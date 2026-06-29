@@ -415,9 +415,13 @@ export class LiveAdapter implements StudioDataAdapter {
 
   async listMarketplace(criteria: FilterCriteria): Promise<ResourceCardData[]> {
     const deps = this.requireDeps();
-    // Read the seeded read-through records and run the SAME pure filter the fixture
-    // uses, then project each surviving record back to a card row.
-    const records = await deps.indexStore.list();
+    // When the discovery read seam is bound (MARKETPLACE_URL set) the records come from the
+    // live marketplace SERVICE (its public GET /resources); otherwise they come from the
+    // seeded local-dev index. The SAME pure filterResources + recordToCard projection
+    // applies to both, so the discover UI is identical in shape either way.
+    const records = deps.listResources
+      ? await deps.listResources()
+      : await deps.indexStore.list();
     const matched = filterResources(records, criteria);
     return matched.map(recordToCard);
   }

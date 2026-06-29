@@ -28,6 +28,7 @@ import { runPlaygroundHarness, type PlaygroundHarnessResult } from "./playground
 import { BuildEventChannel } from "./build-channel.js";
 import { streamDeploy } from "./deployer-client.server.js";
 import { publishResource, type PublishParams } from "./marketplace-client.server.js";
+import { queryMarketplaceResources } from "./marketplace-discovery-client.server.js";
 import { FIXTURE_MARKETPLACE } from "../fixtures/index.js";
 import type { BuildEvent, Hex, RevenueSummary } from "./types.js";
 
@@ -99,6 +100,16 @@ export interface LiveDeps {
   publishToMarketplace?: (
     params: PublishParams,
   ) => Promise<{ listed: boolean; agentId?: string }>;
+  /**
+   * The live discovery READ seam. GETs the marketplace SERVICE's public GET /resources and
+   * reconstructs the IndexRecord[] (bigint money fields). Bound ONLY when MARKETPLACE_URL
+   * is set: reads are PUBLIC, so unlike publishToMarketplace this does NOT require
+   * MARKETPLACE_AUTH_SECRET. When bound, listMarketplace reads the live marketplace service
+   * (the single source of discovery truth); when unbound, listMarketplace falls back to the
+   * seeded module-singleton IndexStore (local-dev). The studio authors no money/identity
+   * value either way.
+   */
+  listResources?: () => Promise<IndexRecord[]>;
 }
 
 /**
@@ -226,6 +237,9 @@ function seedRecords(env: NodeJS.ProcessEnv): IndexRecord[] {
  *      ANTHROPIC key) and validate to validateBundle, so the adapter stays env-free.
  *   5. Bind runPlayground to runPlaygroundHarness verbatim (reused like the fixture),
  *      keeping the reserve-before-run escrow gate intact (T-mdx-02).
+ *   6. Bind the discovery READ seam listResources when MARKETPLACE_URL is set (public,
+ *      no secret), so listMarketplace reads the live marketplace SERVICE; unbound, it
+ *      falls back to the seeded local-dev index.
  */
 /** The default facilitator base URL (mirrors the buyer/middleware in-process default). */
 const DEFAULT_FACILITATOR_URL = "http://localhost:8787";
@@ -312,6 +326,14 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
           publishResource(p, { marketplaceUrl, authSecret: marketplaceAuthSecret })
       : undefined;
 
+  // Bind the discovery READ seam when MARKETPLACE_URL is set. Reads are PUBLIC, so this
+  // does NOT require MARKETPLACE_AUTH_SECRET (unlike publishToMarketplace above): when the
+  // marketplace URL is configured, listMarketplace reads the live marketplace SERVICE;
+  // unbound, it falls back to the seeded local-dev index. No bearer is read or passed here.
+  const listResources = marketplaceUrl
+    ? () => queryMarketplaceResources({ marketplaceUrl })
+    : undefined;
+
   return {
     publicClient,
     indexStore: getSharedIndexStore(env),
@@ -331,5 +353,8 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     // Marketplace publish seam: bound only when MARKETPLACE_URL + MARKETPLACE_AUTH_SECRET
     // are both set; undefined otherwise (the local-index-only Publish stage).
     publishToMarketplace,
+    // Discovery read seam: bound only when MARKETPLACE_URL is set (reads are public, no
+    // secret); undefined otherwise so listMarketplace reads the seeded local-dev index.
+    listResources,
   };
 }
