@@ -15,6 +15,7 @@
 //     testnet). The live paths are offline-tested via injected mocks only.
 import { KeywordModerator } from "./moderation/classifier.js";
 import { ARC_CHAIN_ID } from "@utter/chain";
+import { validateAgentCard } from "@utter/ai-runtime";
 import { selectProber } from "@utter/ai-scorer";
 import { resolveBondGate, resolveIdentity } from "./live-deps.js";
 import type { CardStore } from "./card-store.js";
@@ -80,6 +81,13 @@ export function createDeferredIdentity(): PipelineIdentity {
  * resolveIdentity(env): both DEFAULT to the current testnet behavior (pass-through bond +
  * 0n reader; deferred placeholder mint) and arm only under explicit operator env, so the
  * default deps are byte-identical to before.
+ *
+ * When the operator arms the live prober (SCORER_LIVE_HTTPS_HOST), the injected
+ * validateAgentCard makes the publish-time probe validate the served card with the
+ * AUTHORITATIVE ajv A2A v0.3.0 validator (the same one the card route and the buyer pay
+ * flow use), not just the prober's structural light default. Off-host the always-pass
+ * FixtureProber is selected and the validator is unused, so the default deps stay
+ * byte-identical to before (selectProber forwards validateCard only to the live prober).
  */
 export function createPublishPipelineDeps(
   env: NodeJS.ProcessEnv,
@@ -91,7 +99,7 @@ export function createPublishPipelineDeps(
     moderationStore: stores.moderationStore,
     bondGate,
     bondReader,
-    prober: selectProber(env),
+    prober: selectProber(env, undefined, { validateCard: validateAgentCard }),
     identity: resolveIdentity(env),
     indexStore: stores.indexStore,
     cardStore: stores.cardStore,
