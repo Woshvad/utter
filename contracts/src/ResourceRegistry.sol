@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import {IResourceRegistry} from "./interfaces/IResourceRegistry.sol";
 
 /// @notice On-chain config store for Utter resources (CONTRACT-04, D-05). Each
@@ -12,13 +14,21 @@ import {IResourceRegistry} from "./interfaces/IResourceRegistry.sol";
 /// reads PaymentEscrow performs in Wave 3 to read the split config and gate a
 /// debit on the resource being active (pause mirrors Scorer deactivation).
 ///
-/// Admin model: every mutator is gated by a single Ownable owner, which is the
-/// MVP choice (D-04). A single key that can register, pause, authorize slashes,
-/// and set bonds is an admin-key concentration risk. Production should split
-/// distinct REGISTRY-ADMIN and SLASHER roles via AccessControl and place the
-/// owner behind a multisig (01-RESEARCH Pitfall 4). That hardening is out of
-/// scope for the MVP and is accepted as a documented threat-model item.
-contract ResourceRegistry is IResourceRegistry, Ownable {
+/// Admin model: access is split across OpenZeppelin AccessControl roles instead
+/// of a single owner. REGISTRY_ADMIN_ROLE gates register / update / pause /
+/// unpause / setBond; SLASHER_ROLE gates slashAuthorization. DEFAULT_ADMIN_ROLE
+/// is the role admin that grants and revokes those roles and is itself handed
+/// over through the 2-step, time-delayed, non-brickable transfer of
+/// AccessControlDefaultAdminRules, so the admin key can be moved to a multisig
+/// without a single key holding every privilege (01-RESEARCH Pitfall 4).
+contract ResourceRegistry is IResourceRegistry, AccessControlDefaultAdminRules {
+    /// @notice Gates the resource config mutators (register, update, pause,
+    /// unpause, setBond). Held by the registry operator.
+    bytes32 public constant REGISTRY_ADMIN_ROLE = keccak256("REGISTRY_ADMIN_ROLE");
+
+    /// @notice Gates slashAuthorization. Held by the off-chain scorer / slasher.
+    bytes32 public constant SLASHER_ROLE = keccak256("SLASHER_ROLE");
+
     /// @notice Basis-point denominator. creatorBps is expressed against 10000.
     uint16 public constant BPS_DENOMINATOR = 10_000;
 
@@ -79,8 +89,18 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
     /// split share to balanceOf[address(0)] in the escrow and lock it forever.
     error ZeroAddress();
 
-    /// @param initialOwner The registry admin (OZ v5 Ownable takes the owner).
-    constructor(address initialOwner) Ownable(initialOwner) {}
+    /// @param initialAdminDelay Delay enforced on the 2-step DEFAULT_ADMIN_ROLE
+    /// transfer (AccessControlDefaultAdminRules).
+    /// @param initialAdmin Holder of DEFAULT_ADMIN_ROLE, which grants and revokes
+    /// the specific roles. Must be non-zero.
+    /// @param registryAdmin Granted REGISTRY_ADMIN_ROLE (config mutators).
+    /// @param slasher Granted SLASHER_ROLE (slashAuthorization).
+    constructor(uint48 initialAdminDelay, address initialAdmin, address registryAdmin, address slasher)
+        AccessControlDefaultAdminRules(initialAdminDelay, initialAdmin)
+    {
+        _grantRole(REGISTRY_ADMIN_ROLE, registryAdmin);
+        _grantRole(SLASHER_ROLE, slasher);
+    }
 
     /// @notice Register a new resource with its split config and metadata.
     /// @dev Reverts AlreadyRegistered if the resourceId is taken and InvalidBps
@@ -92,7 +112,7 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
         uint16 creatorBps,
         bytes32 agentId,
         bytes32 pricingHash
-    ) external onlyOwner {
+    ) external onlyRole(REGISTRY_ADMIN_ROLE) {
         if (resources[resourceId].exists) revert AlreadyRegistered();
         if (creator == address(0) || treasury == address(0)) revert ZeroAddress();
         if (creatorBps > BPS_DENOMINATOR) revert InvalidBps();
@@ -114,13 +134,10 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
     /// @notice Update the mutable config of an existing resource. The creator and
     /// active flag are not changed here; pause / unpause handle activation.
     /// @dev Reverts UnknownResource if not registered, InvalidBps on bad bps.
-    function update(
-        bytes32 resourceId,
-        address treasury,
-        uint16 creatorBps,
-        bytes32 agentId,
-        bytes32 pricingHash
-    ) external onlyOwner {
+    function update(bytes32 resourceId, address treasury, uint16 creatorBps, bytes32 agentId, bytes32 pricingHash)
+        external
+        onlyRole(REGISTRY_ADMIN_ROLE)
+    {
         Resource storage r = resources[resourceId];
         if (!r.exists) revert UnknownResource();
         if (treasury == address(0)) revert ZeroAddress();
@@ -136,7 +153,7 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
 
     /// @notice Pause a resource. A paused resource reads active false so the
     /// escrow active-check blocks its debits (mirrors Scorer deactivation).
-    function pause(bytes32 resourceId) external onlyOwner {
+    function pause(bytes32 resourceId) external onlyRole(REGISTRY_ADMIN_ROLE) {
         Resource storage r = resources[resourceId];
         if (!r.exists) revert UnknownResource();
         r.active = false;
@@ -144,7 +161,7 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
     }
 
     /// @notice Unpause a resource, restoring its active state.
-    function unpause(bytes32 resourceId) external onlyOwner {
+    function unpause(bytes32 resourceId) external onlyRole(REGISTRY_ADMIN_ROLE) {
         Resource storage r = resources[resourceId];
         if (!r.exists) revert UnknownResource();
         r.active = true;
@@ -160,14 +177,17 @@ contract ResourceRegistry is IResourceRegistry, Ownable {
     /// not be relied on as an on-chain spend authorization. Full on-chain coupling
     /// is an accepted out-of-scope design item under the MVP single-key threat
     /// model (D-04).
-    function slashAuthorization(bytes32 resourceId, uint256 amount, string calldata reason) external onlyOwner {
+    function slashAuthorization(bytes32 resourceId, uint256 amount, string calldata reason)
+        external
+        onlyRole(SLASHER_ROLE)
+    {
         if (!resources[resourceId].exists) revert UnknownResource();
         emit ResourceSlashAuthorized(resourceId, amount, reason);
     }
 
     /// @notice Record the posted bond mirror for a resource. The real custody
     /// lives in the StakingVault; this is the registry-side reflection.
-    function setBond(bytes32 resourceId, uint256 bond) external onlyOwner {
+    function setBond(bytes32 resourceId, uint256 bond) external onlyRole(REGISTRY_ADMIN_ROLE) {
         Resource storage r = resources[resourceId];
         if (!r.exists) revert UnknownResource();
         r.bond = bond;

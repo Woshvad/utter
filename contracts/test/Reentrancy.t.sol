@@ -48,9 +48,9 @@ contract ReentrancyTest is Test {
     /// safeTransfer payout. The guard must revert the outer withdraw.
     function _assertEscrowWithdrawGuarded() internal {
         ReentrantToken token = new ReentrantToken();
-        ResourceRegistry registry = new ResourceRegistry(owner);
+        ResourceRegistry registry = new ResourceRegistry(uint48(0), owner, owner, owner);
         PaymentEscrow escrow =
-            new PaymentEscrow(IERC20(address(token)), IResourceRegistry(address(registry)), admin, owner);
+            new PaymentEscrow(IERC20(address(token)), IResourceRegistry(address(registry)), admin, uint48(0), owner);
 
         // Fund the escrow with an internal balance for the attacker (this test
         // contract) by depositing real tokens. Token is NOT armed yet, so the
@@ -73,7 +73,7 @@ contract ReentrancyTest is Test {
     function _assertSplitterDistributeGuarded() internal {
         ReentrantToken token = new ReentrantToken();
         PaymentSplitter splitter =
-            new PaymentSplitter(IERC20(address(token)), creator, treasury, CREATOR_BPS, owner);
+            new PaymentSplitter(IERC20(address(token)), creator, treasury, CREATOR_BPS, uint48(0), owner);
 
         // Fund the splitter with a balance to flush. Not armed yet.
         token.mint(address(splitter), AMOUNT);
@@ -88,7 +88,7 @@ contract ReentrancyTest is Test {
     /// bond payout safeTransfer after the cooldown elapses. The guard must revert.
     function _assertVaultWithdrawGuarded() internal {
         ReentrantToken token = new ReentrantToken();
-        StakingVault vault = new StakingVault(IERC20(address(token)), owner);
+        StakingVault vault = new StakingVault(IERC20(address(token)), uint48(0), owner, owner, owner);
 
         // Bond owner deposits, requests withdraw, warps past cooldown. Not armed
         // during these funding transfers.
@@ -105,16 +105,17 @@ contract ReentrancyTest is Test {
     }
 
     /// @dev StakingVault.refund: arm the token to re-enter refund during the
-    /// insurance-pool payout safeTransfer. refund is admin-only and nonReentrant;
-    /// the re-entry originates from the token contract (not the owner), so the
-    /// outer call still reverts and the double-refund is blocked. The first guard
-    /// to fire on the re-entry is onlyOwner (the token is not the owner), so a
-    /// generic revert is asserted rather than the specific reentrancy selector;
-    /// either way the re-entry cannot drain the insurance pool twice. The pool is
-    /// funded by slashing a bond first (admin-only), which moves no tokens.
+    /// insurance-pool payout safeTransfer. refund is TREASURY_ADMIN_ROLE-only and
+    /// nonReentrant; the re-entry originates from the token contract (which holds
+    /// no role), so the outer call still reverts and the double-refund is blocked.
+    /// The first guard to fire on the re-entry is onlyRole(TREASURY_ADMIN_ROLE)
+    /// (the token holds no role), so a generic revert is asserted rather than the
+    /// specific reentrancy selector; either way the re-entry cannot drain the
+    /// insurance pool twice. The pool is funded by slashing a bond first
+    /// (SLASHER_ROLE-only), which moves no tokens.
     function _assertVaultRefundGuarded() internal {
         ReentrantToken token = new ReentrantToken();
-        StakingVault vault = new StakingVault(IERC20(address(token)), owner);
+        StakingVault vault = new StakingVault(IERC20(address(token)), uint48(0), owner, owner, owner);
 
         // Fund a bond, then slash it into the insurance pool so refund has a
         // non-zero pool to draw from. Funding transfer happens before arming.
@@ -126,10 +127,7 @@ contract ReentrancyTest is Test {
 
         // Refund the attacker (this contract). When refund safeTransfers, the
         // _update hook re-enters refund for the same amount.
-        token.arm(
-            address(vault),
-            abi.encodeWithSelector(StakingVault.refund.selector, address(this), AMOUNT)
-        );
+        token.arm(address(vault), abi.encodeWithSelector(StakingVault.refund.selector, address(this), AMOUNT));
 
         vm.prank(owner);
         vm.expectRevert();

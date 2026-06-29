@@ -5,7 +5,9 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IResourceRegistry} from "./interfaces/IResourceRegistry.sol";
 
@@ -23,12 +25,14 @@ import {IResourceRegistry} from "./interfaces/IResourceRegistry.sol";
 /// the creator share is floored and the remainder routes to the treasury so the
 /// two shares always sum to the debited amount (D-03).
 ///
-/// Admin model: a single Ownable owner can rotate the admin (relayer) key. This
-/// single-key concentration is the MVP choice (D-04). Production should move to
-/// Ownable2Step, split admin and owner roles, and place the owner behind a
-/// multisig (01-RESEARCH Pitfall 4). Accepted as a documented threat-model item
-/// (T-01-05-KC).
-contract PaymentEscrow is EIP712, Ownable, ReentrancyGuard {
+/// Admin model: the relayer `admin` (the EIP-712 debit submitter) is rotated by
+/// the holder of DEFAULT_ADMIN_ROLE via setAdmin. DEFAULT_ADMIN_ROLE is the
+/// AccessControl role admin and is handed over through the 2-step, time-delayed,
+/// non-brickable transfer of AccessControlDefaultAdminRules, so the admin key can
+/// move to a multisig without the single-key concentration the MVP had
+/// (01-RESEARCH Pitfall 4, T-01-05-KC). The money path (deposit, withdraw, debit,
+/// the split, the EIP-712 domain) is unchanged by this migration.
+contract PaymentEscrow is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Basis-point denominator. creatorBps is expressed against 10000.
@@ -100,20 +104,26 @@ contract PaymentEscrow is EIP712, Ownable, ReentrancyGuard {
     /// @param _usdc The escrowed USDC token.
     /// @param _registry The resource config store debit reads.
     /// @param _admin The initial relayer / facilitator permitted to submit debits.
-    /// @param initialOwner The Ownable owner permitted to rotate the admin (D-04).
-    constructor(IERC20 _usdc, IResourceRegistry _registry, address _admin, address initialOwner)
-        EIP712("UtterEscrow", "1")
-        Ownable(initialOwner)
-    {
+    /// @param initialAdminDelay Delay enforced on the 2-step DEFAULT_ADMIN_ROLE
+    /// transfer (AccessControlDefaultAdminRules).
+    /// @param initialAdmin Holder of DEFAULT_ADMIN_ROLE permitted to rotate the
+    /// relayer admin via setAdmin. Must be non-zero.
+    constructor(
+        IERC20 _usdc,
+        IResourceRegistry _registry,
+        address _admin,
+        uint48 initialAdminDelay,
+        address initialAdmin
+    ) EIP712("UtterEscrow", "1") AccessControlDefaultAdminRules(initialAdminDelay, initialAdmin) {
         usdc = _usdc;
         registry = _registry;
         admin = _admin;
         emit AdminUpdated(address(0), _admin);
     }
 
-    /// @notice Rotate the admin (relayer) key. Owner-only (D-04).
+    /// @notice Rotate the admin (relayer) key. DEFAULT_ADMIN_ROLE only.
     /// @param newAdmin The new relayer address.
-    function setAdmin(address newAdmin) external onlyOwner {
+    function setAdmin(address newAdmin) external onlyRole(DEFAULT_ADMIN_ROLE) {
         emit AdminUpdated(admin, newAdmin);
         admin = newAdmin;
     }

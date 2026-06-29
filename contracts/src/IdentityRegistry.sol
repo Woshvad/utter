@@ -3,7 +3,9 @@ pragma solidity 0.8.28;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 
 /// @notice ERC-8004 reference IdentityRegistry for Arc Testnet (ID-01, ID-03).
 /// Arc has NO canonical ERC-8004 deployment (05-RESEARCH Pitfall 1), so Utter
@@ -23,7 +25,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /// (T-05-02-MINT, accepted MVP item).
 ///
 /// No amount-math literal appears here: the registry holds identity, never funds.
-contract IdentityRegistry is ERC721, ERC721URIStorage, Ownable {
+contract IdentityRegistry is ERC721, ERC721URIStorage, AccessControlDefaultAdminRules {
     /// @notice Next tokenId to mint. The first registered agent is agentId 1, so a
     /// zero agentId unambiguously means "unregistered" off chain.
     uint256 private _nextAgentId = 1;
@@ -37,12 +39,14 @@ contract IdentityRegistry is ERC721, ERC721URIStorage, Ownable {
     /// Mirrors the EIP-8004 Registered signature so a canonical swap is ABI-compatible.
     event Registered(uint256 indexed agentId, string agentURI, address indexed owner);
 
-    /// @param initialOwner The registry admin (OZ v5 Ownable takes the owner). The
-    /// owner does not gate register in this reference; it is reserved for future
-    /// administrative hooks the canonical standard may add.
-    constructor(address initialOwner)
+    /// @param initialAdminDelay Delay enforced on the 2-step DEFAULT_ADMIN_ROLE
+    /// transfer (AccessControlDefaultAdminRules).
+    /// @param initialAdmin Holder of DEFAULT_ADMIN_ROLE. The admin does not gate
+    /// register in this reference; it is reserved for future administrative hooks
+    /// the canonical standard may add. Must be non-zero.
+    constructor(uint48 initialAdminDelay, address initialAdmin)
         ERC721("Utter Agent Identity", "UTTERID")
-        Ownable(initialOwner)
+        AccessControlDefaultAdminRules(initialAdminDelay, initialAdmin)
     {}
 
     /// @notice Register a new agent identity. Mints the next sequential tokenId to
@@ -66,12 +70,7 @@ contract IdentityRegistry is ERC721, ERC721URIStorage, Ownable {
     // multiple-inheritance resolution below is required by solc.
 
     /// @inheritdoc ERC721URIStorage
-    function tokenURI(uint256 tokenId)
-        public
-        view
-        override(ERC721, ERC721URIStorage)
-        returns (string memory)
-    {
+    function tokenURI(uint256 tokenId) public view override(ERC721, ERC721URIStorage) returns (string memory) {
         return super.tokenURI(tokenId);
     }
 
@@ -79,7 +78,7 @@ contract IdentityRegistry is ERC721, ERC721URIStorage, Ownable {
     function supportsInterface(bytes4 interfaceId)
         public
         view
-        override(ERC721, ERC721URIStorage)
+        override(ERC721, ERC721URIStorage, AccessControlDefaultAdminRules)
         returns (bool)
     {
         return super.supportsInterface(interfaceId);

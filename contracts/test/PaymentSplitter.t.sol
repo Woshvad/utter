@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {PaymentSplitter} from "../src/PaymentSplitter.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -19,10 +20,13 @@ contract PaymentSplitterTest is Test {
     address internal creator = address(0xC0FFEE);
     address internal treasury = address(0x7EA);
     address internal owner = address(0x0E0E);
+    address internal stranger = address(0xBAD);
 
     function setUp() public {
         usdc = new MockERC20();
-        splitter = new PaymentSplitter(IERC20(address(usdc)), creator, treasury, DEFAULT_BPS, owner);
+        // owner holds DEFAULT_ADMIN_ROLE (the config-setter role). Zero delay: no
+        // admin transfer is exercised here.
+        splitter = new PaymentSplitter(IERC20(address(usdc)), creator, treasury, DEFAULT_BPS, uint48(0), owner);
     }
 
     /// @notice Mint a deliberately non-divisible amount into the splitter, flush
@@ -56,7 +60,7 @@ contract PaymentSplitterTest is Test {
         address t = address(uint160(uint256(keccak256(abi.encode(amount, bps, "treasury")))));
         vm.assume(c != t && c != address(0) && t != address(0));
 
-        PaymentSplitter s = new PaymentSplitter(IERC20(address(usdc)), c, t, bps, owner);
+        PaymentSplitter s = new PaymentSplitter(IERC20(address(usdc)), c, t, bps, uint48(0), owner);
         usdc.mint(address(s), amount);
 
         s.distribute();
@@ -68,5 +72,34 @@ contract PaymentSplitterTest is Test {
         assertEq(toTreasury, amount - toCreator, "treasury remainder");
         assertEq(toCreator + toTreasury, amount, "split conservation");
         assertEq(usdc.balanceOf(address(s)), 0, "splitter drained");
+    }
+
+    /// @notice setSplit / setTreasury are DEFAULT_ADMIN_ROLE-gated: a non-admin
+    /// caller reverts with AccessControlUnauthorizedAccount, and the DEFAULT_ADMIN
+    /// can update both.
+    function test_setters_onlyDefaultAdmin() public {
+        bytes32 adminRole = splitter.DEFAULT_ADMIN_ROLE();
+
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, adminRole)
+        );
+        splitter.setSplit(5000);
+
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, adminRole)
+        );
+        splitter.setTreasury(stranger);
+
+        // The DEFAULT_ADMIN can update both.
+        vm.prank(owner);
+        splitter.setSplit(5000);
+        assertEq(splitter.creatorBps(), 5000, "creatorBps not updated by admin");
+
+        address newTreasury = address(0xFEE);
+        vm.prank(owner);
+        splitter.setTreasury(newTreasury);
+        assertEq(splitter.treasury(), newTreasury, "treasury not updated by admin");
     }
 }

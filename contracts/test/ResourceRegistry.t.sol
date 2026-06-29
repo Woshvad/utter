@@ -2,13 +2,15 @@
 pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {ResourceRegistry} from "../src/ResourceRegistry.sol";
 
 /// @notice CONTRACT-04 tests for the resource config store: register stores the
 /// config and emits the indexer event, pause / unpause flips the active flag,
-/// and every mutator is owner-gated (non-owner reverts with the OZ v5
-/// OwnableUnauthorizedAccount error).
+/// and every mutator is role-gated (an unauthorized caller reverts with the OZ
+/// AccessControlUnauthorizedAccount error for the specific required role). The
+/// single test admin holds DEFAULT_ADMIN_ROLE plus both specific roles, so the
+/// existing positive-path tests behave exactly like the old single owner.
 contract ResourceRegistryTest is Test {
     ResourceRegistry internal registry;
 
@@ -16,6 +18,7 @@ contract ResourceRegistryTest is Test {
     address internal stranger = makeAddr("stranger");
     address internal creator = makeAddr("creator");
     address internal treasury = makeAddr("treasury");
+    address internal slasher2 = makeAddr("slasher2");
 
     bytes32 internal constant RESOURCE_ID = keccak256("resource-1");
     bytes32 internal constant AGENT_ID = keccak256("agent-1");
@@ -35,7 +38,10 @@ contract ResourceRegistryTest is Test {
     event ResourceUnpaused(bytes32 indexed resourceId);
 
     function setUp() public {
-        registry = new ResourceRegistry(owner);
+        // The single owner holds DEFAULT_ADMIN_ROLE plus REGISTRY_ADMIN_ROLE and
+        // SLASHER_ROLE, mirroring the old single owner. Zero delay: no admin
+        // transfer is exercised here.
+        registry = new ResourceRegistry(uint48(0), owner, owner, owner);
     }
 
     function _register() internal {
@@ -103,25 +109,77 @@ contract ResourceRegistryTest is Test {
         registry.update(RESOURCE_ID, address(0), CREATOR_BPS, AGENT_ID, PRICING_HASH);
     }
 
-    /// @notice A non-owner caller to register / pause / slashAuthorization reverts
-    /// with OZ v5 OwnableUnauthorizedAccount(caller).
+    /// @notice An unauthorized caller to register / pause / slashAuthorization
+    /// reverts with AccessControlUnauthorizedAccount(caller, role) for the
+    /// specific role the function now requires.
     function test_registry_onlyAdminGuards() public {
-        // register guard
+        bytes32 registryRole = registry.REGISTRY_ADMIN_ROLE();
+        bytes32 slasherRole = registry.SLASHER_ROLE();
+
+        // register guard (REGISTRY_ADMIN_ROLE)
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, registryRole)
+        );
         registry.register(RESOURCE_ID, creator, treasury, CREATOR_BPS, AGENT_ID, PRICING_HASH);
 
         // register a resource as owner so pause / slash have an existing target
         _register();
 
-        // pause guard
+        // pause guard (REGISTRY_ADMIN_ROLE)
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, registryRole)
+        );
         registry.pause(RESOURCE_ID);
 
-        // slashAuthorization guard
+        // slashAuthorization guard (SLASHER_ROLE)
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, slasherRole)
+        );
+        registry.slashAuthorization(RESOURCE_ID, 1_000_000, "fraud");
+    }
+
+    /// @notice The role split is enforced: an account holding REGISTRY_ADMIN_ROLE
+    /// but NOT SLASHER_ROLE still cannot call slashAuthorization, proving the two
+    /// privileges are distinct and not collapsed into one admin.
+    function test_registry_registryAdminCannotSlash() public {
+        _register();
+        bytes32 slasherRole = registry.SLASHER_ROLE();
+
+        // owner holds REGISTRY_ADMIN_ROLE here; revoke SLASHER_ROLE from owner so
+        // it becomes a registry-admin-without-slasher case.
+        vm.prank(owner);
+        registry.revokeRole(slasherRole, owner);
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, owner, slasherRole)
+        );
+        registry.slashAuthorization(RESOURCE_ID, 1_000_000, "fraud");
+    }
+
+    /// @notice SLASHER_ROLE is grantable: after the DEFAULT_ADMIN grants it to a
+    /// second account, that account can call slashAuthorization.
+    function test_registry_grantSlasherRoleLetsSecondAccountSlash() public {
+        _register();
+        bytes32 slasherRole = registry.SLASHER_ROLE();
+
+        // slasher2 has no role yet, so it cannot slash.
+        vm.prank(slasher2);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, slasher2, slasherRole)
+        );
+        registry.slashAuthorization(RESOURCE_ID, 1_000_000, "fraud");
+
+        // The DEFAULT_ADMIN grants SLASHER_ROLE to slasher2.
+        vm.prank(owner);
+        registry.grantRole(slasherRole, slasher2);
+        assertTrue(registry.hasRole(slasherRole, slasher2), "slasher2 not granted SLASHER_ROLE");
+
+        // Now slasher2 can authorize a slash.
+        vm.prank(slasher2);
         registry.slashAuthorization(RESOURCE_ID, 1_000_000, "fraud");
     }
 }
