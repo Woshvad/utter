@@ -6,14 +6,21 @@ import {
 } from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IResourceRegistry} from "./interfaces/IResourceRegistry.sol";
 
 /// @notice Per-resource USDC bond custody with an in-vault insurance pool
 /// (CONTRACT-05, CONTRACT-07, D-06). A creator deposits a bond per resource to
-/// back the trust loop. The registry admin can slash a failing resource's bond,
-/// which moves the slashed amount into the insurance pool while the funds stay
-/// inside this vault's custody boundary. Slashed funds reimburse affected buyers
-/// through the admin-only refund capability, which is guarded against draining
-/// the pool beyond its balance.
+/// back the trust loop. A slash moves the slashed amount into the insurance pool
+/// while the funds stay inside this vault's custody boundary. Slashed funds
+/// reimburse affected buyers through the admin-only refund capability, which is
+/// guarded against draining the pool beyond its balance.
+///
+/// Slash coupling: a slash is coupled to the ResourceRegistry on chain. slash
+/// first consumes a matured, matching authorization the slasher recorded on the
+/// registry (consumeSlashAuthorization), then runs the bond and insurance
+/// effects. So one key alone cannot slash a bond: it must record an
+/// authorization on the registry, wait the cancelable dispute window, then call
+/// slash here, which consumes the exact authorization once.
 ///
 /// Withdraw is gated by a cooldown that starts when the creator requests it, so
 /// a creator cannot front-run a pending slash by withdrawing first. Slashing is
@@ -66,6 +73,11 @@ contract StakingVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     /// @notice The USDC token bonds are denominated in. Immutable after deploy.
     IERC20 public immutable usdc;
 
+    /// @notice The ResourceRegistry this vault consumes slash authorizations from.
+    /// Immutable after deploy. slash consumes a matured authorization here before
+    /// touching the bond, coupling the two contracts on chain.
+    IResourceRegistry public immutable registry;
+
     /// @notice Per-resource bond balance in USDC base units (D-06).
     mapping(bytes32 => uint256) public bonds;
 
@@ -100,16 +112,25 @@ contract StakingVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     event Refunded(address indexed payer, uint256 amount);
 
     /// @param usdc_ The USDC token bonds are denominated in.
+    /// @param registry_ The ResourceRegistry this vault consumes slash
+    /// authorizations from. Must be non-zero.
     /// @param initialAdminDelay Delay enforced on the 2-step DEFAULT_ADMIN_ROLE
     /// transfer (AccessControlDefaultAdminRules).
     /// @param initialAdmin Holder of DEFAULT_ADMIN_ROLE, which grants and revokes
     /// the specific roles. Must be non-zero.
     /// @param slasher Granted SLASHER_ROLE (slash).
     /// @param treasuryAdmin Granted TREASURY_ADMIN_ROLE (refund).
-    constructor(IERC20 usdc_, uint48 initialAdminDelay, address initialAdmin, address slasher, address treasuryAdmin)
-        AccessControlDefaultAdminRules(initialAdminDelay, initialAdmin)
-    {
+    constructor(
+        IERC20 usdc_,
+        IResourceRegistry registry_,
+        uint48 initialAdminDelay,
+        address initialAdmin,
+        address slasher,
+        address treasuryAdmin
+    ) AccessControlDefaultAdminRules(initialAdminDelay, initialAdmin) {
+        if (address(registry_) == address(0)) revert ZeroAddress();
         usdc = usdc_;
+        registry = registry_;
         _grantRole(SLASHER_ROLE, slasher);
         _grantRole(TREASURY_ADMIN_ROLE, treasuryAdmin);
     }
@@ -146,14 +167,13 @@ contract StakingVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     /// The slashed amount moves from the bond to insurancePoolBalance and stays in
     /// vault custody; no tokens leave. Permitted at any time, including during an
     /// active withdraw cooldown, which closes the withdraw-to-dodge path.
-    /// @dev The `amount` is supplied directly by the admin and is NOT reconciled
-    /// on chain against any ResourceRegistry authorization. The registry's
-    /// `slashAuthorization` event is ADVISORY-ONLY: it is an indexer signal that a
-    /// slash is intended, not an on-chain spend authorization that this function
-    /// consumes. The off-chain scorer / admin drives the real spend by calling
-    /// `slash(resourceId, amount, reason)` with consistent values. The two
-    /// contracts share no state; full on-chain coupling is an accepted
-    /// out-of-scope design item under the MVP single-key threat model (D-04).
+    /// @dev Coupled to the ResourceRegistry on chain. This first calls
+    /// registry.consumeSlashAuthorization(resourceId, amount), which reverts
+    /// unless the slasher recorded a matching authorization on the registry and
+    /// its dispute window has elapsed, and which clears the authorization so it is
+    /// single-use. Only then does the existing bond / insurance effect run. The
+    /// whole call is atomic under nonReentrant, so a failed consume leaves the
+    /// bond untouched. The amount must equal the recorded authorization exactly.
     /// @param resourceId The resource whose bond is slashed.
     /// @param amount USDC base units to slash.
     /// @param reason Human-readable reason emitted for the indexer.
@@ -162,6 +182,8 @@ contract StakingVault is AccessControlDefaultAdminRules, ReentrancyGuard {
         onlyRole(SLASHER_ROLE)
         nonReentrant
     {
+        registry.consumeSlashAuthorization(resourceId, amount);
+
         if (amount > bonds[resourceId]) revert SlashExceedsBond();
 
         bonds[resourceId] -= amount;

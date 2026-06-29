@@ -71,8 +71,19 @@ contract Deploy is Script {
             new PaymentEscrow(IERC20(p.usdc), IResourceRegistry(address(registry)), p.admin, p.adminDelay, p.owner);
 
         // 3. Staking vault: per-resource bond custody plus the in-vault insurance
-        // pool. SLASHER_ROLE may slash; TREASURY_ADMIN_ROLE may refund.
-        StakingVault vault = new StakingVault(IERC20(p.usdc), p.adminDelay, p.owner, p.slasher, p.treasuryAdmin);
+        // pool. SLASHER_ROLE may slash; TREASURY_ADMIN_ROLE may refund. The vault
+        // consumes slash authorizations from the registry, so it holds a reference
+        // to it and is granted VAULT_ROLE below.
+        StakingVault vault = new StakingVault(
+            IERC20(p.usdc), IResourceRegistry(address(registry)), p.adminDelay, p.owner, p.slasher, p.treasuryAdmin
+        );
+
+        // Couple the slash path: grant the vault VAULT_ROLE on the registry so it
+        // alone may consume a recorded slash authorization. The deployer holds
+        // DEFAULT_ADMIN here so the grant succeeds in the dry run; on mainnet the
+        // admin multisig performs this grant as a post-deploy wiring step.
+        registry.grantRole(registry.VAULT_ROLE(), address(vault));
+        console.log("Granted VAULT_ROLE on registry to StakingVault:", address(vault));
 
         // 4. Representative PaymentSplitter for the flat exact path. The splitter
         // is per-resource in production; this one is deployed as a wiring example

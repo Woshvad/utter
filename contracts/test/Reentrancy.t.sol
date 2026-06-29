@@ -88,7 +88,10 @@ contract ReentrancyTest is Test {
     /// bond payout safeTransfer after the cooldown elapses. The guard must revert.
     function _assertVaultWithdrawGuarded() internal {
         ReentrantToken token = new ReentrantToken();
-        StakingVault vault = new StakingVault(IERC20(address(token)), uint48(0), owner, owner, owner);
+        ResourceRegistry registry = new ResourceRegistry(uint48(0), owner, owner, owner);
+        StakingVault vault = new StakingVault(
+            IERC20(address(token)), IResourceRegistry(address(registry)), uint48(0), owner, owner, owner
+        );
 
         // Bond owner deposits, requests withdraw, warps past cooldown. Not armed
         // during these funding transfers.
@@ -115,13 +118,27 @@ contract ReentrancyTest is Test {
     /// (SLASHER_ROLE-only), which moves no tokens.
     function _assertVaultRefundGuarded() internal {
         ReentrantToken token = new ReentrantToken();
-        StakingVault vault = new StakingVault(IERC20(address(token)), uint48(0), owner, owner, owner);
+        ResourceRegistry registry = new ResourceRegistry(uint48(0), owner, owner, owner);
+        StakingVault vault = new StakingVault(
+            IERC20(address(token)), IResourceRegistry(address(registry)), uint48(0), owner, owner, owner
+        );
+
+        // The vault may consume slash authorizations and the resource exists so a
+        // matured authorization can be recorded and consumed.
+        vm.startPrank(owner);
+        registry.grantRole(registry.VAULT_ROLE(), address(vault));
+        registry.register(RESOURCE_ID, creator, treasury, CREATOR_BPS, bytes32(0), bytes32(0));
+        vm.stopPrank();
 
         // Fund a bond, then slash it into the insurance pool so refund has a
-        // non-zero pool to draw from. Funding transfer happens before arming.
+        // non-zero pool to draw from. Funding transfer happens before arming. The
+        // slash consumes a matured registry authorization first.
         token.mint(address(this), AMOUNT);
         token.approve(address(vault), type(uint256).max);
         vault.deposit(RESOURCE_ID, AMOUNT);
+        vm.prank(owner);
+        registry.slashAuthorization(RESOURCE_ID, AMOUNT, "fault");
+        vm.warp(block.timestamp + registry.SLASH_DISPUTE_WINDOW());
         vm.prank(owner);
         vault.slash(RESOURCE_ID, AMOUNT, "fault");
 

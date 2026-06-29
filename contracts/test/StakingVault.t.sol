@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {StakingVault} from "../src/StakingVault.sol";
+import {ResourceRegistry} from "../src/ResourceRegistry.sol";
+import {IResourceRegistry} from "../src/interfaces/IResourceRegistry.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @notice CONTRACT-05 + CONTRACT-07 tests for the bond / slash / cooldown /
@@ -12,8 +14,15 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 /// in-vault insurance pool, withdraw is blocked until the cooldown elapses while
 /// slashing still works during cooldown, and the admin refunds buyers from the
 /// pool with an over-refund guard and an only-admin guard.
+///
+/// Slash is coupled to the ResourceRegistry on chain (T56): a slash first
+/// consumes a matured, matching authorization the slasher recorded on the
+/// registry. The setup deploys a real registry, grants the vault VAULT_ROLE, and
+/// registers the resource; each slash test records an authorization and warps
+/// past SLASH_DISPUTE_WINDOW before slashing.
 contract StakingVaultTest is Test {
     StakingVault internal vault;
+    ResourceRegistry internal registry;
     MockERC20 internal usdc;
 
     address internal owner = makeAddr("owner");
@@ -21,8 +30,12 @@ contract StakingVaultTest is Test {
     address internal payer = makeAddr("payer");
     address internal stranger = makeAddr("stranger");
     address internal slasher2 = makeAddr("slasher2");
+    address internal treasury = makeAddr("treasury");
 
     bytes32 internal constant RESOURCE_ID = keccak256("resource-1");
+    bytes32 internal constant AGENT_ID = keccak256("agent-1");
+    bytes32 internal constant PRICING_HASH = keccak256("pricing-1");
+    uint16 internal constant CREATOR_BPS = 7000;
 
     // A bond comfortably above MIN_BOND_BASE_UNITS (1e6 == $1 at 6dp).
     uint256 internal constant BOND = 10_000_000; // $10
@@ -35,10 +48,22 @@ contract StakingVaultTest is Test {
 
     function setUp() public {
         usdc = new MockERC20();
-        // The single owner holds DEFAULT_ADMIN_ROLE plus SLASHER_ROLE and
-        // TREASURY_ADMIN_ROLE, mirroring the old single owner. Zero delay: no
-        // admin transfer is exercised here.
-        vault = new StakingVault(IERC20(address(usdc)), uint48(0), owner, owner, owner);
+        // The single owner holds DEFAULT_ADMIN_ROLE plus REGISTRY_ADMIN_ROLE and
+        // SLASHER_ROLE on the registry, and DEFAULT_ADMIN_ROLE plus SLASHER_ROLE
+        // and TREASURY_ADMIN_ROLE on the vault, mirroring the old single owner.
+        // Zero delay: no admin transfer is exercised here.
+        registry = new ResourceRegistry(uint48(0), owner, owner, owner);
+        vault = new StakingVault(
+            IERC20(address(usdc)), IResourceRegistry(address(registry)), uint48(0), owner, owner, owner
+        );
+
+        // Couple the slash path: grant the vault VAULT_ROLE so it may consume a
+        // recorded authorization, and register the resource so authorizations and
+        // slashes target an existing resource.
+        vm.startPrank(owner);
+        registry.grantRole(registry.VAULT_ROLE(), address(vault));
+        registry.register(RESOURCE_ID, creator, treasury, CREATOR_BPS, AGENT_ID, PRICING_HASH);
+        vm.stopPrank();
 
         usdc.mint(creator, 1_000_000_000); // plenty of USDC for the creator
         vm.prank(creator);
@@ -49,6 +74,15 @@ contract StakingVaultTest is Test {
         usdc.mint(stranger, 1_000_000_000);
         vm.prank(stranger);
         usdc.approve(address(vault), type(uint256).max);
+    }
+
+    /// @dev Record a matured slash authorization for `amount` and warp past the
+    /// dispute window so a subsequent slash(amount) can consume it. The slasher
+    /// (owner here) records on the registry; the window then elapses.
+    function _authorizeAndMature(uint256 amount) internal {
+        vm.prank(owner);
+        registry.slashAuthorization(RESOURCE_ID, amount, "scorer:authorize");
+        vm.warp(block.timestamp + registry.SLASH_DISPUTE_WINDOW());
     }
 
     /// A second depositor cannot seize an existing bond: once creator owns the
@@ -81,10 +115,18 @@ contract StakingVaultTest is Test {
         vault.deposit(RESOURCE_ID, 0);
     }
 
+    /// The constructor reverts ZeroAddress when the registry is the zero address,
+    /// so a vault can never deploy without a registry to consume authorizations.
+    function test_constructor_revertsOnZeroRegistry() public {
+        vm.expectRevert(StakingVault.ZeroAddress.selector);
+        new StakingVault(IERC20(address(usdc)), IResourceRegistry(address(0)), uint48(0), owner, owner, owner);
+    }
+
     /// A zero-address payer refund reverts ZeroAddress (defense in depth).
     function test_refund_revertsOnZeroAddressPayer() public {
         vm.prank(creator);
         vault.deposit(RESOURCE_ID, BOND);
+        _authorizeAndMature(4_000_000);
         vm.prank(owner);
         vault.slash(RESOURCE_ID, 4_000_000, "scorer:5-strikes");
 
@@ -104,12 +146,14 @@ contract StakingVaultTest is Test {
     }
 
     /// Admin slash decrements the bond, increments insurancePoolBalance, emits
-    /// Slashed(reason); a non-admin slash reverts.
+    /// Slashed(reason); a non-admin slash reverts. The slash consumes a matured
+    /// registry authorization first.
     function test_slash_movesToInsurancePool() public {
         vm.prank(creator);
         vault.deposit(RESOURCE_ID, BOND);
 
         uint256 slashAmount = 4_000_000;
+        _authorizeAndMature(slashAmount);
 
         vm.expectEmit(true, false, false, true);
         emit Slashed(RESOURCE_ID, slashAmount, "scorer:5-strikes");
@@ -120,8 +164,13 @@ contract StakingVaultTest is Test {
         assertEq(vault.insurancePoolBalance(), slashAmount, "insurance pool not credited");
         // Funds stay in vault custody: no token left the vault on slash.
         assertEq(usdc.balanceOf(address(vault)), BOND, "vault balance changed on slash");
+        // The authorization was consumed (single-use): nothing pending remains.
+        (uint256 pendingAmount,) = registry.getPendingSlash(RESOURCE_ID);
+        assertEq(pendingAmount, 0, "authorization not cleared on consume");
 
-        // A caller without SLASHER_ROLE cannot slash.
+        // A caller without SLASHER_ROLE cannot slash. Re-authorize so the call
+        // reaches the role guard rather than reverting NoPendingSlash first.
+        _authorizeAndMature(slashAmount);
         vm.expectRevert(
             abi.encodeWithSelector(
                 IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, vault.SLASHER_ROLE()
@@ -129,6 +178,124 @@ contract StakingVaultTest is Test {
         );
         vm.prank(stranger);
         vault.slash(RESOURCE_ID, slashAmount, "unauthorized");
+    }
+
+    /// slash with NO prior authorization reverts NoPendingSlash and leaves the
+    /// bond untouched (no money effect runs).
+    function test_slash_revertsWithoutAuthorization() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        vm.expectRevert(ResourceRegistry.NoPendingSlash.selector);
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, 4_000_000, "no-auth");
+
+        assertEq(vault.bonds(RESOURCE_ID), BOND, "bond touched without authorization");
+        assertEq(vault.insurancePoolBalance(), 0, "insurance pool credited without authorization");
+    }
+
+    /// slash BEFORE the dispute window elapses reverts SlashWindowActive and
+    /// leaves the bond untouched.
+    function test_slash_revertsBeforeWindow() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        uint256 slashAmount = 4_000_000;
+        vm.prank(owner);
+        registry.slashAuthorization(RESOURCE_ID, slashAmount, "scorer:authorize");
+        // No warp: still inside the dispute window.
+
+        vm.expectRevert(ResourceRegistry.SlashWindowActive.selector);
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, slashAmount, "too-soon");
+
+        assertEq(vault.bonds(RESOURCE_ID), BOND, "bond touched before window");
+        assertEq(vault.insurancePoolBalance(), 0, "insurance pool credited before window");
+    }
+
+    /// slash with an amount different from the authorized amount reverts
+    /// SlashAmountMismatch and leaves the bond untouched.
+    function test_slash_revertsOnAmountMismatch() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        _authorizeAndMature(4_000_000);
+
+        vm.expectRevert(ResourceRegistry.SlashAmountMismatch.selector);
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, 5_000_000, "wrong-amount");
+
+        assertEq(vault.bonds(RESOURCE_ID), BOND, "bond touched on amount mismatch");
+        assertEq(vault.insurancePoolBalance(), 0, "insurance pool credited on amount mismatch");
+    }
+
+    /// A DEFAULT_ADMIN cancel during the dispute window disputes the slash: a
+    /// subsequent slash reverts NoPendingSlash and the bond is untouched.
+    function test_slash_revertsAfterCancel() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        uint256 slashAmount = 4_000_000;
+        vm.prank(owner);
+        registry.slashAuthorization(RESOURCE_ID, slashAmount, "scorer:authorize");
+
+        // DEFAULT_ADMIN disputes by cancelling during the window.
+        vm.prank(owner);
+        registry.cancelSlashAuthorization(RESOURCE_ID);
+
+        // Even after the window would have elapsed, no authorization remains.
+        vm.warp(block.timestamp + registry.SLASH_DISPUTE_WINDOW());
+        vm.expectRevert(ResourceRegistry.NoPendingSlash.selector);
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, slashAmount, "cancelled");
+
+        assertEq(vault.bonds(RESOURCE_ID), BOND, "bond touched after cancel");
+        assertEq(vault.insurancePoolBalance(), 0, "insurance pool credited after cancel");
+    }
+
+    /// An authorization is single-use: after a successful slash consumes it, a
+    /// second slash without re-authorizing reverts NoPendingSlash.
+    function test_slash_authorizationSingleUse() public {
+        vm.prank(creator);
+        vault.deposit(RESOURCE_ID, BOND);
+
+        uint256 slashAmount = 3_000_000;
+        _authorizeAndMature(slashAmount);
+
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, slashAmount, "scorer:first");
+        assertEq(vault.bonds(RESOURCE_ID), BOND - slashAmount, "first slash not applied");
+
+        // A second slash with no fresh authorization reverts NoPendingSlash.
+        vm.expectRevert(ResourceRegistry.NoPendingSlash.selector);
+        vm.prank(owner);
+        vault.slash(RESOURCE_ID, slashAmount, "scorer:second");
+
+        assertEq(vault.bonds(RESOURCE_ID), BOND - slashAmount, "bond changed on single-use second slash");
+    }
+
+    /// Only the vault may consume an authorization: a direct external caller,
+    /// even the SLASHER, reverts AccessControlUnauthorizedAccount(VAULT_ROLE).
+    function test_consume_onlyVaultRole() public {
+        bytes32 vaultRole = registry.VAULT_ROLE();
+
+        uint256 slashAmount = 4_000_000;
+        _authorizeAndMature(slashAmount);
+
+        // owner holds SLASHER_ROLE and DEFAULT_ADMIN but NOT VAULT_ROLE, so even
+        // it cannot consume the authorization directly.
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, owner, vaultRole)
+        );
+        vm.prank(owner);
+        registry.consumeSlashAuthorization(RESOURCE_ID, slashAmount);
+
+        // A stranger cannot consume either.
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, vaultRole)
+        );
+        vm.prank(stranger);
+        registry.consumeSlashAuthorization(RESOURCE_ID, slashAmount);
     }
 
     /// requestWithdraw then immediate withdraw reverts (CooldownActive); after
@@ -161,7 +328,8 @@ contract StakingVaultTest is Test {
     }
 
     /// After requestWithdraw, an admin slash during the cooldown window still
-    /// succeeds, so a creator cannot front-run a pending slash.
+    /// succeeds, so a creator cannot front-run a pending slash. The slash still
+    /// consumes a matured registry authorization first.
     function test_slash_duringCooldown() public {
         vm.prank(creator);
         vault.deposit(RESOURCE_ID, BOND);
@@ -169,10 +337,13 @@ contract StakingVaultTest is Test {
         vm.prank(creator);
         vault.requestWithdraw(RESOURCE_ID);
 
-        // Move forward one day, still inside the 7-day cooldown.
+        uint256 slashAmount = 3_000_000;
+        // Authorize then warp one day (== SLASH_DISPUTE_WINDOW), still inside the
+        // 7-day withdraw cooldown, so the slash matures while the bond is locked.
+        vm.prank(owner);
+        registry.slashAuthorization(RESOURCE_ID, slashAmount, "scorer:authorize");
         vm.warp(block.timestamp + 1 days);
 
-        uint256 slashAmount = 3_000_000;
         vm.prank(owner);
         vault.slash(RESOURCE_ID, slashAmount, "scorer:strikes-during-cooldown");
 
@@ -187,6 +358,7 @@ contract StakingVaultTest is Test {
         vault.deposit(RESOURCE_ID, BOND);
 
         uint256 slashAmount = 6_000_000;
+        _authorizeAndMature(slashAmount);
         vm.prank(owner);
         vault.slash(RESOURCE_ID, slashAmount, "scorer:5-strikes");
 
@@ -207,6 +379,7 @@ contract StakingVaultTest is Test {
         vault.deposit(RESOURCE_ID, BOND);
 
         uint256 slashAmount = 5_000_000;
+        _authorizeAndMature(slashAmount);
         vm.prank(owner);
         vault.slash(RESOURCE_ID, slashAmount, "scorer:5-strikes");
 
@@ -222,6 +395,7 @@ contract StakingVaultTest is Test {
         vm.prank(creator);
         vault.deposit(RESOURCE_ID, BOND);
 
+        _authorizeAndMature(4_000_000);
         vm.prank(owner);
         vault.slash(RESOURCE_ID, 4_000_000, "scorer:5-strikes");
 
@@ -244,6 +418,7 @@ contract StakingVaultTest is Test {
 
         vm.prank(creator);
         vault.deposit(RESOURCE_ID, BOND);
+        _authorizeAndMature(4_000_000);
         vm.prank(owner);
         vault.slash(RESOURCE_ID, 4_000_000, "scorer:5-strikes");
 
@@ -269,29 +444,33 @@ contract StakingVaultTest is Test {
     }
 
     /// SLASHER_ROLE is grantable: after the DEFAULT_ADMIN grants it to a second
-    /// account, that account can slash a bond into the insurance pool.
+    /// account, that account can slash a bond into the insurance pool (consuming a
+    /// matured registry authorization).
     function test_grantSlasherRoleLetsSecondAccountSlash() public {
         bytes32 slasherRole = vault.SLASHER_ROLE();
 
         vm.prank(creator);
         vault.deposit(RESOURCE_ID, BOND);
 
+        uint256 slashAmount = 1_000_000;
+        _authorizeAndMature(slashAmount);
+
         // slasher2 cannot slash before the grant.
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, slasher2, slasherRole)
         );
         vm.prank(slasher2);
-        vault.slash(RESOURCE_ID, 1_000_000, "unauthorized");
+        vault.slash(RESOURCE_ID, slashAmount, "unauthorized");
 
         // The DEFAULT_ADMIN grants SLASHER_ROLE to slasher2.
         vm.prank(owner);
         vault.grantRole(slasherRole, slasher2);
         assertTrue(vault.hasRole(slasherRole, slasher2), "slasher2 not granted SLASHER_ROLE");
 
-        // Now slasher2 can slash.
+        // Now slasher2 can slash the matured authorization.
         vm.prank(slasher2);
-        vault.slash(RESOURCE_ID, 1_000_000, "scorer:granted");
-        assertEq(vault.insurancePoolBalance(), 1_000_000, "granted slasher slash not applied");
+        vault.slash(RESOURCE_ID, slashAmount, "scorer:granted");
+        assertEq(vault.insurancePoolBalance(), slashAmount, "granted slasher slash not applied");
     }
 
     /// The DEFAULT_ADMIN 2-step transfer moves DEFAULT_ADMIN_ROLE after the delay
@@ -303,7 +482,8 @@ contract StakingVaultTest is Test {
         // Warp off the genesis timestamp so the schedule (now + delay) is well
         // defined and the accept-before-delay path is exercised cleanly.
         vm.warp(1_000_000);
-        StakingVault v = new StakingVault(IERC20(address(usdc)), delay, owner, owner, owner);
+        StakingVault v =
+            new StakingVault(IERC20(address(usdc)), IResourceRegistry(address(registry)), delay, owner, owner, owner);
         bytes32 adminRole = v.DEFAULT_ADMIN_ROLE();
         bytes32 slasherRole = v.SLASHER_ROLE();
 

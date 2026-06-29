@@ -28,4 +28,25 @@ interface IResourceRegistry {
     /// @param resourceId The bytes32 key identifying the resource.
     /// @return Whether the resource exists and is active.
     function isActive(bytes32 resourceId) external view returns (bool);
+
+    /// @notice Consume a matured slash authorization for a resource. The
+    /// StakingVault calls this as the first step of slash, so a bond can only be
+    /// slashed after a registry authorization has been recorded, its dispute
+    /// window has elapsed, and the amount matches exactly.
+    /// @dev VAULT_ROLE-gated so only the StakingVault may consume; even the
+    /// slasher cannot consume directly. Single-use: the pending authorization is
+    /// cleared on consume. Reverts NoPendingSlash if none is recorded,
+    /// SlashAmountMismatch if amount does not match the recorded amount, and
+    /// SlashWindowActive if the dispute window has not yet elapsed.
+    /// @param resourceId The resource whose pending slash is consumed.
+    /// @param amount The slash amount, which must equal the recorded amount.
+    function consumeSlashAuthorization(bytes32 resourceId, uint256 amount) external;
+
+    /// @notice Read the pending slash authorization recorded for a resource.
+    /// @dev Returns (0, 0) when no authorization is pending. executableAt is the
+    /// timestamp at which the dispute window elapses and the vault may consume.
+    /// @param resourceId The resource to read.
+    /// @return amount The recorded slash amount, or 0 if none is pending.
+    /// @return executableAt The timestamp the slash matures, or 0 if none.
+    function getPendingSlash(bytes32 resourceId) external view returns (uint256 amount, uint64 executableAt);
 }
