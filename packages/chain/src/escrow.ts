@@ -150,15 +150,21 @@ export async function readWithdrawals(
       args: { account },
       fromBlock,
       toBlock: "latest",
+      // strict: only return logs that fully decode against the Withdrawn event, so a
+      // surviving log always carries a decoded `amount` (defense in depth for a money
+      // read - a malformed/partial log is dropped rather than read as a zero amount).
+      strict: true,
     }),
   ]);
 
   // Drop pending logs (no blockNumber / txHash yet), map to records, sort newest-first.
+  // `amount` is required (strict getLogs); tx/blockNumber are nullable only for pending
+  // logs, already excluded by the filter above.
   const records: WithdrawalRecord[] = logs
     .filter((l) => l.blockNumber != null && l.transactionHash != null)
     .map((l) => ({
       tx: l.transactionHash as Hex,
-      amount: l.args.amount as bigint,
+      amount: l.args.amount,
       blockNumber: l.blockNumber as bigint,
     }))
     .sort((a, b) => (a.blockNumber < b.blockNumber ? 1 : a.blockNumber > b.blockNumber ? -1 : 0));

@@ -156,6 +156,16 @@ describe("readWithdrawals", () => {
     expect(call.fromBlock).toBe(0n);
   });
 
+  it("honors a pinned fromBlock and always scans to the chain head", async () => {
+    const { client, getLogsCalls } = mockLogClient(6, []);
+    await readWithdrawals(client, ACCOUNT, { fromBlock: 12_345n });
+    const call = getLogsCalls[0]!;
+    // The pinned window start is forwarded; toBlock is always the head so a pinned
+    // fromBlock bounds only the SCAN START, never silently truncating recent history.
+    expect(call.fromBlock).toBe(12_345n);
+    expect(call.toBlock).toBe("latest");
+  });
+
   it("returns an empty record list (with decimals) when there are no logs", async () => {
     const { client } = mockLogClient(6, []);
     const history = await readWithdrawals(client, ACCOUNT);
