@@ -53,7 +53,12 @@ were intentionally left outside the identity/card centralization):
 - Comment only: `contracts/src/IdentityRegistry.sol`.
 
 The cleanest mainnet hardening is to re-point each of these at `ARC_CHAIN_ID` /
-`ARC_CAIP2_NETWORK` from `@utter/chain` so there is one place to change next time.
+`ARC_CAIP2_NETWORK` from `@utter/chain` so there is one place to change next time. This is a
+deliberate pre-mainnet task, not done today: there is no mainnet chain id to target yet, and these
+literals sit inside the money-path EIP-712 signing domains, which stay byte-unchanged until they are
+re-pinned together with the money-path tests against the real mainnet values (a wrong chainId in a
+signing domain silently breaks settlement, so it is not changed speculatively). The identity /
+agent-card path needs no such change; it already flows from `@utter/chain`.
 
 ## 2. Redeploy the Phase 1 contracts with separated roles
 
@@ -128,28 +133,47 @@ On-chain bond gate (marketplace publish):
 Leave the bond gate off until bonds exist. On testnet no resource has a posted bond, so arming
 it would reject every publish with `bond_not_posted`.
 
+Live publish-time probe (scorer, marketplace publish):
+
+- `SCORER_LIVE_HTTPS_HOST`: the wildcard resources host (e.g. `resources.<domain>`). Setting it arms
+  the real `LiveHttpsProber` for the publish gate; unset, the autonomous `FixtureProber` is used. The
+  probe is a no-pay HTTPS conformance check: it fetches the deployed agent card (must be 200 and
+  structurally valid), then makes one UNPAID POST to the resource `/call` and requires a 402 (the pay
+  gate must be enforced; a 200 there would be a free-serve leak), within a latency budget
+  (`SCORER_LATENCY_BUDGET_MS`, default 10000). It binds the probed host to `SCORER_LIVE_HTTPS_HOST` so
+  it can only reach `*.resources.<domain>` endpoints (SSRF guard), and it never pays, signs, or reads
+  a key. A failing probe returns unverified, so the resource is never listed.
+
 ## 5. Relayer and treasury operations
 
 - Fund the relayer signer pool. The escrow admin (`ESCROW_ADMIN`) is the hot relayer that
   submits `debit`.
 - Withdrawals use the `PaymentEscrow` pull-payment primitive: the creator and the treasury each
   withdraw their accrued internal `balanceOf` to real USDC; bonds withdraw from the
-  `StakingVault` after the cooldown. A thin off-chain payout surface that exposes accrued
-  balances and submits the withdrawal is the optional next add (the contract primitives already
-  exist).
+  `StakingVault` after the cooldown. The off-chain payout surface now exists: the operator-run
+  treasury sweep (`packages/staking`), the studio creator self-withdraw and accrued-balance
+  display, and the dashboard payout-history panel. See `infrastructure/PAYOUT.md` for the runbook
+  and the live proof checklist.
 
 ## 6. Operator-gated live proofs (run in this order)
 
 1. `forge test` (offline, local EVM) green.
 2. Money-path E2E on mainnet (the echo live money path, the `MoneyPath.s.sol` flow): deposit,
    `/verify` reserve, handler, escrow response gate, `/settle` debit clamped to the signed cap,
-   the 70/30 split confirmed by the `Debited` event, then a creator withdraw.
+   the 70/30 split confirmed by the `Debited` event. This accrues the treasury and creator
+   balances the payout proof (item 7) draws down.
 3. Sanctions: a denylisted payer is rejected `403 payer_screened` with zero reservation.
 4. ERC-8004: a publish mints a real agentId; the served card's `identity.agentId` and the
    on-chain `ResourceRegistry` agree.
 5. Bond: a sub-floor resource is rejected; a bonded resource lists.
 6. The gVisor egress containment probe passes (`UTTER_RUN_EGRESS_PROBE=1`); a non-allowlisted
    host is unreachable from the untrusted container.
+7. Payout: run the live proof checklist in `infrastructure/PAYOUT.md`. The operator treasury sweep
+   and a creator self-withdraw each emit a `Withdrawn` event on ArcScan, the creator withdrawal
+   shows up in the dashboard payout-history panel, and the swept balances read back to zero.
+8. Publish probe (if `SCORER_LIVE_HTTPS_HOST` is armed, section 4): publishing a deployed resource
+   runs the live HTTPS conformance probe; a card that is unreachable, invalid, free-serving (no 402),
+   or over the latency budget is rejected unverified and never listed.
 
 ## 7. Contract hardening
 
@@ -171,8 +195,10 @@ operator redeploys and points the roles at multisigs. The third item is still op
   held only by the vault) before any bond effect, and the consume is single-use. So a bond can be
   slashed only after a matured, matching, undisputed registry authorization, and one key cannot
   unilaterally slash (with `SLASHER` a multisig, defense in depth on top).
-- TODO. Add the treasury payout / creator withdrawal service surface (section 5). The contract
-  primitives already exist; only the off-chain surface is missing.
+- DONE. The treasury payout / creator withdrawal surface ships (section 5): the operator-run
+  treasury sweep (`packages/staking`), the studio creator self-withdraw and accrued-balance
+  display, and the dashboard payout-history panel (the on-chain `Withdrawn` read via
+  `readWithdrawals`). The live proof is the operator checklist in `infrastructure/PAYOUT.md`.
 
 KYC is intentionally out of scope (testnet, and not required for the supply-side flow).
 
