@@ -32,6 +32,11 @@ vi.mock("wagmi", () => ({
 vi.mock("../app/wallet/useAccruedEarnings", () => ({
   useAccruedEarnings: () => ({ raw: undefined, decimals: undefined, loading: false }),
 }));
+// The dashboard now mounts the PayoutHistoryPanel, which reads usePayoutHistory (a client
+// chain read). Mock it to a disconnected no-op so the screen render touches no chain.
+vi.mock("../app/wallet/usePayoutHistory", () => ({
+  usePayoutHistory: () => ({ records: undefined, decimals: undefined, loading: false }),
+}));
 
 // The dashboard loader is now gated by requireCreator (CR-01); the loader tests must
 // carry a valid session cookie.
@@ -171,6 +176,32 @@ describe("dashboard loader (aggregates + per-resource rows)", () => {
     expect(data.totals.liveApis).toBe(data.rows.filter((r) => r.active).length);
     expect(data.totals.strikes).toBe(data.alerts.length);
   });
+
+  it("aggregates an account-wide settles ledger deduped by tx (reusing the getRevenue receipts)", async () => {
+    const { loader } = await import("../app/routes/dashboard");
+    const data = await loader({
+      params: {},
+      request: await authedGet("http://x/dashboard"),
+      context: {},
+    } as never);
+
+    // the panel's money-in side is the deduped getRevenue receipts (no re-derivation)
+    expect(Array.isArray(data.settles)).toBe(true);
+    expect(data.settles.length).toBeGreaterThan(0);
+    // dedup invariant: every tx appears exactly once
+    const txs = data.settles.map((r) => r.tx);
+    expect(new Set(txs).size).toBe(txs.length);
+    // the fixture getRevenue receipts are present in the aggregated ledger (reused, not invented)
+    for (const r of data.revenue.receipts) {
+      expect(txs).toContain(r.tx);
+    }
+    // each settle row is a real RevenueReceipt shape
+    for (const r of data.settles) {
+      expect(r.tx).toMatch(/^0x[0-9a-fA-F]+$/);
+      expect(["settle", "refund"]).toContain(r.kind);
+      expect(typeof r.amount).toBe("bigint");
+    }
+  });
 });
 
 describe("dashboard screen (comp stat cells + table + ArcScan disclosure)", () => {
@@ -216,8 +247,11 @@ describe("dashboard screen (comp stat cells + table + ArcScan disclosure)", () =
     }
 
     // KEEP FUNCTION: a TxLink per receipt row in the settlements disclosure, each
-    // pointing at the explorer base + the hash
-    const txLinks = screen.getAllByTestId("tx-link");
+    // pointing at the explorer base + the hash. Scope the count to the disclosure
+    // (the new PayoutHistoryPanel renders its own settle TxLinks above the table).
+    const { within } = await import("@testing-library/react");
+    const disclosure = screen.getByTestId("recent-settlements");
+    const txLinks = within(disclosure).getAllByTestId("tx-link");
     expect(txLinks.length).toBe(data.revenue.receipts.length);
     for (const link of txLinks) {
       const href = link.getAttribute("href")!;
