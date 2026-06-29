@@ -243,6 +243,26 @@ export const stakingVaultAbi = [
     inputs: [{ name: "", type: "bytes32" }],
     outputs: [{ type: "uint256" }],
   },
+  // bondOwner(resourceId) - the public mapping recording who posted a resource's
+  // bond. The bond-reclaim read surface checks this against the connected creator
+  // so only the owner sees a reclaimable bond. View read; no decimals literal.
+  {
+    type: "function",
+    name: "bondOwner",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "bytes32" }],
+    outputs: [{ type: "address" }],
+  },
+  // cooldownEnds(resourceId) - the public mapping holding the unix timestamp after
+  // which a requested withdraw may complete. The caller compares it to
+  // block.timestamp to derive whether the cooldown has elapsed. View read.
+  {
+    type: "function",
+    name: "cooldownEnds",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "bytes32" }],
+    outputs: [{ type: "uint256" }],
+  },
   {
     type: "function",
     name: "insurancePoolBalance",

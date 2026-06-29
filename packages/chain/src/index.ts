@@ -58,3 +58,13 @@ export {
 
 // Runtime-decimals() USDC balance helper (CHAIN-03)
 export { readUsdcBalance, type UsdcBalance } from "./usdc";
+
+// Payout-surface chain READS (CHAIN-03): the accrued internal escrow balance a
+// creator withdraws (PaymentEscrow.balanceOf) and a resource's bond status from
+// the StakingVault. Both read decimals() at runtime; read-only, no write path.
+export {
+  readEscrowBalance,
+  readBondStatus,
+  type EscrowBalance,
+  type BondStatus,
+} from "./escrow";
