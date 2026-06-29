@@ -411,6 +411,60 @@ describe("LiveHttpsProber (operator-gated no-pay liveness + conformance probe)",
     expect(r.schemaOk).toBe(false);
     expect(r.reason).toMatch(/seam rejected/i);
   });
+
+  it("returns a failed result (never throws) when an injected validateCard throws", async () => {
+    const boom: ProbeCardValidator = () => {
+      throw new Error("validator boom");
+    };
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 402 },
+    });
+    const prober = new LiveHttpsProber({ fetcher, validateCard: boom });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(false);
+    expect(r.schemaOk).toBe(false);
+    expect(r.reason).toMatch(/validator threw/i);
+  });
+
+  it("rejects a credentialed url before any fetch (SSRF guard)", async () => {
+    const { fetcher, calls } = fakeFetch({});
+    const prober = new LiveHttpsProber({ fetcher });
+    const r = await prober.probe({
+      resourceId: "0xabc",
+      url: "https://user@echo.resources.example/.well-known/agent-card.json",
+    });
+    expect(r.passed).toBe(false);
+    expect(r.reason).toMatch(/credentialed/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a host outside the operator's allowed domain before any fetch (SSRF bind)", async () => {
+    const { fetcher, calls } = fakeFetch({});
+    const prober = new LiveHttpsProber({ fetcher, allowedHost: "resources.example" });
+    const r = await prober.probe({
+      resourceId: "0xabc",
+      url: "https://169.254.169.254/.well-known/agent-card.json",
+    });
+    expect(r.passed).toBe(false);
+    expect(r.reason).toMatch(/not under allowed domain/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("allows a host under the operator's allowed domain (incl. a *. wildcard form)", async () => {
+    const { fetcher } = fakeFetch({
+      [CARD_URL]: { status: 200, body: VALID_CARD },
+      [CALL_URL]: { status: 402 },
+    });
+    // BASE host is echo.resources.example; the wildcard form normalizes to resources.example.
+    const prober = new LiveHttpsProber({
+      fetcher,
+      allowedHost: "*.resources.example",
+      now: clockOf([0, 5]),
+    });
+    const r = await prober.probe({ resourceId: "0xabc", url: CARD_URL });
+    expect(r.passed).toBe(true);
+  });
 });
 
 describe("selectProber (env-driven, mirrors selectGenerator)", () => {

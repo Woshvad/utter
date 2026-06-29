@@ -88,6 +88,14 @@ export interface LiveHttpsProberOptions {
   budgetMs?: number;
   /** Injectable clock for testing latency (default Date.now). */
   now?: () => number;
+  /**
+   * Restrict the probed host to this domain (e.g. `resources.utter.app` or
+   * `*.resources.utter.app`). selectProber passes SCORER_LIVE_HTTPS_HOST here, so the
+   * operator-armed prober only ever fetches `*.resources.<domain>` endpoints - it cannot
+   * be pointed at an internal host (the deployer, cloud metadata, etc.) by an
+   * authenticated publisher. When unset, only https + no-credentials are enforced.
+   */
+  allowedHost?: string;
 }
 
 /** A fixed ProbeResult, or a per-resourceId map of them. */
@@ -190,6 +198,13 @@ function lightValidateCard(card: unknown): { valid: boolean; errors: string[] } 
   return errors.length === 0 ? { valid: true, errors: [] } : { valid: false, errors };
 }
 
+/** Normalize an allowed-host domain: strip a leading "*." wildcard and lowercase; empty -> undefined. */
+function normalizeAllowedHost(host?: string): string | undefined {
+  const h = host?.trim().toLowerCase();
+  if (!h) return undefined;
+  return h.startsWith("*.") ? h.slice(2) : h;
+}
+
 /** Resolve the latency budget: explicit override, then env, then the default (all positive-finite). */
 function resolveBudgetMs(override?: number): number {
   if (typeof override === "number" && Number.isFinite(override) && override > 0) return override;
@@ -228,12 +243,14 @@ export class LiveHttpsProber implements ResourceProber {
   private readonly validateCard: ProbeCardValidator;
   private readonly budgetMs: number;
   private readonly now: () => number;
+  private readonly allowedHost?: string;
 
   constructor(opts: LiveHttpsProberOptions = {}) {
     this.fetcher = opts.fetcher ?? ((url, init) => fetch(url, init as RequestInit));
     this.validateCard = opts.validateCard ?? lightValidateCard;
     this.budgetMs = resolveBudgetMs(opts.budgetMs);
     this.now = opts.now ?? Date.now;
+    this.allowedHost = normalizeAllowedHost(opts.allowedHost);
   }
 
   async probe(target: ProbeTarget): Promise<ProbeResult> {
@@ -247,8 +264,24 @@ export class LiveHttpsProber implements ResourceProber {
         reason: "live probe: no target url",
       });
     }
-    // Minimal SSRF guard; host-allowlisting is the operator's network boundary.
-    if (!raw.startsWith("https://")) {
+    // SSRF guard: parse the url and require https, no embedded credentials, and - when
+    // the operator armed a resources host (allowedHost) - a hostname under that domain.
+    // This binds the prober to *.resources.<domain> so an authenticated publisher cannot
+    // point it at an internal host (the deployer on :8788, cloud metadata, etc.). Parsing
+    // with URL (not startsWith) also rejects credentialed forms like https://user@host.
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return failed({
+        schemaOk: false,
+        latencyOk: false,
+        correctnessOk: false,
+        latencyMs: 0,
+        reason: "live probe: malformed url",
+      });
+    }
+    if (parsed.protocol !== "https:") {
       return failed({
         schemaOk: false,
         latencyOk: false,
@@ -256,6 +289,27 @@ export class LiveHttpsProber implements ResourceProber {
         latencyMs: 0,
         reason: "live probe: non-https url rejected",
       });
+    }
+    if (parsed.username.length > 0 || parsed.password.length > 0) {
+      return failed({
+        schemaOk: false,
+        latencyOk: false,
+        correctnessOk: false,
+        latencyMs: 0,
+        reason: "live probe: credentialed url rejected",
+      });
+    }
+    if (this.allowedHost) {
+      const host = parsed.hostname.toLowerCase();
+      if (host !== this.allowedHost && !host.endsWith(`.${this.allowedHost}`)) {
+        return failed({
+          schemaOk: false,
+          latencyOk: false,
+          correctnessOk: false,
+          latencyMs: 0,
+          reason: `live probe: host ${parsed.hostname} not under allowed domain ${this.allowedHost}`,
+        });
+      }
     }
 
     // (1) Fetch the served agent card over HTTPS.
@@ -295,7 +349,22 @@ export class LiveHttpsProber implements ResourceProber {
         reason: `live probe: card not json: ${errMsg(e)}`,
       });
     }
-    const v = this.validateCard(card);
+    // The validator is an injectable seam (a caller may inject the real validateAgentCard,
+    // which runs ajv over attacker-served card JSON). Guard it so a throwing validator
+    // yields a failed result like every other bad-endpoint path, never escaping into the
+    // publish gate (which does not wrap probe() in try/catch).
+    let v: { valid: boolean; errors: string[] };
+    try {
+      v = this.validateCard(card);
+    } catch (e) {
+      return failed({
+        schemaOk: false,
+        latencyOk: false,
+        correctnessOk: false,
+        latencyMs: 0,
+        reason: `live probe: card validator threw: ${errMsg(e)}`,
+      });
+    }
     if (!v.valid) {
       return failed({
         schemaOk: false,
@@ -367,7 +436,9 @@ export function selectProber(
   if (env.SCORER_PROBER === "fixture" || !env.SCORER_LIVE_HTTPS_HOST) {
     return new FixtureProber(fixture);
   }
-  return new LiveHttpsProber();
+  // Bind the live prober to the operator's resources domain so it only ever probes
+  // *.resources.<domain> endpoints (SSRF guard), never an internal host.
+  return new LiveHttpsProber({ allowedHost: env.SCORER_LIVE_HTTPS_HOST });
 }
 
 /** A benign always-pass fixture result (the selectProber default with no live host). */
