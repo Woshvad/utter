@@ -19,6 +19,9 @@ export interface EscrowBalanceWidgetProps {
   decimals?: number;
   /** True while the balance read is in flight. */
   loading?: boolean;
+  /** The card header label. Defaults to the wallet USDC balance label; the wallet route
+   *  passes "WALLET USDC" to disambiguate it from the withdrawable accrued earnings. */
+  label?: string;
 }
 
 export function EscrowBalanceWidget({
@@ -26,6 +29,7 @@ export function EscrowBalanceWidget({
   baseUnits,
   decimals,
   loading = false,
+  label = "WALLET USDC · BALANCE",
 }: EscrowBalanceWidgetProps): React.ReactElement {
   const hasBalance = baseUnits !== undefined && decimals !== undefined;
 
@@ -41,7 +45,7 @@ export function EscrowBalanceWidget({
       />
 
       <div className="mb-[12px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-        ESCROW BALANCE · USDC
+        {label}
       </div>
 
       {/* big mono USDC (52px, yellow emphasis - money) */}

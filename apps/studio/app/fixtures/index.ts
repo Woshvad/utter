@@ -132,3 +132,15 @@ export const FIXTURE_ESCROW_BALANCE: UsdcBalance = {
   raw: 25000000n,
   decimals: 6,
 };
+
+/**
+ * The ACCRUED earnings fixture (STU-06 / payout): the creator's withdrawable internal
+ * escrow balance (PaymentEscrow.balanceOf), DISTINCT from FIXTURE_ESCROW_BALANCE so the
+ * wallet USDC and the accrued earnings read as visibly different amounts. Raw base units
+ * (a base-unit constant) + runtime-style decimals, the same way the escrow fixture carries
+ * its decimals - no decimals literal is applied in any amount math.
+ */
+export const FIXTURE_ACCRUED_EARNINGS: UsdcBalance = {
+  raw: 12_340_000n,
+  decimals: 6,
+};

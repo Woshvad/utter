@@ -137,6 +137,71 @@ describe("useEscrowBalance (readUsdcBalance, runtime decimals)", () => {
   });
 });
 
+describe("useAccruedEarnings (readEscrowBalance / PaymentEscrow.balanceOf, runtime decimals)", () => {
+  it("reads through the injected reader and exposes base units + runtime decimals + refresh", async () => {
+    const { useAccruedEarnings } = await import("../app/wallet/useAccruedEarnings");
+    // The injected reader stands in for readEscrowBalance (PaymentEscrow.balanceOf): a
+    // DISTINCT accrued value from the wallet USDC balance, base units + runtime decimals.
+    const reader = vi.fn(async () => ({ raw: 12340000n, decimals: 6, formatted: "12.34" }));
+
+    let snapshot: ReturnType<typeof useAccruedEarnings> | undefined;
+    let renderRefreshToken = 0;
+    function Probe(): React.ReactElement {
+      snapshot = useAccruedEarnings({
+        address: "0x1111111111111111111111111111111111111111",
+        reader,
+        refreshToken: renderRefreshToken,
+      });
+      return React.createElement("div");
+    }
+    const { rerender } = render(React.createElement(Probe));
+    await waitFor(() => expect(snapshot?.raw).toBe(12340000n));
+    expect(snapshot?.decimals).toBe(6);
+    expect(snapshot?.loading).toBe(false);
+    expect(snapshot?.error).toBeUndefined();
+    expect(reader).toHaveBeenCalledWith("0x1111111111111111111111111111111111111111");
+
+    // Bumping refreshToken re-runs the read (the withdraw-then-refresh path).
+    renderRefreshToken = 1;
+    await act(async () => {
+      rerender(React.createElement(Probe));
+    });
+    await waitFor(() => expect(reader).toHaveBeenCalledTimes(2));
+  });
+
+  it("surfaces the error message when the reader rejects", async () => {
+    const { useAccruedEarnings } = await import("../app/wallet/useAccruedEarnings");
+    const reader = vi.fn(async () => {
+      throw new Error("escrow read failed");
+    });
+    let snapshot: ReturnType<typeof useAccruedEarnings> | undefined;
+    function Probe(): React.ReactElement {
+      snapshot = useAccruedEarnings({
+        address: "0x1111111111111111111111111111111111111111",
+        reader,
+      });
+      return React.createElement("div");
+    }
+    render(React.createElement(Probe));
+    await waitFor(() => expect(snapshot?.error).toBe("escrow read failed"));
+    expect(snapshot?.loading).toBe(false);
+  });
+
+  it("is a no-op (loading:false) when no address is connected", async () => {
+    const { useAccruedEarnings } = await import("../app/wallet/useAccruedEarnings");
+    const reader = vi.fn(async () => ({ raw: 12340000n, decimals: 6, formatted: "12.34" }));
+    let snapshot: ReturnType<typeof useAccruedEarnings> | undefined;
+    function Probe(): React.ReactElement {
+      snapshot = useAccruedEarnings({ address: undefined, reader });
+      return React.createElement("div");
+    }
+    render(React.createElement(Probe));
+    await waitFor(() => expect(snapshot?.loading).toBe(false));
+    expect(snapshot?.raw).toBeUndefined();
+    expect(reader).not.toHaveBeenCalled();
+  });
+});
+
 describe("EscrowBalanceWidget (read-only comp card: 52px mono balance + pill + chain)", () => {
   it("renders the balance mono via UsdcAmount, a no-copy address pill and the arc testnet label", async () => {
     const { EscrowBalanceWidget } = await import("../app/components/wallet/EscrowBalanceWidget");
@@ -192,6 +257,7 @@ describe("wallet render path + root providers (no literal; providers wired)", ()
     "../app/wallet/config.ts",
     "../app/wallet/AddArcTestnet.tsx",
     "../app/wallet/useEscrowBalance.ts",
+    "../app/wallet/useAccruedEarnings.ts",
     "../app/components/wallet/EscrowBalanceWidget.tsx",
     "../app/components/shell/WalletPill.tsx",
     "../app/routes/wallet.tsx",

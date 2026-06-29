@@ -11,6 +11,7 @@
 // escrow gate intact (the gate reserves the cap BEFORE the handler runs).
 import { describe, it, expect, vi } from "vitest";
 import type { PublicClient } from "viem";
+import { PAYMENT_ESCROW } from "@utter/chain";
 import { InMemoryIndexStore, type IndexRecord } from "@utter/marketplace";
 import {
   ScaffoldGenerator,
@@ -33,19 +34,30 @@ import { FIXTURE_MARKETPLACE, FIXTURE_RESOURCE_ID } from "../app/fixtures/index"
 const UNKNOWN_ID =
   "0x00000000000000000000000000000000000000000000000000000000deadbeef" as const;
 
-/** A fixed base-unit balance the stub publicClient returns for balanceOf. */
+/** A fixed base-unit WALLET USDC balance the stub publicClient returns for the USDC
+ *  balanceOf (the getEscrowBalance read). */
 const STUB_RAW_BALANCE = 25_000_000n;
+
+/** A DISTINCT fixed base-unit ACCRUED escrow balance the stub returns for the
+ *  PaymentEscrow.balanceOf (the getAccruedEarnings read), proving the two reads target
+ *  different contracts and surface different amounts. */
+const STUB_ACCRUED_BALANCE = 12_340_000n;
 
 /**
  * A stub viem PublicClient: decimals() returns 6 (the runtime read the money path
- * depends on) and balanceOf() returns a fixed base-unit bigint. No network. The
- * cast mirrors the playground-harness mock idiom.
+ * depends on) and balanceOf() returns a fixed base-unit bigint - the WALLET USDC balance
+ * when read against USDC (readUsdcBalance), the ACCRUED escrow balance when read against
+ * PAYMENT_ESCROW (readEscrowBalance). Switching on the contract address proves
+ * getAccruedEarnings reads PaymentEscrow.balanceOf, distinct from the USDC balanceOf. No
+ * network. The cast mirrors the playground-harness mock idiom.
  */
 function makeStubPublicClient(): PublicClient {
   return {
-    async readContract({ functionName }: { functionName: string }) {
+    async readContract({ functionName, address }: { functionName: string; address: string }) {
       if (functionName === "decimals") return 6;
-      if (functionName === "balanceOf") return STUB_RAW_BALANCE;
+      if (functionName === "balanceOf") {
+        return address === PAYMENT_ESCROW ? STUB_ACCRUED_BALANCE : STUB_RAW_BALANCE;
+      }
       throw new Error(`live-adapter test stub: unexpected functionName ${functionName}`);
     },
   } as unknown as PublicClient;
@@ -170,6 +182,20 @@ describe("LiveAdapter read path (injected offline deps)", () => {
     expect(bal.decimals).toBe(6);
     expect(bal.raw).toBe(STUB_RAW_BALANCE);
     expect(typeof bal.raw).toBe("bigint");
+  });
+
+  it("getAccruedEarnings reads PaymentEscrow.balanceOf (distinct from the wallet USDC balance)", async () => {
+    const adapter = await makeLiveAdapter();
+    const accrued = await adapter.getAccruedEarnings(
+      "0x1111111111111111111111111111111111111111",
+    );
+    // decimals comes from the stub's decimals() read (6), not a literal in the adapter.
+    expect(accrued.decimals).toBe(6);
+    // The accrued read targets PAYMENT_ESCROW.balanceOf, so it returns the DISTINCT
+    // accrued value, NOT the wallet USDC balance getEscrowBalance reads.
+    expect(accrued.raw).toBe(STUB_ACCRUED_BALANCE);
+    expect(accrued.raw).not.toBe(STUB_RAW_BALANCE);
+    expect(typeof accrued.raw).toBe("bigint");
   });
 
   it("listMarketplace({}) returns the seeded cards (length > 1)", async () => {

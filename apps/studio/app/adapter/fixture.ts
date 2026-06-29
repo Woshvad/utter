@@ -22,6 +22,7 @@ import type {
   UsdcBalance,
 } from "./types.js";
 import {
+  FIXTURE_ACCRUED_EARNINGS,
   FIXTURE_BUILD_EVENTS,
   FIXTURE_ESCROW_BALANCE,
   FIXTURE_MARKETPLACE,
@@ -109,6 +110,13 @@ export class FixtureAdapter implements StudioDataAdapter {
 
   async getEscrowBalance(_address: Hex): Promise<UsdcBalance> {
     return { ...FIXTURE_ESCROW_BALANCE };
+  }
+
+  async getAccruedEarnings(_address: Hex): Promise<UsdcBalance> {
+    // The accrued internal escrow balance (PaymentEscrow.balanceOf) - a DISTINCT fixture
+    // value from FIXTURE_ESCROW_BALANCE so the wallet USDC and the withdrawable earnings
+    // render as different amounts. Shallow copy so a caller mutation cannot poison it.
+    return { ...FIXTURE_ACCRUED_EARNINGS };
   }
 
   async runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult> {

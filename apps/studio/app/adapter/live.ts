@@ -28,7 +28,7 @@
 // test (offline). All money is base-unit bigint; there is NO 1e6/6/18 literal here.
 import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { filterResources, type IndexRecord } from "@utter/marketplace";
-import { readUsdcBalance } from "@utter/chain";
+import { readUsdcBalance, readEscrowBalance } from "@utter/chain";
 import type { Address } from "viem";
 import type { LiveDeps } from "./live-deps.server.js";
 import type {
@@ -440,6 +440,17 @@ export class LiveAdapter implements StudioDataAdapter {
     // decimals() read, never a 1e6/6/18 literal. Return only {raw, decimals} on the
     // adapter surface (readUsdcBalance also carries a formatted string).
     const { raw, decimals } = await readUsdcBalance(deps.publicClient, address as Address);
+    return { raw, decimals };
+  }
+
+  async getAccruedEarnings(address: Hex): Promise<UsdcBalance> {
+    const deps = this.requireDeps();
+    // The ACCRUED internal escrow balance (PaymentEscrow.balanceOf), the withdrawable
+    // amount escrow.withdraw pays out - DISTINCT from getEscrowBalance's wallet USDC.
+    // Money discipline: flow through readEscrowBalance so decimals come from a runtime
+    // decimals() read, never a 1e6/6/18 literal. Return only {raw, decimals} on the
+    // adapter surface (readEscrowBalance also carries a formatted string).
+    const { raw, decimals } = await readEscrowBalance(deps.publicClient, address as Address);
     return { raw, decimals };
   }
 

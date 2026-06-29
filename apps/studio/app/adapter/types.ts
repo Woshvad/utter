@@ -231,6 +231,9 @@ export interface StudioDataAdapter {
   getRevenue(resourceId: string): Promise<RevenueSummary>;
   /** Read an address's escrow USDC balance (STU-06) through readUsdcBalance. */
   getEscrowBalance(address: Hex): Promise<UsdcBalance>;
+  /** Read an address's ACCRUED escrow balance (PaymentEscrow.balanceOf), the withdrawable
+   *  internal balance, distinct from the wallet USDC getEscrowBalance reads. */
+  getAccruedEarnings(address: Hex): Promise<UsdcBalance>;
   /** Run the playground 402 pay-flow (criterion-3 beat) for a resource. */
   runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult>;
 }
