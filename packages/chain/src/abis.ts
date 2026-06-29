@@ -127,6 +127,20 @@ export const escrowAbi = [
       { name: "nonce", type: "bytes32", indexed: false },
     ],
   },
+  // Withdrawn(account, amount) - emitted by PaymentEscrow.withdraw when an account
+  // pulls `amount` USDC base units out of its internal balanceOf. Copied verbatim from
+  // contracts/src/PaymentEscrow.sol `event Withdrawn(address indexed account, uint256
+  // amount)` so the log decodes byte-for-byte. The payout-history read filters on the
+  // indexed `account` topic. Purely additive: does not alter Debited decoding, the
+  // function fragments, or any write path. amount is USDC base units; no decimals literal.
+  {
+    type: "event",
+    name: "Withdrawn",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
 ] as const;
 
 // PaymentSplitter ABI - the flat (`exact`) path flushes the held USDC split via

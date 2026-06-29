@@ -21,9 +21,10 @@ import { useAccount } from "wagmi";
 import { arcTestnet } from "@utter/chain";
 import { selectAdapter } from "../adapter/select.js";
 import { requireCreator } from "../auth/requireCreator.server.js";
-import type { RevenueSummary } from "../adapter/types.js";
+import type { RevenueSummary, RevenueReceipt } from "../adapter/types.js";
 import { RevenuePanel } from "../components/dashboard/RevenuePanel.js";
 import { EarningsWithdrawCard } from "../components/dashboard/EarningsWithdrawCard.js";
+import { PayoutHistoryPanel } from "../components/dashboard/PayoutHistoryPanel.js";
 import {
   ResourceTable,
   type DashboardAlert,
@@ -69,6 +70,8 @@ export interface DashboardData {
   totals: DashboardTotals;
   /** The per-resource table rows. */
   rows: ResourceRow[];
+  /** The account-wide settle/refund receipts (money in), deduped by tx across resources. */
+  settles: RevenueReceipt[];
   decimals: number;
   explorer: string;
   alerts: DashboardAlert[];
@@ -102,6 +105,7 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
   // fake zero rows here - the dashboard fails loud-but-branded.
   let revenue: RevenueSummary;
   let rows: ResourceRow[];
+  let settles: RevenueReceipt[];
   try {
     // Read-through aggregation: the single-resource summary (calls/gross/creator+platform
     // /refunds + receipts) backs the settlements disclosure. The split is the projected
@@ -110,22 +114,36 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
 
     // Per-resource rows: join each listed card with its read-through revenue. Calls and
     // revenue are the projected getRevenue figures; uptime/bond/active come from the card.
+    // Collect each card's receipts alongside the row so the account-wide settles ledger
+    // (the PayoutHistoryPanel "in" side) reuses the SAME getRevenue read - no re-derivation.
     const cards = await adapter.listMarketplace({});
-    rows = await Promise.all(
+    const rowResults = await Promise.all(
       cards.map(async (card) => {
         const rev = await adapter.getRevenue(card.resourceId);
         return {
-          resourceId: card.resourceId,
-          slug: card.slug,
-          calls: rev.calls,
-          // The projected creator share, never recomputed.
-          revenue: rev.creatorShare,
-          uptime: card.uptime,
-          bond: card.bond,
-          active: card.active,
+          row: {
+            resourceId: card.resourceId,
+            slug: card.slug,
+            calls: rev.calls,
+            // The projected creator share, never recomputed.
+            revenue: rev.creatorShare,
+            uptime: card.uptime,
+            bond: card.bond,
+            active: card.active,
+          },
+          receipts: rev.receipts,
         };
       }),
     );
+    rows = rowResults.map((r) => r.row);
+
+    // Account-wide settles ledger, deduped by tx so the primary `revenue` resource (which
+    // also appears in `cards`) is not double-listed. Built inside the same try so a
+    // facilitator failure still surfaces the branded 503 (no degraded fake rows).
+    const settleMap = new Map<string, RevenueReceipt>();
+    for (const rc of revenue.receipts) settleMap.set(rc.tx, rc);
+    for (const rr of rowResults) for (const rc of rr.receipts) settleMap.set(rc.tx, rc);
+    settles = [...settleMap.values()];
   } catch (err) {
     // Re-throw an already-Response unchanged (e.g. a thrown redirect/status); otherwise
     // surface a branded 503 so the page shows the status page, not the crash screen.
@@ -155,7 +173,7 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
     strikes: alerts.length,
   };
 
-  return { revenue, totals, rows, decimals, explorer, alerts };
+  return { revenue, totals, rows, settles, decimals, explorer, alerts };
 }
 
 /** A small mounted guard: false on the server + first client render, true after mount.
@@ -167,7 +185,7 @@ function useMounted(): boolean {
 }
 
 export default function DashboardRoute(): React.ReactElement {
-  const { revenue, totals, rows, decimals, explorer, alerts } =
+  const { revenue, totals, rows, settles, decimals, explorer, alerts } =
     useLoaderData<typeof loader>();
   const mounted = useMounted();
   const { address } = useAccount();
@@ -194,6 +212,18 @@ export default function DashboardRoute(): React.ReactElement {
           (useWithdraw). Client-only (it needs the connected wallet), so it is mounted
           behind the useMounted guard - distinct from RevenuePanel's HISTORICAL revenue. */}
       {mounted ? <EarningsWithdrawCard address={address} decimals={decimals} /> : null}
+      {/* The unified PAYOUT LEDGER: real on-chain withdrawals (money out, via the client
+          usePayoutHistory hook) + the loader's getRevenue settle/refund receipts (money in,
+          reused, no re-derivation). The settles render identically on server + client (no
+          hydration mismatch); the withdrawals are empty on SSR (no address) and populate
+          post-mount via the hook's effect - a normal client update, so no mounted guard is
+          needed. Distinct from RevenuePanel (aggregate) and EarningsWithdrawCard (live balance). */}
+      <PayoutHistoryPanel
+        address={address}
+        settles={settles}
+        explorer={explorer}
+        decimals={decimals}
+      />
       <ResourceTable
         rows={rows}
         decimals={decimals}

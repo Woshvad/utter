@@ -65,6 +65,9 @@ export { readUsdcBalance, type UsdcBalance } from "./usdc";
 export {
   readEscrowBalance,
   readBondStatus,
+  readWithdrawals,
   type EscrowBalance,
   type BondStatus,
+  type WithdrawalRecord,
+  type WithdrawalHistory,
 } from "./escrow";
