@@ -32,6 +32,7 @@ import { ResourceTabs } from "../components/detail/ResourceTabs.js";
 import { CardPreview } from "../components/detail/CardPreview.js";
 import { OpenApiPreview } from "../components/detail/OpenApiPreview.js";
 import { McpConnectBlock } from "../components/detail/McpConnectBlock.js";
+import { BondReclaimPanel } from "../components/wallet/BondReclaimPanel.js";
 
 /** A bounded, safe resourceId param (decode-before-use, ASVS V5 - card-route.ts). */
 function isSafeParam(value: string | undefined): value is string {
@@ -166,8 +167,20 @@ function creatorHandle(creator: string): string {
   return creator.length > 10 ? `${creator.slice(0, 6)}…${creator.slice(-4)}` : creator;
 }
 
+/** A small mounted guard: false on the server + first client render, true after mount. The
+ *  bond reclaim panel needs the wagmi-connected address, so it must not read on the server. */
+function useMounted(): boolean {
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => setMounted(true), []);
+  return mounted;
+}
+
 export default function ResourceDetailRoute(): React.ReactElement {
   const { detail, decimals, calls, payMode, related } = useLoaderData<typeof loader>();
+  // The bond reclaim panel reads the connected wallet, so it must mount client-side only
+  // (the bond status + the owner/cooldown gating are read via the connected wallet, exactly
+  // like the escrow balance / accrued earnings reads - no loader change).
+  const mounted = useMounted();
   const base = BigInt(detail.pricing.base);
   const cap = BigInt(detail.pricing.max);
   const isMetered = detail.pricing.model === "metered";
@@ -477,6 +490,15 @@ export default function ResourceDetailRoute(): React.ReactElement {
         <div className="mb-[24px]">
           <McpConnectBlock resourceId={detail.resourceId} cardUrl={detail.cardUrl} />
         </div>
+        {/* The Bond reclaim panel: read the on-chain bond status + offer the owner-gated,
+            cooldown-aware request/claim. Client-only (it needs the connected wallet), so it
+            mounts behind the useMounted guard. The on-chain COOLDOWN / NotBondOwner /
+            WithdrawNotRequested guards are the real boundary; the panel gating is UX only. */}
+        {mounted ? (
+          <div className="mb-[24px]">
+            <BondReclaimPanel resourceId={detail.resourceId} decimals={decimals} />
+          </div>
+        ) : null}
         <div className="mb-[14px] font-mono text-[11px] tracking-[0.06em] text-ink-faint">
           RELATED
         </div>

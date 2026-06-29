@@ -11,7 +11,12 @@ import { selectAdapter } from "../app/adapter/select";
 import { FixtureAdapter } from "../app/adapter/fixture";
 import { LiveAdapter } from "../app/adapter/live";
 import { BUILD_STAGES, type BuildStage } from "../app/adapter/types";
-import { FIXTURE_RESOURCE_ID } from "../app/fixtures/index";
+import {
+  FIXTURE_RESOURCE_ID,
+  FIXTURE_ACCRUED_EARNINGS,
+  FIXTURE_ESCROW_BALANCE,
+  FIXTURE_BOND_STATUS,
+} from "../app/fixtures/index";
 
 describe("selectAdapter", () => {
   it("defaults to the FixtureAdapter when STUDIO_DATA_ADAPTER is unset", () => {
@@ -79,5 +84,50 @@ describe("FixtureAdapter reads (no network/chain/model)", () => {
     expect(all.length).toBeGreaterThan(1);
     const dataOnly = await adapter.listMarketplace({ category: "data" });
     expect(dataOnly.every((c) => c.category === "data")).toBe(true);
+  });
+
+  it("getAccruedEarnings returns FIXTURE_ACCRUED_EARNINGS, distinct from the wallet escrow balance", async () => {
+    const adapter = new FixtureAdapter();
+    const accrued = await adapter.getAccruedEarnings(
+      "0x1111111111111111111111111111111111111111",
+    );
+    // The accrued (withdrawable) fixture value, base-unit bigint + runtime-style decimals.
+    expect(accrued.raw).toBe(FIXTURE_ACCRUED_EARNINGS.raw);
+    expect(accrued.decimals).toBe(FIXTURE_ACCRUED_EARNINGS.decimals);
+    expect(typeof accrued.raw).toBe("bigint");
+    // DISTINCT from the wallet USDC balance getEscrowBalance reads, so the two displays
+    // are visibly different amounts.
+    const escrow = await adapter.getEscrowBalance(
+      "0x1111111111111111111111111111111111111111",
+    );
+    expect(accrued.raw).not.toBe(escrow.raw);
+    expect(FIXTURE_ACCRUED_EARNINGS.raw).not.toBe(FIXTURE_ESCROW_BALANCE.raw);
+  });
+
+  it("getAccruedEarnings returns a fresh copy each call (no shared-mutable poisoning)", async () => {
+    const adapter = new FixtureAdapter();
+    const a = await adapter.getAccruedEarnings("0x1111111111111111111111111111111111111111");
+    const b = await adapter.getAccruedEarnings("0x1111111111111111111111111111111111111111");
+    expect(a).not.toBe(b);
+    expect(a).toEqual(b);
+  });
+
+  it("getBondStatus returns FIXTURE_BOND_STATUS (posted + owner + cooldownEnds + decimals)", async () => {
+    const adapter = new FixtureAdapter();
+    const bond = await adapter.getBondStatus(FIXTURE_RESOURCE_ID);
+    expect(bond.posted).toBe(FIXTURE_BOND_STATUS.posted);
+    expect(bond.owner).toBe(FIXTURE_BOND_STATUS.owner);
+    expect(bond.cooldownEnds).toBe(FIXTURE_BOND_STATUS.cooldownEnds);
+    expect(bond.decimals).toBe(FIXTURE_BOND_STATUS.decimals);
+    expect(typeof bond.posted).toBe("bigint");
+    expect(typeof bond.cooldownEnds).toBe("bigint");
+  });
+
+  it("getBondStatus returns a fresh copy each call (no shared-mutable poisoning)", async () => {
+    const adapter = new FixtureAdapter();
+    const a = await adapter.getBondStatus(FIXTURE_RESOURCE_ID);
+    const b = await adapter.getBondStatus(FIXTURE_RESOURCE_ID);
+    expect(a).not.toBe(b);
+    expect(a).toEqual(b);
   });
 });

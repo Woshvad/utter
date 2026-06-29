@@ -13,6 +13,26 @@ import { dirname, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// The dashboard now mounts the client-only EarningsWithdrawCard, which (and the route)
+// read wagmi hooks. Mock wagmi so the unmocked screen render has no browser wallet / no
+// chain. The accrued earnings hook is mocked to a disconnected no-op so the card renders
+// its disconnected state without a chain read. These cover the screen test's full render.
+vi.mock("wagmi", () => ({
+  useAccount: () => ({ isConnected: false, address: undefined }),
+  useChainId: () => 5042002,
+  useWriteContract: () => ({ writeContractAsync: vi.fn(), isPending: false }),
+  useWaitForTransactionReceipt: () => ({
+    data: undefined,
+    isSuccess: false,
+    isError: false,
+    error: undefined,
+    isLoading: false,
+  }),
+}));
+vi.mock("../app/wallet/useAccruedEarnings", () => ({
+  useAccruedEarnings: () => ({ raw: undefined, decimals: undefined, loading: false }),
+}));
+
 // The dashboard loader is now gated by requireCreator (CR-01); the loader tests must
 // carry a valid session cookie.
 beforeAll(() => {

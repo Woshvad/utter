@@ -23,7 +23,9 @@ import { useAccount } from "wagmi";
 import { selectAdapter } from "../adapter/select.js";
 import { requireCreator } from "../auth/requireCreator.server.js";
 import { useEscrowBalance } from "../wallet/useEscrowBalance.js";
+import { useAccruedEarnings } from "../wallet/useAccruedEarnings.js";
 import { AddArcTestnet } from "../wallet/AddArcTestnet.js";
+import { UsdcAmount } from "../components/primitives/UsdcAmount.js";
 import { EscrowBalanceWidget } from "../components/wallet/EscrowBalanceWidget.js";
 import { DepositForm } from "../components/wallet/DepositForm.js";
 import { WithdrawForm } from "../components/wallet/WithdrawForm.js";
@@ -147,12 +149,19 @@ export default function WalletRoute(): React.ReactElement {
   const [refreshToken, setRefreshToken] = React.useState(0);
   const refresh = React.useCallback(() => setRefreshToken((n) => n + 1), []);
 
-  // Read the escrow balance through readUsdcBalance (runtime decimals) once mounted +
-  // an account is connected. Before mount the hook is a no-op (loading:false).
+  // Read the wallet's USDC token balance through readUsdcBalance (runtime decimals) once
+  // mounted + an account is connected. This is the DEPOSIT source. Before mount the hook
+  // is a no-op (loading:false).
   const balance = useEscrowBalance({ address: mounted ? address : undefined, refreshToken });
 
-  // Prefer the runtime-read decimals; fall back to the loader's SSR decimals.
-  const renderDecimals = balance.decimals ?? decimals;
+  // Read the ACCRUED escrow balance (PaymentEscrow.balanceOf) - the WITHDRAWABLE source
+  // escrow.withdraw pays out, distinct from the wallet USDC above. Same mounted guard +
+  // refreshToken so it re-reads after a withdraw confirms.
+  const accrued = useAccruedEarnings({ address: mounted ? address : undefined, refreshToken });
+
+  // Prefer the runtime-read decimals; fall back to the loader's SSR decimals. The accrued
+  // read shares the same USDC decimals; prefer whichever runtime read has resolved.
+  const renderDecimals = accrued.decimals ?? balance.decimals ?? decimals;
 
   return (
     <div className="mx-auto max-w-[1100px] px-[32px] pb-[64px] pt-[28px]">
@@ -168,8 +177,9 @@ export default function WalletRoute(): React.ReactElement {
         <EscrowBalanceWidget
           address={mounted ? address : undefined}
           baseUnits={balance.raw}
-          decimals={balance.raw !== undefined ? renderDecimals : undefined}
+          decimals={balance.raw !== undefined ? (balance.decimals ?? renderDecimals) : undefined}
           loading={balance.loading}
+          label="WALLET USDC · BALANCE"
         />
 
         {/* the deposit/withdraw card: client-only (mounted guard) - it reads the
@@ -182,9 +192,29 @@ export default function WalletRoute(): React.ReactElement {
             className="flex flex-col gap-[12px] border border-hairline bg-raised p-[24px]"
           >
             <DepositForm decimals={balance.decimals ?? renderDecimals} onDeposited={refresh} />
+
+            {/* The withdrawable source: the creator's ACCRUED escrow balance
+                (PaymentEscrow.balanceOf), what escrow.withdraw pays out. This is the
+                visible source the withdraw button below draws from - distinct from the
+                wallet USDC card (the deposit source) on the left. Rendered through the
+                single UsdcAmount surface (runtime decimals, no literal). */}
+            {accrued.raw !== undefined ? (
+              <span
+                data-testid="wallet-withdrawable"
+                className="font-mono text-[11px] tracking-[0.06em] text-ink-faint"
+              >
+                IN ESCROW (WITHDRAWABLE){" "}
+                <UsdcAmount
+                  baseUnits={accrued.raw}
+                  decimals={accrued.decimals ?? renderDecimals}
+                  className="text-yellow"
+                />
+              </span>
+            ) : null}
+
             <WithdrawForm
-              baseUnits={balance.raw}
-              decimals={balance.decimals ?? renderDecimals}
+              baseUnits={accrued.raw}
+              decimals={accrued.decimals ?? renderDecimals}
               onWithdrawn={refresh}
             />
             {/* network control: keep the AddArcTestnet affordance in the deposit card */}

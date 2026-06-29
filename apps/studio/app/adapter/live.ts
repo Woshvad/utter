@@ -28,10 +28,11 @@
 // test (offline). All money is base-unit bigint; there is NO 1e6/6/18 literal here.
 import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { filterResources, type IndexRecord } from "@utter/marketplace";
-import { readUsdcBalance } from "@utter/chain";
+import { readUsdcBalance, readEscrowBalance, readBondStatus } from "@utter/chain";
 import type { Address } from "viem";
 import type { LiveDeps } from "./live-deps.server.js";
 import type {
+  BondStatusView,
   BuildEvent,
   ComposeSpec,
   Hex,
@@ -441,6 +442,33 @@ export class LiveAdapter implements StudioDataAdapter {
     // adapter surface (readUsdcBalance also carries a formatted string).
     const { raw, decimals } = await readUsdcBalance(deps.publicClient, address as Address);
     return { raw, decimals };
+  }
+
+  async getAccruedEarnings(address: Hex): Promise<UsdcBalance> {
+    const deps = this.requireDeps();
+    // The ACCRUED internal escrow balance (PaymentEscrow.balanceOf), the withdrawable
+    // amount escrow.withdraw pays out - DISTINCT from getEscrowBalance's wallet USDC.
+    // Money discipline: flow through readEscrowBalance so decimals come from a runtime
+    // decimals() read, never a 1e6/6/18 literal. Return only {raw, decimals} on the
+    // adapter surface (readEscrowBalance also carries a formatted string).
+    const { raw, decimals } = await readEscrowBalance(deps.publicClient, address as Address);
+    return { raw, decimals };
+  }
+
+  async getBondStatus(resourceId: Hex): Promise<BondStatusView> {
+    const deps = this.requireDeps();
+    // The resource's on-chain bond status (StakingVault bonds/bondOwner/cooldownEnds).
+    // Money discipline: flow through readBondStatus so decimals come from a runtime
+    // decimals() read, never a 1e6/6/18 literal; posted stays base-unit bigint. The UI
+    // derives can-request / can-claim from owner + cooldownEnds + now, but the on-chain
+    // COOLDOWN / NotBondOwner / WithdrawNotRequested guards are the real boundary.
+    const s = await readBondStatus(deps.publicClient, resourceId as Hex);
+    return {
+      posted: s.amount,
+      owner: s.owner as Hex,
+      cooldownEnds: s.cooldownEnds,
+      decimals: s.decimals,
+    };
   }
 
   async runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult> {

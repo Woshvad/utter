@@ -17,11 +17,13 @@
 import * as React from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
+import { useAccount } from "wagmi";
 import { arcTestnet } from "@utter/chain";
 import { selectAdapter } from "../adapter/select.js";
 import { requireCreator } from "../auth/requireCreator.server.js";
 import type { RevenueSummary } from "../adapter/types.js";
 import { RevenuePanel } from "../components/dashboard/RevenuePanel.js";
+import { EarningsWithdrawCard } from "../components/dashboard/EarningsWithdrawCard.js";
 import {
   ResourceTable,
   type DashboardAlert,
@@ -156,9 +158,19 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
   return { revenue, totals, rows, decimals, explorer, alerts };
 }
 
+/** A small mounted guard: false on the server + first client render, true after mount.
+ *  The earnings card needs the wagmi-connected address, so it must not read on the server. */
+function useMounted(): boolean {
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => setMounted(true), []);
+  return mounted;
+}
+
 export default function DashboardRoute(): React.ReactElement {
   const { revenue, totals, rows, decimals, explorer, alerts } =
     useLoaderData<typeof loader>();
+  const mounted = useMounted();
+  const { address } = useAccount();
 
   return (
     <div className="mx-auto max-w-[1280px] px-[32px] pb-[64px] pt-[28px]">
@@ -177,6 +189,11 @@ export default function DashboardRoute(): React.ReactElement {
         revenueSeries={REVENUE_SERIES}
         callsSeries={CALLS_SERIES}
       />
+      {/* The LIVE withdrawable-earnings card: the creator's accrued escrow balance
+          (useAccruedEarnings) with a confirm-gated withdraw that REUSES escrow.withdraw
+          (useWithdraw). Client-only (it needs the connected wallet), so it is mounted
+          behind the useMounted guard - distinct from RevenuePanel's HISTORICAL revenue. */}
+      {mounted ? <EarningsWithdrawCard address={address} decimals={decimals} /> : null}
       <ResourceTable
         rows={rows}
         decimals={decimals}
