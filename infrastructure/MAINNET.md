@@ -65,10 +65,20 @@ when a role silently defaults to the deployer. For mainnet, set them all explici
 - `DEPLOYER_PRIVATE_KEY`: a funded deployer (broadcast only).
 - `PLATFORM_TREASURY`: a treasury multisig, not an EOA. Receives the platform cut.
 - `ESCROW_ADMIN`: the hot relayer that submits debits.
-- `CONTRACT_OWNER`: a separate owner multisig (pauses, slashes, refunds).
+- `CONTRACT_OWNER`: the `DEFAULT_ADMIN` multisig that holds the role-admin and the 2-step
+  admin handoff (section 7). Each contract reverts on a zero admin.
+- `REGISTRY_ADMIN`, `SLASHER`, `TREASURY_ADMIN`: the role grantees (section 7). Each defaults to
+  `CONTRACT_OWNER` when unset, and the script warns loudly when it does, so production must set
+  them to their own multisigs to get the role split. Point `SLASHER` at a multisig.
+- `ADMIN_TRANSFER_DELAY`: the `AccessControlDefaultAdminRules` admin-transfer delay in seconds
+  (default 2 days).
 
 Run `forge test` (all suites green) before any broadcast, then deploy with
-`--rpc-url $ARC_RPC_URL --broadcast`. Pin the printed addresses back into
+`--rpc-url $ARC_RPC_URL --broadcast`. The script grants the `StakingVault` its registry
+`VAULT_ROLE` (required so a slash can consume an authorization) only when the deployer holds the
+registry `DEFAULT_ADMIN`; when `CONTRACT_OWNER` is a separate multisig the deployer does not, so
+the script logs a deferral and the admin multisig must run `registry.grantRole(registry.VAULT_ROLE(),
+stakingVault)` as a post-deploy wiring step. Pin the printed addresses back into
 `packages/chain/src/addresses.ts` and record them in `contracts/DEPLOYMENTS.md` with the deploy
 tx hashes. Verify each contract on the mainnet explorer.
 
@@ -141,20 +151,28 @@ it would reject every publish with `bond_not_posted`.
 6. The gVisor egress containment probe passes (`UTTER_RUN_EGRESS_PROBE=1`); a non-allowlisted
    host is unreachable from the untrusted container.
 
-## 7. Remaining contract hardening (not done; complete before real money)
+## 7. Contract hardening
 
-These are single-key MVP postures documented in the contracts. They need a redeploy, so do them
-as a dedicated contract-security pass before routing real money:
+The first two items below are DONE in the contract source and gated by `forge test`. They need a
+redeploy with the role addresses set (section 2), so the live posture only takes effect once the
+operator redeploys and points the roles at multisigs. The third item is still open.
 
-- Migrate the four `Ownable` contracts (`ResourceRegistry`, `PaymentEscrow`, `StakingVault`,
-  `IdentityRegistry`) to OpenZeppelin `AccessControl` with separate `SLASHER`, `REGISTRY_ADMIN`,
-  and `TREASURY_ADMIN` roles, and to `Ownable2Step` (or role-admin handoff) so an owner change
-  cannot brick a contract. Point the owner at a multisig.
-- Close the slash integrity gap. `ResourceRegistry.slashAuthorization` is an advisory indexer
-  signal only; `StakingVault.slash` is admin-driven with no on-chain check beyond
-  `SlashExceedsBond`. Add a multisig `SLASHER` plus a dispute window, or couple the two
-  on-chain, so one key cannot unilaterally slash any bond.
-- Add the treasury payout / creator withdrawal service surface (section 5).
+- DONE. The five `Ownable` contracts (`ResourceRegistry`, `PaymentEscrow`, `StakingVault`,
+  `IdentityRegistry`, `PaymentSplitter`) now inherit OpenZeppelin `AccessControlDefaultAdminRules`.
+  That one base gives both the role split (`REGISTRY_ADMIN_ROLE`, `SLASHER_ROLE`,
+  `TREASURY_ADMIN_ROLE`; `DEFAULT_ADMIN_ROLE` gates the escrow relayer rotation and the splitter
+  config) AND a 2-step, time-delayed, non-renounceable `DEFAULT_ADMIN` handoff, so an owner change
+  cannot brick a contract. Point `DEFAULT_ADMIN` at a multisig at deploy (section 2).
+- DONE. The slash integrity gap is closed on-chain. `ResourceRegistry.slashAuthorization`
+  (`SLASHER_ROLE`) now records a pending authorization `{amount, executableAt = now +
+  SLASH_DISPUTE_WINDOW}` (1 day) rather than an advisory event; `DEFAULT_ADMIN` may
+  `cancelSlashAuthorization` during the window to dispute. `StakingVault.slash` (`SLASHER_ROLE`)
+  consumes that exact authorization through `consumeSlashAuthorization` (registry `VAULT_ROLE`,
+  held only by the vault) before any bond effect, and the consume is single-use. So a bond can be
+  slashed only after a matured, matching, undisputed registry authorization, and one key cannot
+  unilaterally slash (with `SLASHER` a multisig, defense in depth on top).
+- TODO. Add the treasury payout / creator withdrawal service surface (section 5). The contract
+  primitives already exist; only the off-chain surface is missing.
 
 KYC is intentionally out of scope (testnet, and not required for the supply-side flow).
 
