@@ -445,10 +445,11 @@ export class LiveAdapter implements StudioDataAdapter {
 
   async runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult> {
     const deps = this.requireDeps();
-    // Reuse the runPlaygroundHarness VERBATIM (in-process facilitator + reserve-before-
-    // run gate + exactly-once), mirroring fixture.ts exactly. The escrow gate reserves
-    // the cap BEFORE the handler runs (T-mdx-02); the cap derives from a runtime
-    // decimals() read (no 1e6 literal).
+    // deps.runPlayground is the RESOLVED harness (resolvePlaygroundHarness): the in-process
+    // mock by default (the dev/demo/"test it" path, mirroring fixture.ts), or the real
+    // liveTestEndpoint buyer pay flow when PLAYGROUND_HARNESS=live. Both keep
+    // reserve-before-run + exactly-once: the escrow gate reserves the cap BEFORE the handler
+    // runs (T-mdx-02) and the cap derives from a runtime decimals() read (no 1e6 literal).
     const harness = await deps.runPlayground(resourceId, req);
     return {
       paid: harness.result.paid,
