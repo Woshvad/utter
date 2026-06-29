@@ -15,6 +15,7 @@ import {
   FIXTURE_RESOURCE_ID,
   FIXTURE_ACCRUED_EARNINGS,
   FIXTURE_ESCROW_BALANCE,
+  FIXTURE_BOND_STATUS,
 } from "../app/fixtures/index";
 
 describe("selectAdapter", () => {
@@ -107,6 +108,25 @@ describe("FixtureAdapter reads (no network/chain/model)", () => {
     const adapter = new FixtureAdapter();
     const a = await adapter.getAccruedEarnings("0x1111111111111111111111111111111111111111");
     const b = await adapter.getAccruedEarnings("0x1111111111111111111111111111111111111111");
+    expect(a).not.toBe(b);
+    expect(a).toEqual(b);
+  });
+
+  it("getBondStatus returns FIXTURE_BOND_STATUS (posted + owner + cooldownEnds + decimals)", async () => {
+    const adapter = new FixtureAdapter();
+    const bond = await adapter.getBondStatus(FIXTURE_RESOURCE_ID);
+    expect(bond.posted).toBe(FIXTURE_BOND_STATUS.posted);
+    expect(bond.owner).toBe(FIXTURE_BOND_STATUS.owner);
+    expect(bond.cooldownEnds).toBe(FIXTURE_BOND_STATUS.cooldownEnds);
+    expect(bond.decimals).toBe(FIXTURE_BOND_STATUS.decimals);
+    expect(typeof bond.posted).toBe("bigint");
+    expect(typeof bond.cooldownEnds).toBe("bigint");
+  });
+
+  it("getBondStatus returns a fresh copy each call (no shared-mutable poisoning)", async () => {
+    const adapter = new FixtureAdapter();
+    const a = await adapter.getBondStatus(FIXTURE_RESOURCE_ID);
+    const b = await adapter.getBondStatus(FIXTURE_RESOURCE_ID);
     expect(a).not.toBe(b);
     expect(a).toEqual(b);
   });

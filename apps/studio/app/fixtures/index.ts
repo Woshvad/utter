@@ -5,6 +5,7 @@
 // NO chain, NO model. All money is token BASE UNITS (bigint) - there is NO
 // 1e6/10**6/6/18 literal anywhere in this file's amount paths.
 import type {
+  BondStatusView,
   BuildEvent,
   ResourceCardData,
   ResourceDetail,
@@ -142,5 +143,19 @@ export const FIXTURE_ESCROW_BALANCE: UsdcBalance = {
  */
 export const FIXTURE_ACCRUED_EARNINGS: UsdcBalance = {
   raw: 12_340_000n,
+  decimals: 6,
+};
+
+/**
+ * The deterministic bond status fixture (Payout, T59): a resource's posted bond as read
+ * from the StakingVault. owner is the fixture creator so the panel's owner-gated controls
+ * render for the connected fixture wallet; cooldownEnds is 0n (no withdraw requested, the
+ * "active" state). posted is a base-unit constant; decimals carries the runtime-style scale
+ * the same way the escrow/accrued fixtures do - no decimals literal is applied in any math.
+ */
+export const FIXTURE_BOND_STATUS: BondStatusView = {
+  posted: 5_000_000n,
+  owner: FIXTURE_CREATOR,
+  cooldownEnds: 0n,
   decimals: 6,
 };

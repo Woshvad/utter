@@ -11,6 +11,7 @@
 import { filterResources, type FilterCriteria, type IndexRecord } from "@utter/marketplace";
 import { runPlaygroundHarness } from "./playground-harness.js";
 import type {
+  BondStatusView,
   BuildEvent,
   ComposeSpec,
   Hex,
@@ -23,6 +24,7 @@ import type {
 } from "./types.js";
 import {
   FIXTURE_ACCRUED_EARNINGS,
+  FIXTURE_BOND_STATUS,
   FIXTURE_BUILD_EVENTS,
   FIXTURE_ESCROW_BALANCE,
   FIXTURE_MARKETPLACE,
@@ -117,6 +119,12 @@ export class FixtureAdapter implements StudioDataAdapter {
     // value from FIXTURE_ESCROW_BALANCE so the wallet USDC and the withdrawable earnings
     // render as different amounts. Shallow copy so a caller mutation cannot poison it.
     return { ...FIXTURE_ACCRUED_EARNINGS };
+  }
+
+  async getBondStatus(_resourceId: Hex): Promise<BondStatusView> {
+    // The deterministic bond status fixture (posted amount + owner + cooldownEnds +
+    // runtime-style decimals). Shallow copy so a caller mutation cannot poison the seed.
+    return { ...FIXTURE_BOND_STATUS };
   }
 
   async runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult> {

@@ -12,12 +12,35 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 // The screen now wires usePayPerCall (the 260622-wlu client pay seam), which reads the
-// wagmi useAccount + useWalletClient hooks. Mock wagmi (hoisted, survives resetModules)
-// so the screen renders with no browser wallet - mirrors wallet.test.tsx. No pay() is
-// invoked by these render tests, so a connected-but-inert wallet client is enough.
+// wagmi useAccount + useWalletClient hooks, plus the client-mounted BondReclaimPanel
+// (Payout, T59), which reads useAccount + useWriteContract + useWaitForTransactionReceipt.
+// Mock wagmi (hoisted, survives resetModules) so the screen renders with no browser wallet -
+// mirrors wallet.test.tsx. No pay()/bond write is invoked by these render tests, so a
+// disconnected-but-inert wallet is enough (the bond panel then renders read-only).
 vi.mock("wagmi", () => ({
-  useAccount: () => ({ address: undefined }),
+  useAccount: () => ({ address: undefined, isConnected: false }),
   useWalletClient: () => ({ data: undefined }),
+  useWriteContract: () => ({ writeContractAsync: vi.fn(), isPending: false }),
+  useWaitForTransactionReceipt: () => ({
+    data: undefined,
+    isSuccess: false,
+    isError: false,
+    error: undefined,
+    isLoading: false,
+  }),
+}));
+
+// The bond panel reads the on-chain bond status via useBondStatus; mock it to a
+// deterministic value so the render tests touch no chain. A disconnected wallet means the
+// panel shows the read-only status with no controls regardless.
+vi.mock("../app/wallet/useBondStatus", () => ({
+  useBondStatus: () => ({
+    posted: 5_000_000n,
+    owner: "0x1111111111111111111111111111111111111111",
+    cooldownEnds: 0n,
+    decimals: 6,
+    loading: false,
+  }),
 }));
 
 const HERE = dirname(fileURLToPath(import.meta.url));

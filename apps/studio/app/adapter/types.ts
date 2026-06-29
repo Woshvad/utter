@@ -185,6 +185,25 @@ export interface UsdcBalance {
 }
 
 /**
+ * A resource's on-chain bond status as read from the StakingVault (Payout, T59).
+ * The posted amount is base units; owner is the bond-owner address; cooldownEnds is
+ * the unix timestamp after which a requested withdraw may complete (0 = no withdraw
+ * requested). The UI derives can-request / can-claim from owner + cooldownEnds + now;
+ * the on-chain COOLDOWN / NotBondOwner / WithdrawNotRequested guards are the real
+ * security boundary, not this read.
+ */
+export interface BondStatusView {
+  /** The posted bond amount in token base units (bigint). */
+  posted: bigint;
+  /** The bond owner address. */
+  owner: Hex;
+  /** The cooldown end timestamp (0 = no withdraw requested). */
+  cooldownEnds: bigint;
+  /** Decimals read from the contract at runtime (never a literal). */
+  decimals: number;
+}
+
+/**
  * A playground call result (the 402 pay-flow beat). When `paid` is false because the
  * buyer is unfunded, `paywall` carries the 402 accepts quote the PaywallSheet renders
  * the price from (read-through; never recomputed).
@@ -234,6 +253,12 @@ export interface StudioDataAdapter {
   /** Read an address's ACCRUED escrow balance (PaymentEscrow.balanceOf), the withdrawable
    *  internal balance, distinct from the wallet USDC getEscrowBalance reads. */
   getAccruedEarnings(address: Hex): Promise<UsdcBalance>;
+  /**
+   * Read a resource's on-chain bond status (StakingVault): posted amount, bond owner, and
+   * the cooldown end timestamp (0 = no withdraw requested). The UI derives can-request /
+   * can-claim from the connected wallet + the current time.
+   */
+  getBondStatus(resourceId: Hex): Promise<BondStatusView>;
   /** Run the playground 402 pay-flow (criterion-3 beat) for a resource. */
   runPlayground(resourceId: string, req: unknown): Promise<PlaygroundResult>;
 }

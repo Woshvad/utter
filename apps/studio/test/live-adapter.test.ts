@@ -12,6 +12,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { PublicClient } from "viem";
 import { PAYMENT_ESCROW } from "@utter/chain";
+import { FIXTURE_CREATOR } from "../app/fixtures/index";
 import { InMemoryIndexStore, type IndexRecord } from "@utter/marketplace";
 import {
   ScaffoldGenerator,
@@ -43,13 +44,20 @@ const STUB_RAW_BALANCE = 25_000_000n;
  *  different contracts and surface different amounts. */
 const STUB_ACCRUED_BALANCE = 12_340_000n;
 
+/** The fixed base-unit posted bond the stub returns for StakingVault.bonds(resourceId)
+ *  (the getBondStatus read), plus its owner + cooldownEnds. */
+const STUB_BOND_POSTED = 5_000_000n;
+const STUB_BOND_OWNER = FIXTURE_CREATOR;
+const STUB_BOND_COOLDOWN_ENDS = 0n;
+
 /**
  * A stub viem PublicClient: decimals() returns 6 (the runtime read the money path
  * depends on) and balanceOf() returns a fixed base-unit bigint - the WALLET USDC balance
  * when read against USDC (readUsdcBalance), the ACCRUED escrow balance when read against
  * PAYMENT_ESCROW (readEscrowBalance). Switching on the contract address proves
- * getAccruedEarnings reads PaymentEscrow.balanceOf, distinct from the USDC balanceOf. No
- * network. The cast mirrors the playground-harness mock idiom.
+ * getAccruedEarnings reads PaymentEscrow.balanceOf, distinct from the USDC balanceOf. The
+ * bonds/bondOwner/cooldownEnds reads (the getBondStatus path) return the fixed bond stub.
+ * No network. The cast mirrors the playground-harness mock idiom.
  */
 function makeStubPublicClient(): PublicClient {
   return {
@@ -58,6 +66,9 @@ function makeStubPublicClient(): PublicClient {
       if (functionName === "balanceOf") {
         return address === PAYMENT_ESCROW ? STUB_ACCRUED_BALANCE : STUB_RAW_BALANCE;
       }
+      if (functionName === "bonds") return STUB_BOND_POSTED;
+      if (functionName === "bondOwner") return STUB_BOND_OWNER;
+      if (functionName === "cooldownEnds") return STUB_BOND_COOLDOWN_ENDS;
       throw new Error(`live-adapter test stub: unexpected functionName ${functionName}`);
     },
   } as unknown as PublicClient;
@@ -196,6 +207,22 @@ describe("LiveAdapter read path (injected offline deps)", () => {
     expect(accrued.raw).toBe(STUB_ACCRUED_BALANCE);
     expect(accrued.raw).not.toBe(STUB_RAW_BALANCE);
     expect(typeof accrued.raw).toBe("bigint");
+  });
+
+  it("getBondStatus reads StakingVault bonds/bondOwner/cooldownEnds (mapped BondStatusView)", async () => {
+    const adapter = await makeLiveAdapter();
+    // A valid bytes32 resourceId (readBondStatus rejects a non-32-byte hex).
+    const RESOURCE_ID = `0x${"a1".repeat(32)}` as const;
+    const bond = await adapter.getBondStatus(RESOURCE_ID);
+    // decimals comes from the stub's decimals() read (6), not a literal in the adapter.
+    expect(bond.decimals).toBe(6);
+    // posted maps from StakingVault.bonds(resourceId); owner from bondOwner; cooldownEnds
+    // from cooldownEnds. All base-unit/raw values, no decimals literal.
+    expect(bond.posted).toBe(STUB_BOND_POSTED);
+    expect(typeof bond.posted).toBe("bigint");
+    expect(bond.owner.toLowerCase()).toBe(STUB_BOND_OWNER.toLowerCase());
+    expect(bond.cooldownEnds).toBe(STUB_BOND_COOLDOWN_ENDS);
+    expect(typeof bond.cooldownEnds).toBe("bigint");
   });
 
   it("listMarketplace({}) returns the seeded cards (length > 1)", async () => {
