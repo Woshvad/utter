@@ -214,6 +214,16 @@ contract ResourceRegistryTest is Test {
         assertEq(executableAt, expectedExecutableAt, "executableAt not recorded");
     }
 
+    /// @notice A zero-amount slash authorization is rejected at the source, so the
+    /// pending record never holds a meaningless zero the vault could not consume and
+    /// getPendingSlash's "(0,0) means none" invariant always holds.
+    function test_slashAuthorization_revertsOnZeroAmount() public {
+        _register();
+        vm.expectRevert(ResourceRegistry.ZeroSlashAmount.selector);
+        vm.prank(owner);
+        registry.slashAuthorization(RESOURCE_ID, 0, "fraud");
+    }
+
     /// @notice getPendingSlash returns (0, 0) when no authorization is pending.
     function test_getPendingSlash_zeroWhenNone() public {
         _register();

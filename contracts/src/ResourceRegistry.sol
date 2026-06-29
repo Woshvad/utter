@@ -136,6 +136,10 @@ contract ResourceRegistry is IResourceRegistry, AccessControlDefaultAdminRules {
     error SlashAmountMismatch();
     /// @notice The dispute window has not yet elapsed, so the slash cannot run.
     error SlashWindowActive();
+    /// @notice A slash authorization was recorded with a zero amount. A zero slash
+    /// is a meaningless no-op the vault could never consume, and it would leave a
+    /// pending record whose amount reads as "none", so it is rejected at the source.
+    error ZeroSlashAmount();
 
     /// @param initialAdminDelay Delay enforced on the 2-step DEFAULT_ADMIN_ROLE
     /// transfer (AccessControlDefaultAdminRules).
@@ -231,6 +235,7 @@ contract ResourceRegistry is IResourceRegistry, AccessControlDefaultAdminRules {
         onlyRole(SLASHER_ROLE)
     {
         if (!resources[resourceId].exists) revert UnknownResource();
+        if (amount == 0) revert ZeroSlashAmount();
 
         uint64 executableAt = uint64(block.timestamp) + SLASH_DISPUTE_WINDOW;
         pendingSlashes[resourceId] = PendingSlash({amount: amount, executableAt: executableAt});

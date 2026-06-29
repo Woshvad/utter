@@ -82,8 +82,22 @@ contract Deploy is Script {
         // alone may consume a recorded slash authorization. The deployer holds
         // DEFAULT_ADMIN here so the grant succeeds in the dry run; on mainnet the
         // admin multisig performs this grant as a post-deploy wiring step.
-        registry.grantRole(registry.VAULT_ROLE(), address(vault));
-        console.log("Granted VAULT_ROLE on registry to StakingVault:", address(vault));
+        // Only the registry DEFAULT_ADMIN may grant VAULT_ROLE. In the keyless dry
+        // run the deployer holds DEFAULT_ADMIN, so the grant succeeds. On a
+        // production broadcast where CONTRACT_OWNER is a separate multisig the
+        // deployer does NOT hold it, so guard the grant to avoid a hard revert that
+        // would fail the whole deploy; the admin multisig performs this grant as the
+        // post-deploy wiring step. Without VAULT_ROLE the vault cannot consume a
+        // slash authorization, so this step must not be skipped silently.
+        if (registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), p.deployer)) {
+            registry.grantRole(registry.VAULT_ROLE(), address(vault));
+            console.log("Granted VAULT_ROLE on registry to StakingVault:", address(vault));
+        } else {
+            console.log(
+                "VAULT_ROLE grant DEFERRED: the deployer is not the registry DEFAULT_ADMIN. The admin multisig MUST grant registry.VAULT_ROLE() to the StakingVault post-deploy, or slash can never consume an authorization."
+            );
+            console.log("StakingVault awaiting VAULT_ROLE grant:", address(vault));
+        }
 
         // 4. Representative PaymentSplitter for the flat exact path. The splitter
         // is per-resource in production; this one is deployed as a wiring example
