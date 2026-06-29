@@ -49,8 +49,11 @@ export function createArcWalletClient(
  * (viem) encapsulated in @utter/chain so consumers (the marketplace) need no
  * direct runtime viem import to construct a buyer wallet from a key.
  *
- * A buyer wallet only SIGNS typed data (the DebitAuthorization); it never
- * broadcasts a settle, so no nonce manager is attached to the account. The RPC
+ * Two callers use this: a buyer wallet that SIGNS typed data (the
+ * DebitAuthorization, no broadcast), and operator write-path scripts that
+ * broadcast a single account's own txs serially (e.g. the treasury payout
+ * sweep's escrow.withdraw). No nonce manager is attached: serial single-account
+ * sends read the nonce from the RPC per send, which is correct for both. The RPC
  * URL has the same override + chain-default fallback as `createArcWalletClient`.
  */
 export function createArcWalletClientFromKey(
