@@ -44,3 +44,12 @@ export {
   type RefundIdempotencyStore,
   type WithdrawDeps,
 } from "./refund.js";
+
+// MAINNET section 5: the operator-gated TREASURY fee sweep (escrow.withdraw the
+// platform's accrued 30 percent cut to the treasury wallet; pull-payment, treasury-only).
+export {
+  sweepTreasuryPayout,
+  type PayoutDeps,
+  type PayoutPublicClient,
+  type SweepResult,
+} from "./payout.js";
