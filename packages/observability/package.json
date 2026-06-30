@@ -10,9 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@utter/chain": "workspace:*"
-  },
-  "devDependencies": {
+    "@utter/chain": "workspace:*",
     "viem": "2.52.2"
   }
 }
