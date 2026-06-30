@@ -1,18 +1,29 @@
-// slash.ts - the slash trigger (STK-02). It consumes a BondSlashReview raised by
+// slash.ts - the slash driver (STK-02). It consumes a BondSlashReview raised by
 // the ai-scorer's pure 5-CONSECUTIVE-failure reducer and drives the on-chain
 // takedown spend through the INJECTED admin walletClient, mirroring the facilitator
 // write path (services/facilitator/src/settle.ts simulate->write->waitForReceipt).
 //
-// LOAD-BEARING (Pitfall 7, confirmed in StakingVault.sol:130-137 +
-// ResourceRegistry.sol NatSpec): `slashAuthorization` is an ADVISORY indexer event
-// ONLY. The two contracts share NO on-chain state. triggerSlash therefore:
-//   1. emits ResourceRegistry.slashAuthorization(resourceId, amount, reason) as the
-//      advisory indexer signal, then
-//   2. drives the REAL spend DIRECTLY via StakingVault.slash(resourceId, amount,
-//      reason) with the ADMIN-supplied amount.
-// It does NOT read back / reconcile the registry authorization between the two calls
-// - the admin amount is authoritative. Wiring a reconcile read here would be the
-// exact regression Pitfall 7 warns against.
+// ON-CHAIN COUPLING (confirmed in ResourceRegistry.sol + StakingVault.sol): the
+// slash is COUPLED across the two contracts on chain, not advisory-and-decoupled.
+// ResourceRegistry.slashAuthorization records a single-use PendingSlash with a
+// 1-day dispute window (SLASH_DISPUTE_WINDOW); the recorded {amount, executableAt}
+// is readable via getPendingSlash. StakingVault.slash, before touching the bond,
+// calls registry.consumeSlashAuthorization, which REVERTS SlashWindowActive until
+// block.timestamp >= executableAt, SlashAmountMismatch unless the amount matches
+// the recorded one exactly, and NoPendingSlash if none is recorded. So a single
+// back-to-back authorize-then-slash always reverts during the dispute window.
+//
+// The driver therefore splits into two steps the operator runs at least a day
+// apart:
+//   1. recordSlashAuthorization: records the registry authorization (starts the
+//      dispute window). No vault write here.
+//   2. executeMaturedSlash: FIRST reads the pending slash via the public client and
+//      only calls StakingVault.slash once chain time has reached executableAt AND
+//      the recorded amount matches; otherwise it returns a "not yet matured" result
+//      WITHOUT broadcasting, so a premature run never burns a reverting tx.
+//
+// During the window DEFAULT_ADMIN may cancelSlashAuthorization on the registry to
+// dispute the slash; the vault then can never consume it.
 //
 // The slash is reachable ONLY from a STRIKE_LIMIT (5-consecutive-failure) review -
 // the single trigger - so a healthy resource is never slashed. LIVE broadcast
@@ -28,10 +39,10 @@ import {
 import { STRIKE_LIMIT, type BondSlashReview } from "@utter/ai-scorer";
 
 /**
- * The minimal admin write surface triggerSlash needs. Matches viem's
+ * The minimal admin write surface the slash steps need. Matches viem's
  * `WalletClient.writeContract` shape so the real Arc admin wallet (built from
  * REGISTRY_ADMIN_PRIVATE_KEY in .env.local) satisfies it, while the test injects a
- * spy. The admin is the StakingVault/ResourceRegistry Ownable owner (onlyOwner).
+ * spy. The admin holds SLASHER_ROLE on both the registry and the vault.
  */
 export interface AdminWriter {
   writeContract(args: {
@@ -43,71 +54,94 @@ export interface AdminWriter {
 }
 
 /**
- * The minimal read/wait surface for the receipt wait + the WR-04 bond pre-flight.
+ * The minimal read/wait surface the slash steps need.
  *
- * The `readContract` here is used ONLY for the OFF-CHAIN PRE-FLIGHT bond read that
- * happens BEFORE BOTH writes (guarding the call, never deriving the spend amount).
- * It is deliberately NOT used to reconcile the slash amount between the advisory and
- * the real slash (Pitfall 7): triggerSlash performs NO read between the two writes -
- * the admin amount is authoritative. Receipt waits keep the call ordering observable
- * for the operator audit. Optional - the autonomous suite injects a stub.
+ * `readContract` serves two reads, both BEFORE any vault write: the WR-04 bond
+ * pre-flight (functionName "bonds") that refuses an over-bond slash, and the
+ * maturity read (functionName "getPendingSlash") that executeMaturedSlash uses to
+ * decide whether the registry authorization is consumable yet. The maturity read
+ * is REQUIRED by executeMaturedSlash so it never broadcasts a slash that would
+ * revert SlashWindowActive / SlashAmountMismatch on chain. Receipt waits keep the
+ * call ordering observable for the operator audit.
  */
 export interface SlashPublicClient {
   waitForTransactionReceipt?(args: { hash: `0x${string}` }): Promise<unknown>;
   /**
-   * Read the current on-chain bond for the resource (StakingVault.bonds). Used by the
-   * WR-04 pre-flight ONLY (before any write), to refuse an over-bond slash that would
-   * revert on-chain after the advisory event is already mined. Optional - when absent
-   * the pre-flight is skipped (the on-chain SlashExceedsBond guard still applies).
+   * Read the current on-chain bond for the resource (StakingVault.bonds) or the
+   * pending slash authorization (ResourceRegistry.getPendingSlash). Both reads
+   * happen BEFORE the vault write. The "bonds" read guards an over-bond slash; the
+   * "getPendingSlash" read returns the recorded {amount, executableAt} so the
+   * driver only consumes a matured, matching authorization.
    */
   readContract?(args: {
     address: `0x${string}`;
     abi: unknown;
-    functionName: "bonds";
+    functionName: "bonds" | "getPendingSlash";
     args: readonly [`0x${string}`];
-  }): Promise<bigint>;
+  }): Promise<unknown>;
 }
 
-/** Injected clients for {@link triggerSlash}. */
+/** Injected clients for the slash steps. */
 export interface SlashDeps {
-  /** The admin wallet (Ownable owner) that submits both writes. Operator-gated key. */
+  /** The admin wallet (SLASHER_ROLE) that submits the writes. Operator-gated key. */
   admin: AdminWriter;
-  /** Optional public client for receipt waits (never used to reconcile the amount). */
+  /** Optional public client for receipt waits and the bond pre-flight. */
   publicClient?: SlashPublicClient;
 }
 
-/** The two tx hashes a slash produces, for the indexer / operator audit trail. */
-export interface SlashResult {
-  /** The advisory ResourceRegistry.slashAuthorization tx (indexer signal). */
+/** The result of {@link recordSlashAuthorization}: the registry authorization tx. */
+export interface RecordSlashResult {
+  /** The ResourceRegistry.slashAuthorization tx that started the dispute window. */
   slashAuthorizationTx: `0x${string}`;
-  /** The real StakingVault.slash tx (the spend). */
-  slashTx: `0x${string}`;
 }
 
 /**
- * Drive a bond slash from a verified 5-strike review. Emits the advisory
- * slashAuthorization indexer signal, then drives StakingVault.slash directly with the
- * admin-supplied `amount` (USDC base units). Returns both tx hashes.
+ * The result of {@link executeMaturedSlash}. When `executed` is true the vault
+ * slash was broadcast and `slashTx` is its hash. When false the authorization was
+ * not yet consumable (window still active, no pending record, or the recorded
+ * amount did not match) and NO tx was broadcast; `reason` says why.
+ */
+export type ExecuteSlashResult =
+  | { executed: true; slashTx: `0x${string}` }
+  | {
+      executed: false;
+      reason: "not-yet-matured" | "no-pending-authorization" | "amount-mismatch";
+      /** The recorded amount on chain, when a pending authorization exists. */
+      pendingAmount?: bigint;
+      /** The timestamp the window elapses, when a pending authorization exists. */
+      executableAt?: bigint;
+    };
+
+/**
+ * STEP 1. Record the slash authorization on the registry from a verified 5-strike
+ * review. This starts the 1-day dispute window; it does NOT touch the bond. The
+ * vault slash runs later via {@link executeMaturedSlash} once the window elapses.
  *
  * Guards (defend the real spend BEFORE any write):
- * - `amount` must be > 0 (a zero/negative slash is refused).
+ * - `amount` must be > 0 (a zero/negative slash is refused; the registry also
+ *   reverts ZeroSlashAmount).
  * - the review must have reached `STRIKE_LIMIT` consecutive failures (the only
  *   trigger) - a sub-limit review is refused.
+ * - WR-04: when a public client with a bond read is provided, an amount exceeding
+ *   the current bond is refused before recording, so no authorization is ever
+ *   recorded for a slash that could never be consumed (it would revert
+ *   SlashExceedsBond at consume time).
  *
- * @throws if the amount is non-positive or the review did not reach the strike limit.
+ * @throws if the amount is non-positive, the review did not reach the strike limit,
+ *   or the amount exceeds the current bond.
  */
-export async function triggerSlash(
+export async function recordSlashAuthorization(
   deps: SlashDeps,
   review: BondSlashReview,
   amount: bigint,
-): Promise<SlashResult> {
+): Promise<RecordSlashResult> {
   // Guard the real spend BEFORE any on-chain write.
   if (amount <= 0n) {
-    throw new Error("triggerSlash: slash amount must be a positive bigint (base units)");
+    throw new Error("recordSlashAuthorization: slash amount must be a positive bigint (base units)");
   }
   if (review.consecutiveFailures < STRIKE_LIMIT) {
     throw new Error(
-      `triggerSlash: review did not reach the strike limit (${review.consecutiveFailures} < ${STRIKE_LIMIT}); slash refused`,
+      `recordSlashAuthorization: review did not reach the strike limit (${review.consecutiveFailures} < ${STRIKE_LIMIT}); slash refused`,
     );
   }
 
@@ -115,29 +149,24 @@ export async function triggerSlash(
   const reason = review.reason;
 
   // WR-04 PRE-FLIGHT: read the current bond and refuse an over-bond slash BEFORE
-  // broadcasting ANYTHING. A slash with amount > bonds[resourceId] reverts on-chain
-  // (SlashExceedsBond) AFTER the advisory event is already mined - leaving the indexer
-  // a dangling "slash authorized" with no Slashed event. Catching it here means no
-  // advisory is ever emitted for a slash that cannot land. This read happens BEFORE
-  // BOTH writes (not between them), so Pitfall 7 is intact: the admin amount is still
-  // authoritative for the spend; the read only GUARDS the call, never derives it.
+  // recording anything. A slash with amount > bonds[resourceId] reverts on-chain
+  // (SlashExceedsBond) at consume time, so the recorded authorization could never
+  // be consumed and would leave a dangling pending record for a day. Catching it
+  // here means no authorization is ever recorded for a slash that cannot land.
   if (deps.publicClient?.readContract) {
-    const bond = await deps.publicClient.readContract({
+    const bond = (await deps.publicClient.readContract({
       address: STAKING_VAULT,
       abi: stakingVaultAbi,
       functionName: "bonds",
       args: [resourceId],
-    });
+    })) as bigint;
     if (amount > bond) {
       throw new Error(
-        `triggerSlash: slash amount ${amount} exceeds current bond ${bond} (would revert; refused before any write)`,
+        `recordSlashAuthorization: slash amount ${amount} exceeds current bond ${bond} (would revert; refused before any write)`,
       );
     }
   }
 
-  // Step 1: the ADVISORY indexer signal. Separate contract, shares NO state with the
-  // vault (Pitfall 7). The amount/reason mirror the spend for a consistent indexer
-  // record - but the vault never consumes this event.
   const slashAuthorizationTx = await deps.admin.writeContract({
     address: RESOURCE_REGISTRY,
     abi: registryAbi,
@@ -148,8 +177,63 @@ export async function triggerSlash(
     await deps.publicClient.waitForTransactionReceipt({ hash: slashAuthorizationTx });
   }
 
-  // Step 2: the REAL spend, driven DIRECTLY with the admin amount. No reconcile read
-  // against the registry authorization happens between the two writes.
+  return { slashAuthorizationTx };
+}
+
+/**
+ * STEP 2. Execute the matured slash. FIRST reads the pending authorization via the
+ * public client (ResourceRegistry.getPendingSlash) and only broadcasts
+ * StakingVault.slash when chain time has reached executableAt AND the recorded
+ * amount matches `amount`. Otherwise it returns `{ executed: false, ... }` WITHOUT
+ * broadcasting, so a premature run never burns a tx that would revert
+ * SlashWindowActive / SlashAmountMismatch / NoPendingSlash on chain.
+ *
+ * The maturity read is REQUIRED: a public client with `readContract` must be
+ * provided. The chain time is supplied by the caller (`now`, unix seconds) so the
+ * decision is testable without a live clock; in prod pass the latest block
+ * timestamp.
+ *
+ * @throws if no public client with a getPendingSlash read is provided.
+ */
+export async function executeMaturedSlash(
+  deps: SlashDeps,
+  review: BondSlashReview,
+  amount: bigint,
+  now: bigint,
+): Promise<ExecuteSlashResult> {
+  if (!deps.publicClient?.readContract) {
+    throw new Error(
+      "executeMaturedSlash: a public client with readContract is required to read the pending slash before broadcasting",
+    );
+  }
+
+  const resourceId = review.resourceId as `0x${string}`;
+  const reason = review.reason;
+
+  // Read the recorded authorization BEFORE any write. getPendingSlash returns
+  // (amount, executableAt); (0, 0) means nothing is pending.
+  const pending = (await deps.publicClient.readContract({
+    address: RESOURCE_REGISTRY,
+    abi: registryAbi,
+    functionName: "getPendingSlash",
+    args: [resourceId],
+  })) as readonly [bigint, bigint];
+  const pendingAmount = BigInt(pending[0]);
+  const executableAt = BigInt(pending[1]);
+
+  if (pendingAmount === 0n) {
+    return { executed: false, reason: "no-pending-authorization" };
+  }
+  if (pendingAmount !== amount) {
+    return { executed: false, reason: "amount-mismatch", pendingAmount, executableAt };
+  }
+  if (now < executableAt) {
+    return { executed: false, reason: "not-yet-matured", pendingAmount, executableAt };
+  }
+
+  // Matured + matching: broadcast the real spend. The vault re-checks the registry
+  // authorization in consumeSlashAuthorization, so this is safe even if the chain
+  // state moved between the read and the write (the tx simply reverts on chain).
   const slashTx = await deps.admin.writeContract({
     address: STAKING_VAULT,
     abi: stakingVaultAbi,
@@ -160,5 +244,5 @@ export async function triggerSlash(
     await deps.publicClient.waitForTransactionReceipt({ hash: slashTx });
   }
 
-  return { slashAuthorizationTx, slashTx };
+  return { executed: true, slashTx };
 }

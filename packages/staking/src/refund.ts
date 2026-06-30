@@ -149,11 +149,16 @@ export interface RefundDeps {
   /** The read-path client for the insurancePoolBalance bound. */
   publicClient: PoolReader;
   /**
-   * Per-buyer refund idempotency store. When provided, a buyer already refunded for
-   * this `(resourceId, window)` batch is SKIPPED on a retry - never paid twice. Omit
-   * for a fresh in-memory store (a single-process batch with no retry recovery).
+   * Per-buyer refund idempotency store. REQUIRED, not defaulted: a buyer already
+   * refunded for this `(resourceId, window)` batch is SKIPPED on a retry, never paid
+   * twice. StakingVault.refund has NO on-chain replay guard, so this store is the
+   * only cross-process double-pay defense. It is a required dependency so a caller
+   * must consciously choose a durable adapter (Postgres/Redis) for the live path; a
+   * silent in-memory default would give zero replay protection across processes
+   * after a crash. For tests/dev, construct {@link InMemoryRefundIdempotencyStore}
+   * explicitly and pass it.
    */
-  idempotencyStore?: RefundIdempotencyStore;
+  idempotencyStore: RefundIdempotencyStore;
 }
 
 /** The outcome of an {@link executeRefund} batch. */
@@ -191,11 +196,11 @@ export async function executeRefund(
   // IDEMPOTENCY (mirrors the facilitator (idemKey -> result) store): partition the
   // affected buyers into those a PRIOR attempt already refunded (skip - never re-pay)
   // and the unpaid remainder this call must refund. A retry after a mid-batch revert
-  // resumes from the remainder; buyers 1..i are not paid a second time. With no store
-  // injected, a fresh in-memory store is used (single-process batch, no cross-retry
-  // recovery), so the unconditional behavior is unchanged for the non-retry path.
-  const idempotencyStore: RefundIdempotencyStore =
-    deps.idempotencyStore ?? new InMemoryRefundIdempotencyStore();
+  // resumes from the remainder; buyers 1..i are not paid a second time. The store is
+  // a REQUIRED dependency (no silent in-memory default), so the caller has chosen a
+  // durable adapter for the live path and a forgotten store cannot silently drop
+  // cross-process replay protection.
+  const idempotencyStore = deps.idempotencyStore;
   const idemKey = refundBatchIdemKey(resourceId, window);
 
   const skipped: AffectedBuyer[] = [];

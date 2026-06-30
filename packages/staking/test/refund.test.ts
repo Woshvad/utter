@@ -16,6 +16,7 @@ import {
   withdrawBond,
   InMemoryRefundIdempotencyStore,
   type SettledPayment,
+  type RefundDeps,
 } from "../src/refund";
 
 const RESOURCE = `0x${"ef".repeat(32)}` as `0x${string}`;
@@ -106,7 +107,7 @@ describe("executeRefund (STK-03)", () => {
       payment({ payer: BUYER_B, amount: 200_000n }),
     ];
     const result = await executeRefund(
-      { admin: admin.client, publicClient: pool.client },
+      { admin: admin.client, publicClient: pool.client, idempotencyStore: new InMemoryRefundIdempotencyStore() },
       payments,
       RESOURCE,
       window,
@@ -126,7 +127,7 @@ describe("executeRefund (STK-03)", () => {
     const admin = mockAdmin();
     const pool = mockPool(10_000_000n);
     await executeRefund(
-      { admin: admin.client, publicClient: pool.client },
+      { admin: admin.client, publicClient: pool.client, idempotencyStore: new InMemoryRefundIdempotencyStore() },
       [payment({ amount: 100_000n })],
       RESOURCE,
       window,
@@ -147,7 +148,12 @@ describe("executeRefund (STK-03)", () => {
       payment({ payer: BUYER_B, amount: 200_000n }),
     ];
     await expect(
-      executeRefund({ admin: admin.client, publicClient: pool.client }, payments, RESOURCE, window),
+      executeRefund(
+        { admin: admin.client, publicClient: pool.client, idempotencyStore: new InMemoryRefundIdempotencyStore() },
+        payments,
+        RESOURCE,
+        window,
+      ),
     ).rejects.toThrow(/over.?refund|pool/i);
     // No refund write happened - the bound is checked before any spend.
     expect(admin.writeContract).not.toHaveBeenCalled();
@@ -161,7 +167,7 @@ describe("executeRefund (STK-03)", () => {
       payment({ payer: BUYER_B, amount: 200_000n }),
     ];
     const result = await executeRefund(
-      { admin: admin.client, publicClient: pool.client },
+      { admin: admin.client, publicClient: pool.client, idempotencyStore: new InMemoryRefundIdempotencyStore() },
       payments,
       RESOURCE,
       window,
@@ -174,13 +180,35 @@ describe("executeRefund (STK-03)", () => {
     const admin = mockAdmin();
     const pool = mockPool(10_000_000n);
     const result = await executeRefund(
-      { admin: admin.client, publicClient: pool.client },
+      { admin: admin.client, publicClient: pool.client, idempotencyStore: new InMemoryRefundIdempotencyStore() },
       [payment({ resourceId: OTHER_RESOURCE })],
       RESOURCE,
       window,
     );
     expect(admin.writeContract).not.toHaveBeenCalled();
     expect(result.totalRefunded).toBe(0n);
+  });
+
+  it("requires an explicit idempotency store (no silent in-memory default)", async () => {
+    const admin = mockAdmin();
+    const pool = mockPool(10_000_000n);
+    const payments: SettledPayment[] = [payment({ payer: BUYER_A, amount: 100_000n })];
+
+    // The store is a REQUIRED dependency: omitting it is a compile error, so a caller
+    // cannot silently lose cross-process replay protection. The @ts-expect-error
+    // proves the type rejects the omission; passing an explicit store is the
+    // supported call.
+    // @ts-expect-error idempotencyStore is required on RefundDeps
+    const depsMissingStore: RefundDeps = { admin: admin.client, publicClient: pool.client };
+    void depsMissingStore;
+
+    const result = await executeRefund(
+      { admin: admin.client, publicClient: pool.client, idempotencyStore: new InMemoryRefundIdempotencyStore() },
+      payments,
+      RESOURCE,
+      window,
+    );
+    expect(result.totalRefunded).toBe(100_000n);
   });
 
   describe("idempotency on a mid-batch revert + retry (WR-01)", () => {

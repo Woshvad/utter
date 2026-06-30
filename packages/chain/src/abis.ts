@@ -396,6 +396,16 @@ export const registryAbi = [
     outputs: [{ type: "bool" }],
   },
   {
+    type: "function",
+    name: "getPendingSlash",
+    stateMutability: "view",
+    inputs: [{ name: "resourceId", type: "bytes32" }],
+    outputs: [
+      { name: "amount", type: "uint256" },
+      { name: "executableAt", type: "uint64" },
+    ],
+  },
+  {
     type: "event",
     name: "ResourcePaused",
     inputs: [{ name: "resourceId", type: "bytes32", indexed: true }],
