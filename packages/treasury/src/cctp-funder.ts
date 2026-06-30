@@ -80,6 +80,37 @@ export interface EscrowCreditStore {
   credit(account: Address, amount: bigint): Promise<bigint>;
 }
 
+/**
+ * The replay-dedup store (T-08-CCTPREPLAY). Each CCTP burn message carries a unique
+ * nonce, so the burn message is the natural dedup key: a replayed or retried
+ * attestation over the SAME message must never credit the escrow twice. The store
+ * atomically claims a key the first time it is seen; a second claim of the same key
+ * resolves false so the funder rejects the duplicate before crediting. An injectable
+ * seam so production can back it with Redis/Postgres and tests with an in-memory set.
+ */
+export interface NonceStore {
+  /**
+   * Atomically claim `key`. Resolves true if this is the first claim (proceed),
+   * false if `key` was already claimed (a replay - reject without crediting).
+   */
+  claim(key: string): Promise<boolean>;
+}
+
+/**
+ * The attestation verifier seam (T-08-CCTPREPLAY). The default light verifier
+ * asserts the attestation carries a non-empty, hex-shaped signature; it is enough
+ * for the mock/autonomous path but is NOT a real signature check. On the live path a
+ * real secp256k1 / Iris-public-key verifier MUST be injected so a forged attestation
+ * over a real burn message cannot mint. CctpFunder requires a non-default verifier
+ * whenever the attestation source is live.
+ */
+export interface AttestationVerifier {
+  /** A label for diagnostics. "shape" is the light default; "live" is a real verifier. */
+  readonly kind: "shape" | "live";
+  /** Throw if `att` is not a valid Iris attestation; return for a valid one. */
+  verify(att: Attestation): Promise<void> | void;
+}
+
 /** The resolved funding result: the minted amount + the source/mint tx hashes. */
 export interface FundResult {
   /** The base-unit amount minted on Arc and credited to the escrow balance. */
@@ -98,6 +129,18 @@ export interface CctpFunderDeps {
   readonly escrow: EscrowCreditStore;
   /** The attestation source (MockAttestation default / LiveCctp gated). */
   readonly attestation: AttestationSource;
+  /**
+   * The replay-dedup store keyed by the burn message nonce (T-08-CCTPREPLAY). When
+   * omitted the funder uses a process-local in-memory store, which dedups within a
+   * single process; production should inject a durable store.
+   */
+  readonly nonces?: NonceStore;
+  /**
+   * The attestation verifier. When omitted the funder uses the light shape verifier,
+   * which is rejected on the live attestation path: a live source REQUIRES a real
+   * injected verifier so a forged attestation cannot mint.
+   */
+  readonly verifier?: AttestationVerifier;
 }
 
 /**
@@ -156,6 +199,39 @@ const MIN_SIGNED_HEX_LENGTH = "0x".length + "ff".length;
 const MOCK_SIG_BYTES = 65;
 
 /**
+ * The process-local replay-dedup store: an in-memory set of claimed burn-message
+ * keys. The default when no durable NonceStore is injected. It dedups within one
+ * process; production should inject a durable store so a replay across processes or
+ * restarts is also rejected.
+ */
+export class InMemoryNonceStore implements NonceStore {
+  private readonly seen = new Set<string>();
+
+  async claim(key: string): Promise<boolean> {
+    if (this.seen.has(key)) {
+      return false;
+    }
+    this.seen.add(key);
+    return true;
+  }
+}
+
+/**
+ * The light attestation verifier: asserts the attestation carries a non-empty,
+ * hex-shaped signature. This is the autonomous/mock default - it is a SHAPE check,
+ * not a real signature verification (we never hand-roll secp256k1 recovery; that is
+ * Circle's / the on-chain transmitter's job). The live path must inject a real
+ * verifier instead (CctpFunder rejects this default for a live attestation source).
+ */
+export class ShapeAttestationVerifier implements AttestationVerifier {
+  readonly kind = "shape" as const;
+
+  verify(att: Attestation): void {
+    assertSignedAttestation(att);
+  }
+}
+
+/**
  * CctpFunder runs the burn -> attest -> mint -> credit flow against the injected
  * chain writer + attestation source + escrow store. The DEFAULT auto-credit is
  * poll-and-credit: the funder explicitly calls receiveMessage then credits the
@@ -163,9 +239,16 @@ const MOCK_SIG_BYTES = 65;
  */
 export class CctpFunder {
   private readonly deps: CctpFunderDeps;
+  private readonly nonces: NonceStore;
+  private readonly verifier: AttestationVerifier;
 
   constructor(deps: CctpFunderDeps) {
     this.deps = deps;
+    // Default the replay-dedup store to a process-local one and the verifier to the
+    // light shape check. The shape verifier is rejected below when the attestation
+    // source is live (a live mint requires a real signature verifier).
+    this.nonces = deps.nonces ?? new InMemoryNonceStore();
+    this.verifier = deps.verifier ?? new ShapeAttestationVerifier();
   }
 
   /**
@@ -190,9 +273,31 @@ export class CctpFunder {
 
     // (2) ATTEST: obtain the Iris attestation (mock default | live gated). REJECT a
     // malformed/unsigned attestation BEFORE receiveMessage (T-08-CCTPREPLAY): only
-    // Iris-signed attestations are consumed; the mock is signed, never forged.
+    // Iris-signed attestations are consumed; the mock is signed, never forged. The
+    // verification runs through the injectable verifier seam. A LIVE attestation
+    // source mints irreversibly, so it REQUIRES a real injected verifier - the light
+    // shape default is refused there so a forged attestation can never mint.
     const att = await this.deps.attestation.attest(burn.message);
-    assertSignedAttestation(att);
+    if (this.deps.attestation.kind === "live" && this.verifier.kind !== "live") {
+      throw new Error(
+        "CctpFunder: refusing to mint - a live attestation source requires a real " +
+          "(non-shape) attestation verifier; the light shape check is not a " +
+          "signature verification (T-08-CCTPREPLAY)",
+      );
+    }
+    await this.verifier.verify(att);
+
+    // (2b) REPLAY-DEDUP (T-08-CCTPREPLAY): each burn message carries a unique nonce,
+    // so the burn message is the dedup key. Atomically claim it BEFORE the mint so a
+    // replayed or retried attestation over the same message cannot double-credit the
+    // escrow. A second claim of the same key is rejected without minting or crediting.
+    const claimed = await this.nonces.claim(att.message);
+    if (!claimed) {
+      throw new Error(
+        "CctpFunder: refusing to mint - this CCTP attestation was already consumed " +
+          "(replayed/retried message nonce; T-08-CCTPREPLAY)",
+      );
+    }
 
     // (3) MINT on Arc via receiveMessage (poll-and-credit: explicit, no auto-hook).
     // The transmitter mints the amount encoded in the ATTESTED message - we do NOT pass
