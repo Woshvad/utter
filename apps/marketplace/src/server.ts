@@ -248,10 +248,27 @@ export function createMarketplaceApp(deps: MarketplaceAppDeps): Hono {
     if (category !== undefined) criteria.category = category;
     const active = c.req.query("active");
     if (active !== undefined) criteria.active = active === "true";
+    // minBond / maxBasePrice are token base-unit integers. The query string is UNTRUSTED:
+    // validate it is a plain base-unit integer (`^[0-9]+$`) BEFORE BigInt() so a malformed
+    // value ("abc", "1e9", " 5 ") yields a clean 400, not an uncaught BigInt SyntaxError
+    // surfaced as a 500. Mirrors the base-unit-integer guard used in the card pay path.
     const minBond = c.req.query("minBond");
-    if (minBond !== undefined) criteria.minBond = BigInt(minBond);
+    if (minBond !== undefined) {
+      if (!/^[0-9]+$/.test(minBond)) {
+        return c.json({ error: "bad_request", detail: "minBond must be a base-unit integer" }, 400);
+      }
+      criteria.minBond = BigInt(minBond);
+    }
     const maxBasePrice = c.req.query("maxBasePrice");
-    if (maxBasePrice !== undefined) criteria.maxBasePrice = BigInt(maxBasePrice);
+    if (maxBasePrice !== undefined) {
+      if (!/^[0-9]+$/.test(maxBasePrice)) {
+        return c.json(
+          { error: "bad_request", detail: "maxBasePrice must be a base-unit integer" },
+          400,
+        );
+      }
+      criteria.maxBasePrice = BigInt(maxBasePrice);
+    }
 
     const records = await deps.indexStore.list();
     const filtered = filterResources(records, criteria);

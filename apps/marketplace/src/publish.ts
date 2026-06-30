@@ -167,6 +167,11 @@ export class PublishUnverified extends Error {
   }
 }
 
+/** Case-insensitive bytes32 equality (a resourceId/payTo is not case-significant). */
+function eqHex(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 /** The composed publish pipeline. */
 export interface PublishPipeline {
   /**
@@ -265,6 +270,23 @@ export function createPublishPipeline(deps: PublishPipelineDeps): PublishPipelin
       if (!finalizedCheck.valid) {
         throw new Error(
           `publish: finalized card failed validateAgentCard: ${finalizedCheck.errors.join("; ")}`,
+        );
+      }
+
+      // (5a) PAYTO BINDING (H4-twin) - the served card's x402.payTo is the escrow target
+      // a buyer signs its DebitAuthorization over. validateAgentCard only shape-checks
+      // payTo, so a card whose x402.payTo points at a DIFFERENT resourceId would otherwise
+      // be minted, persisted, and listed - letting a publisher redirect every payment for
+      // this resource to another resource's escrow. Bind payTo to the resourceId here
+      // (case-insensitive bytes32 compare) BEFORE any persist/list; a mismatch is refused
+      // so a mismatched card is never minted-as-served, persisted, or discoverable. The
+      // gate ORDER (moderation -> bond -> probe -> mint) and every short-circuit above are
+      // unchanged; this only guards the LISTING step.
+      const finalX402 = (finalizedCard.x402 as Record<string, unknown> | undefined) ?? {};
+      const finalPayTo = finalX402.payTo;
+      if (typeof finalPayTo !== "string" || !eqHex(finalPayTo, resourceId)) {
+        throw new PublishUnverified(
+          `card x402.payTo does not bind to the resourceId (payment redirect refused)`,
         );
       }
 

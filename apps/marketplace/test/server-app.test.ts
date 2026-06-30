@@ -12,6 +12,7 @@ import {
   InMemoryModerationStore,
   createPublishPipeline,
   type Hex,
+  type IndexRecord,
 } from "../src/index.js";
 import { createMarketplaceApp } from "../src/server";
 import { createPublishPipelineDeps } from "../src/publish-deps";
@@ -71,5 +72,73 @@ describe("createMarketplaceApp - card route over a pre-seeded CardStore", () => 
     const app = appWith(new InMemoryCardStore());
     const res = await app.request(`/${RESOURCE}/.well-known/agent-card.json`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /resources query validation (L1: malformed bigint params -> 400)", () => {
+  // Seed one listed record so a valid numeric filter has something to match.
+  function seededRecord(): IndexRecord {
+    return {
+      resourceId: RESOURCE,
+      agentId: "42",
+      slug: "weather",
+      category: "data",
+      pricing: { model: "metered", base: "5000", perKB: "100", max: "10000" },
+      reputation: 0n,
+      uptime: 1,
+      health: { verified: true, score: null },
+      bond: 2_000_000n,
+      cardUrl: `https://weather.resources.example/${RESOURCE}/.well-known/agent-card.json`,
+      active: true,
+    };
+  }
+
+  async function seededApp() {
+    const indexStore = new InMemoryIndexStore();
+    await indexStore.upsert(seededRecord());
+    const cardStore = new InMemoryCardStore();
+    const moderationStore = new InMemoryModerationStore();
+    const cardSource: CardSource = {
+      async getCard(resourceId) {
+        return (await cardStore.get(resourceId as Hex)) ?? null;
+      },
+    };
+    const publishPipeline = createPublishPipeline(
+      createPublishPipelineDeps({}, { indexStore, cardStore, moderationStore }),
+    );
+    return createMarketplaceApp({ indexStore, cardStore, cardSource, publishPipeline });
+  }
+
+  it("returns 400 for a non-numeric minBond (no uncaught BigInt 500)", async () => {
+    const app = await seededApp();
+    const res = await app.request("/resources?minBond=abc");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("bad_request");
+  });
+
+  it("returns 400 for a non-numeric maxBasePrice", async () => {
+    const app = await seededApp();
+    const res = await app.request("/resources?maxBasePrice=1e9");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("bad_request");
+  });
+
+  it("accepts a valid numeric minBond and lists matching resources", async () => {
+    const app = await seededApp();
+    const res = await app.request("/resources?minBond=1000000");
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as Array<{ resourceId: string; bond: string }>;
+    const listed = list.find((r) => r.resourceId === RESOURCE);
+    expect(listed).toBeDefined();
+    // bond surfaces as a base-units string (bigint is not JSON-serializable).
+    expect(listed!.bond).toBe("2000000");
+  });
+
+  it("a valid numeric minBond above the posted bond filters the resource out", async () => {
+    const app = await seededApp();
+    const res = await app.request("/resources?minBond=5000000");
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as Array<{ resourceId: string }>;
+    expect(list.some((r) => r.resourceId === RESOURCE)).toBe(false);
   });
 });
