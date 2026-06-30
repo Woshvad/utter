@@ -43,13 +43,20 @@ const FAIL_PROBE: ProbeResult = {
   reason: "schema: response classified as malfunction",
 };
 
-/** A spec + the built (pre-finalize) A2A card the pipeline publishes. */
-function buildSpec(prompt = "Return the current weather for a city") {
-  const card = buildAgentCard({
+/**
+ * A spec + the built (pre-finalize) A2A card the pipeline publishes. The deploy step
+ * finalizes x402.payTo to the resourceId (the escrow target) before publish, so the
+ * fixture binds payTo to RESOURCE - the pipeline's H4-twin gate refuses any card whose
+ * payTo does not bind to the resourceId. The `payTo` arg lets a test forge a mismatch.
+ */
+function buildSpec(prompt = "Return the current weather for a city", payTo: Hex = RESOURCE) {
+  const base = buildAgentCard({
     prompt,
     runtime: "node",
     pricing: { model: "metered", base: "5000", perKB: "100", max: "10000" },
   });
+  const x402 = base.x402 as Record<string, unknown>;
+  const card = { ...base, x402: { ...x402, payTo } };
   return { prompt, card };
 }
 
@@ -336,5 +343,28 @@ describe("publish pipeline persists the finalized card to an injected CardStore"
     ).rejects.toThrow(/probe|verif/i);
 
     expect(await cardStore.get(RESOURCE)).toBeNull();
+  });
+
+  it("H4-twin: a card whose x402.payTo != resourceId is REFUSED (nothing minted, persisted, or listed)", async () => {
+    // A passing-gate publish whose card binds payTo to a DIFFERENT resourceId (a payment
+    // redirect). The pipeline must refuse it AFTER the upstream gates pass but BEFORE any
+    // persist/list, so the card route serves nothing and discovery omits it.
+    const foreignPayTo = `0x${"b3".repeat(32)}` as Hex;
+    const { card } = buildSpec("Return the current weather for a city", foreignPayTo);
+    const pipeline = buildPipeline({ bond: 2_000_000n, probe: PASS_PROBE });
+
+    await expect(
+      pipeline.publishResource({
+        prompt: "Return the current weather for a city",
+        resourceId: RESOURCE,
+        category: "data",
+        card,
+        cardUrl: CARD_URL,
+      }),
+    ).rejects.toThrow(/payTo|redirect/i);
+
+    // NOTHING was persisted: neither the served card nor the discovery index record.
+    expect(await cardStore.get(RESOURCE)).toBeNull();
+    expect(await indexStore.get(RESOURCE)).toBeNull();
   });
 });

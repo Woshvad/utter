@@ -29,13 +29,17 @@ const CARD_URL = `https://weather.resources.example/${RESOURCE}/.well-known/agen
 const SECRET = "test-marketplace-secret";
 
 // A spec built the way publish.test.ts buildSpec does - the pre-finalize A2A card the
-// pipeline finalizes with the placeholder identity + health + bond.
+// pipeline finalizes with the placeholder identity + health + bond. The deploy step
+// finalizes x402.payTo to the resourceId before publish (the escrow target), so the
+// fixture binds payTo to RESOURCE; the pipeline's H4-twin gate refuses a mismatched card.
 function buildCard(prompt = "Return the current weather for a city") {
-  return buildAgentCard({
+  const base = buildAgentCard({
     prompt,
     runtime: "node",
     pricing: { model: "metered", base: "5000", perKB: "100", max: "10000" },
   });
+  const x402 = base.x402 as Record<string, unknown>;
+  return { ...base, x402: { ...x402, payTo: RESOURCE } };
 }
 
 // Wire the app deps the way buildDepsFromEnv does, sharing the SAME stores between the

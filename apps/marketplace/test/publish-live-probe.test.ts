@@ -96,13 +96,19 @@ function mockIdentity(agentId = 42n) {
   };
 }
 
-/** A built, validateAgentCard-valid A2A card (the served-card liveness body). */
+/**
+ * A built, validateAgentCard-valid A2A card (the served-card liveness body). The deploy
+ * step finalizes x402.payTo to the resourceId before publish, so the fixture binds payTo
+ * to RESOURCE; the pipeline's H4-twin gate refuses a card whose payTo does not bind.
+ */
 function validCardBody(): Record<string, unknown> {
-  return buildAgentCard({
+  const base = buildAgentCard({
     prompt: PROMPT,
     runtime: "node",
     pricing: { model: "metered", base: "5000", perKB: "100", max: "10000" },
   });
+  const x402 = base.x402 as Record<string, unknown>;
+  return { ...base, x402: { ...x402, payTo: RESOURCE } };
 }
 
 describe("publish gate drives the REAL LiveHttpsProber offline (injected fetcher + authoritative validateAgentCard)", () => {

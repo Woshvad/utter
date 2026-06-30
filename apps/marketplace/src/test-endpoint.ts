@@ -171,8 +171,19 @@ function eqAddr(a: string, b: string): boolean {
  *     poisoned non-numeric cap yields a clean rejection, never a raw SyntaxError
  * A card that fails any check throws and NEVER pays. The EXISTING (trusting)
  * readCardInputs stays UNCHANGED for the in-process runTestEndpoint proof.
+ *
+ * H4: when an `expectedResourceId` is supplied (the resource the caller asked to pay),
+ * the card's x402.payTo is BOUND to it (case-insensitive bytes32 compare), mirroring the
+ * buyer-sdk discover() fix. validateAgentCard + the bytes32 shape check only prove payTo
+ * is well-formed; a poisoned card for a desirable endpoint could carry a valid bytes32
+ * payTo pointing at an ATTACKER resource split, so binding it to the intended resourceId
+ * refuses to pay before any signature is produced. With no expectedResourceId the resolved
+ * payTo is returned to the caller for confirmation (no independent id to bind against).
  */
-function readCardInputsStrict(card: Record<string, unknown>): CardPayInputs {
+function readCardInputsStrict(
+  card: Record<string, unknown>,
+  expectedResourceId?: Hex,
+): CardPayInputs {
   // (1) HARD GATE - validate BEFORE trusting. An invalid/poisoned card throws here
   // and NO pay input below is read (a poisoned card never pays).
   const check = validateAgentCard(card);
@@ -230,6 +241,18 @@ function readCardInputsStrict(card: Record<string, unknown>): CardPayInputs {
   }
   if (typeof payTo !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(payTo)) {
     throw new Error("liveTestEndpoint: card payTo is not a bytes32 resourceId (refusing to pay)");
+  }
+
+  // (4) H4: BIND payTo to the requested resourceId when the caller named one. A
+  // structurally valid bytes32 payTo can still point at an ATTACKER resource split; if
+  // the caller asked to pay a specific resourceId we refuse unless the card's payTo
+  // equals it (case-insensitive). With no expectedResourceId there is no independent id
+  // to bind against, so the resolved payTo is returned for the caller to confirm.
+  if (expectedResourceId !== undefined && !eqAddr(payTo, expectedResourceId)) {
+    throw new Error(
+      `liveTestEndpoint: card payTo ${payTo} does not match the requested resourceId ` +
+        `${expectedResourceId} (refusing to pay)`,
+    );
   }
 
   return {
@@ -513,6 +536,13 @@ export interface LiveTestEndpointOptions {
   cardUrl: string;
   /** The deployed resource's pay URL (the full POST target, e.g. .../call). */
   endpointUrl: string;
+  /**
+   * The on-chain resourceId the caller intends to pay (bytes32). When set, the discovered
+   * card's x402.payTo is BOUND to it (H4): a poisoned card whose payTo points at an
+   * attacker resource split is refused before any signature. Omitted -> the card is
+   * trusted by its URL and the resolved payTo is returned for the caller to confirm.
+   */
+  resourceId?: Hex;
   /** Optional override request payload sent to the resource (defaults to a benign echo body). */
   requestBody?: unknown;
   /** The env carrying the funded buyer key (read ONLY from .env.local; never logged). */
@@ -574,8 +604,9 @@ export async function liveTestEndpoint(
   }
   const card = (await res.json()) as Record<string, unknown>;
   // VALIDATE + PIN BEFORE any pay input is used (T-07-CARDPOISON). A poisoned card
-  // throws here and the buyer never signs or pays.
-  const cardInputs = readCardInputsStrict(card);
+  // throws here and the buyer never signs or pays. When the caller named a resourceId the
+  // payTo is BOUND to it (H4: a mismatched recipient is refused before any signature).
+  const cardInputs = readCardInputsStrict(card, opts.resourceId);
 
   // (2) CAP + runtime decimals (Pitfall 3 - never a decimals literal in the amount
   // path). The cap value is the card's base-unit pricing.max; the runtime decimals()

@@ -347,6 +347,59 @@ describe("liveTestEndpoint (the buyer-side live pay flow, Playground-real D1)", 
     expect(debitState.debits).toBe(0);
   });
 
+  it("H4: a card whose payTo != the requested resourceId is refused and NEVER pays (no debit)", async () => {
+    const publicClient = mkChain();
+    const relayerPool = mockRelayerPool(debitState);
+    // The served card's payTo is RESOURCE; the caller asks to pay a DIFFERENT resourceId,
+    // so the payTo binding must refuse before any signature (payment-redirect guard).
+    const { fetcher } = buildDeployedResource({
+      card: buildServedCard(),
+      relayerPool,
+      publicClient,
+    });
+    const foreignResourceId = `0x${"c3".repeat(32)}` as Hex;
+
+    await expect(
+      liveTestEndpoint({
+        cardUrl: CARD_URL,
+        endpointUrl: PAY_URL,
+        resourceId: foreignResourceId,
+        env: {},
+        fetcher,
+        publicClient,
+        buyerWallet: buyerCtx.wallet,
+      }),
+    ).rejects.toThrow(/does not match the requested resourceId|refusing to pay/i);
+    // The mismatched card never paid -> no debit.
+    expect(debitState.debits).toBe(0);
+  });
+
+  it("H4: a matching requested resourceId binds and still pays (exactly one debit <= cap)", async () => {
+    const publicClient = mkChain();
+    const relayerPool = mockRelayerPool(debitState);
+    const { fetcher } = buildDeployedResource({
+      card: buildServedCard(),
+      relayerPool,
+      publicClient,
+    });
+
+    const result = await liveTestEndpoint({
+      cardUrl: CARD_URL,
+      endpointUrl: PAY_URL,
+      // The requested resourceId matches the served card's payTo -> the binding passes.
+      resourceId: RESOURCE,
+      env: {},
+      fetcher,
+      publicClient,
+      buyerWallet: buyerCtx.wallet,
+    });
+
+    expect(result.paid).toBe(true);
+    expect(debitState.debits).toBe(1);
+    expect(result.debitAmount > 0n).toBe(true);
+    expect(result.debitAmount <= result.cap).toBe(true);
+  });
+
   it("gating: no injected deps and no TEST_BUYER_PRIVATE_KEY -> throws before any network call", async () => {
     let networkCalls = 0;
     const spyFetcher = async (): Promise<Response> => {
