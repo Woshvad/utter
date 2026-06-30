@@ -77,10 +77,18 @@ export interface DashboardData {
   alerts: DashboardAlert[];
 }
 
+/** Case-insensitive hex address compare (addresses may differ only by checksum casing). */
+function sameAddress(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 export async function loader({ request }: LoaderFunctionArgs): Promise<DashboardData> {
   // Access gate (CR-01): the revenue dashboard is creator-only. requireCreator throws
   // redirect(/auth) or 401 before any revenue is read, so anon never sees the figures.
-  await requireCreator(request);
+  // Capture the SIWE-authenticated address so the aggregation is scoped to this creator's
+  // own resources - the dashboard must never leak another creator's revenue / calls /
+  // settlement tx hashes (H3 cross-tenant scoping).
+  const creator = await requireCreator(request);
 
   const adapter = selectAdapter(process.env);
 
@@ -93,7 +101,7 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
   const resourceParam = url.searchParams.get("resource") ?? undefined;
   const isBytes32 = (v: string | undefined): v is string =>
     typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
-  const resourceId = isBytes32(resourceParam)
+  const requestedResourceId = isBytes32(resourceParam)
     ? resourceParam
     : // fall back to the fixture/canonical resource id (canonical bytes32 shape)
       "0x00000000000000000000000000000000000000000000000000000000000000a1";
@@ -107,43 +115,85 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Dashboard
   let rows: ResourceRow[];
   let settles: RevenueReceipt[];
   try {
-    // Read-through aggregation: the single-resource summary (calls/gross/creator+platform
-    // /refunds + receipts) backs the settlements disclosure. The split is the projected
-    // aggregate, never recomputed here.
-    revenue = await adapter.getRevenue(resourceId);
-
-    // Per-resource rows: join each listed card with its read-through revenue. Calls and
-    // revenue are the projected getRevenue figures; uptime/bond/active come from the card.
-    // Collect each card's receipts alongside the row so the account-wide settles ledger
-    // (the PayoutHistoryPanel "in" side) reuses the SAME getRevenue read - no re-derivation.
-    const cards = await adapter.listMarketplace({});
-    const rowResults = await Promise.all(
-      cards.map(async (card) => {
-        const rev = await adapter.getRevenue(card.resourceId);
-        return {
-          row: {
-            resourceId: card.resourceId,
-            slug: card.slug,
-            calls: rev.calls,
-            // The projected creator share, never recomputed.
-            revenue: rev.creatorShare,
-            uptime: card.uptime,
-            bond: card.bond,
-            active: card.active,
-          },
-          receipts: rev.receipts,
-        };
+    // Tenant scoping (H3): list every card THROUGH the adapter, then resolve each card's
+    // owner via getResourceDetail (the only carrier of `creator`, mirroring
+    // creators.$address.tsx) and keep only the cards owned by the authed creator. The
+    // aggregation below runs over OWNED cards only, so no other creator's revenue, calls,
+    // or settlement receipts can reach this dashboard.
+    const allCards = await adapter.listMarketplace({});
+    const ownedFlags = await Promise.all(
+      allCards.map(async (card) => {
+        const detail = await adapter.getResourceDetail(card.resourceId);
+        return sameAddress(detail.creator, creator);
       }),
     );
-    rows = rowResults.map((r) => r.row);
+    const cards = allCards.filter((_card, i) => ownedFlags[i]);
 
-    // Account-wide settles ledger, deduped by tx so the primary `revenue` resource (which
-    // also appears in `cards`) is not double-listed. Built inside the same try so a
-    // facilitator failure still surfaces the branded 503 (no degraded fake rows).
-    const settleMap = new Map<string, RevenueReceipt>();
-    for (const rc of revenue.receipts) settleMap.set(rc.tx, rc);
-    for (const rr of rowResults) for (const rc of rr.receipts) settleMap.set(rc.tx, rc);
-    settles = [...settleMap.values()];
+    // The single-resource settlements disclosure reads ?resource= ONLY when the caller
+    // actually owns it. A creator who owns no resources (cards empty, the normal state for
+    // a freshly signed-in account) must NEVER cause a getRevenue read of an unowned id;
+    // otherwise ?resource=<victim> would leak another creator's revenue + settlement
+    // receipts (H3). So with no owned resource we return a zero summary and read NOTHING;
+    // the requested id can reach getRevenue only when it is owned.
+    if (cards.length === 0) {
+      revenue = {
+        resourceId:
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+        calls: 0,
+        gross: 0n,
+        creatorShare: 0n,
+        platformShare: 0n,
+        refunds: 0n,
+        receipts: [],
+      };
+      rows = [];
+      settles = [];
+    } else {
+      const ownsRequested = cards.some((c) =>
+        sameAddress(c.resourceId, requestedResourceId),
+      );
+      // cards is non-empty here (the length === 0 branch set zero values above), so the
+      // first owned card is a safe fallback. The requested id reaches getRevenue ONLY when
+      // the caller owns it; an unowned ?resource= is never read.
+      const resourceId = ownsRequested ? requestedResourceId : cards[0]!.resourceId;
+
+      // Read-through aggregation: the single-resource summary (calls/gross/creator+platform
+      // /refunds + receipts) backs the settlements disclosure. The split is the projected
+      // aggregate, never recomputed here.
+      revenue = await adapter.getRevenue(resourceId);
+
+      // Per-resource rows: join each OWNED card with its read-through revenue. Calls and
+      // revenue are the projected getRevenue figures; uptime/bond/active come from the card.
+      // Collect each card's receipts alongside the row so the account-wide settles ledger
+      // (the PayoutHistoryPanel "in" side) reuses the SAME getRevenue read - no re-derivation.
+      const rowResults = await Promise.all(
+        cards.map(async (card) => {
+          const rev = await adapter.getRevenue(card.resourceId);
+          return {
+            row: {
+              resourceId: card.resourceId,
+              slug: card.slug,
+              calls: rev.calls,
+              // The projected creator share, never recomputed.
+              revenue: rev.creatorShare,
+              uptime: card.uptime,
+              bond: card.bond,
+              active: card.active,
+            },
+            receipts: rev.receipts,
+          };
+        }),
+      );
+      rows = rowResults.map((r) => r.row);
+
+      // Account-wide settles ledger, deduped by tx so the primary `revenue` resource (which
+      // also appears in `cards`) is not double-listed. Built inside the same try so a
+      // facilitator failure still surfaces the branded 503 (no degraded fake rows).
+      const settleMap = new Map<string, RevenueReceipt>();
+      for (const rc of revenue.receipts) settleMap.set(rc.tx, rc);
+      for (const rr of rowResults) for (const rc of rr.receipts) settleMap.set(rc.tx, rc);
+      settles = [...settleMap.values()];
+    }
   } catch (err) {
     // Re-throw an already-Response unchanged (e.g. a thrown redirect/status); otherwise
     // surface a branded 503 so the page shows the status page, not the crash screen.
