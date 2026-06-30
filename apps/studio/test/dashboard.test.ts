@@ -258,6 +258,58 @@ describe("dashboard loader (aggregates + per-resource rows)", () => {
     revenueSpy.mockRestore();
   });
 
+  it("a creator who owns ZERO resources never reads an unowned ?resource= (no cross-tenant leak)", async () => {
+    // Empty owned set is the normal state for a freshly signed-in account. With no owned
+    // resource the loader must NOT fall back to the attacker-supplied ?resource=<victim>
+    // and read it: that was the residual H3 leak. It must return a zero summary and read
+    // nothing for an unowned id.
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const { FIXTURE_RESOURCE_ID, FIXTURE_RESOURCE_DETAIL } = await import("../app/fixtures/index");
+    const OTHER = "0x2222222222222222222222222222222222222222";
+    // The victim is a real fixture resource (with receipts) that the authed CREATOR does
+    // not own; every listed card is owned by OTHER, so CREATOR owns nothing.
+    const victim = FIXTURE_RESOURCE_ID;
+    const detailSpy = vi
+      .spyOn(
+        Object.getPrototypeOf(adapter) as { getResourceDetail: (id: string) => unknown },
+        "getResourceDetail",
+      )
+      .mockImplementation(async (id: string) => ({
+        ...FIXTURE_RESOURCE_DETAIL,
+        resourceId: id,
+        creator: OTHER,
+      }));
+    const revenueSpy = vi.spyOn(
+      Object.getPrototypeOf(adapter) as { getRevenue: (id: string) => unknown },
+      "getRevenue",
+    );
+
+    const { loader } = await import("../app/routes/dashboard");
+    const data = await loader({
+      params: {},
+      request: await authedGet(`http://x/dashboard?resource=${victim}`),
+      context: {},
+    } as never);
+
+    // getRevenue was NEVER called with the unowned victim id (in fact not called at all)
+    for (const call of revenueSpy.mock.calls) {
+      expect(call[0]).not.toBe(victim);
+    }
+    // the loader returned a zero summary, not the victim's data
+    expect(data.revenue.resourceId).toBe(
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    expect(data.revenue.calls).toBe(0);
+    expect(data.revenue.receipts.length).toBe(0);
+    expect(data.rows.length).toBe(0);
+    expect(data.settles.length).toBe(0);
+    expect(data.totals.liveApis).toBe(0);
+
+    detailSpy.mockRestore();
+    revenueSpy.mockRestore();
+  });
+
   it("aggregates an account-wide settles ledger deduped by tx (reusing the getRevenue receipts)", async () => {
     const { loader } = await import("../app/routes/dashboard");
     const data = await loader({
