@@ -177,6 +177,87 @@ describe("dashboard loader (aggregates + per-resource rows)", () => {
     expect(data.totals.strikes).toBe(data.alerts.length);
   });
 
+  it("aggregates ONLY the authed creator's owned resources (H3 cross-tenant scoping)", async () => {
+    // The fixture marketplace lists two cards; getResourceDetail normally reports both as
+    // owned by CREATOR. Stub getResourceDetail so the SECOND card is owned by a different
+    // creator, then assert the loader's rows/totals/settles never include it - a creator
+    // must never see another creator's revenue, calls, or settlement receipts.
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const { FIXTURE_RESOURCE_ID, FIXTURE_RESOURCE_ID_2, FIXTURE_RESOURCE_DETAIL } = await import(
+      "../app/fixtures/index"
+    );
+    const OTHER = "0x2222222222222222222222222222222222222222";
+    const detailSpy = vi
+      .spyOn(
+        Object.getPrototypeOf(adapter) as { getResourceDetail: (id: string) => unknown },
+        "getResourceDetail",
+      )
+      .mockImplementation(async (id: string) => {
+        if (id === FIXTURE_RESOURCE_ID_2) {
+          return { ...FIXTURE_RESOURCE_DETAIL, resourceId: FIXTURE_RESOURCE_ID_2, creator: OTHER };
+        }
+        return { ...FIXTURE_RESOURCE_DETAIL };
+      });
+
+    const { loader } = await import("../app/routes/dashboard");
+    const data = await loader({
+      params: {},
+      request: await authedGet("http://x/dashboard"),
+      context: {},
+    } as never);
+
+    // exactly one row (the owned card); the non-owned second card is excluded
+    expect(data.rows.length).toBe(1);
+    expect(data.rows[0]!.resourceId).toBe(FIXTURE_RESOURCE_ID);
+    // the non-owned resource never appears in any row
+    for (const row of data.rows) {
+      expect(row.resourceId).not.toBe(FIXTURE_RESOURCE_ID_2);
+    }
+    // live-apis count reflects only the owned rows (no platform-wide leak)
+    expect(data.totals.liveApis).toBe(1);
+
+    detailSpy.mockRestore();
+  });
+
+  it("a ?resource= the caller does not own falls back to an owned resource (no cross-tenant read)", async () => {
+    // The requested resource is bytes32-shaped but owned by ANOTHER creator. The loader
+    // must NOT read its receipts; it falls back to the caller's own canonical resource.
+    const selectMod = await import("../app/adapter/select");
+    const adapter = selectMod.selectAdapter(process.env);
+    const { FIXTURE_RESOURCE_ID, FIXTURE_RESOURCE_DETAIL } = await import("../app/fixtures/index");
+    const OTHER = "0x2222222222222222222222222222222222222222";
+    const notOwned =
+      "0x00000000000000000000000000000000000000000000000000000000000000ff";
+    const detailSpy = vi
+      .spyOn(
+        Object.getPrototypeOf(adapter) as { getResourceDetail: (id: string) => unknown },
+        "getResourceDetail",
+      )
+      .mockImplementation(async () => ({ ...FIXTURE_RESOURCE_DETAIL }));
+    const revenueSpy = vi.spyOn(
+      Object.getPrototypeOf(adapter) as { getRevenue: (id: string) => unknown },
+      "getRevenue",
+    );
+
+    const { loader } = await import("../app/routes/dashboard");
+    const data = await loader({
+      params: {},
+      request: await authedGet(`http://x/dashboard?resource=${notOwned}`),
+      context: {},
+    } as never);
+
+    // the single-resource summary was NEVER read for the unowned id
+    for (const call of revenueSpy.mock.calls) {
+      expect(call[0]).not.toBe(notOwned);
+    }
+    // it fell back to an owned (canonical) resource
+    expect(data.revenue.resourceId).toBe(FIXTURE_RESOURCE_ID);
+
+    detailSpy.mockRestore();
+    revenueSpy.mockRestore();
+  });
+
   it("aggregates an account-wide settles ledger deduped by tx (reusing the getRevenue receipts)", async () => {
     const { loader } = await import("../app/routes/dashboard");
     const data = await loader({
