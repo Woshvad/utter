@@ -27,6 +27,7 @@ export {
   type PayoutResult,
   type PayoutRouterDeps,
   type DecimalsReader,
+  type SwapBounds,
 } from "./payout-router";
 
 // SCL-04: CCTP cross-chain escrow funding (burn -> attest -> mint -> credit).
@@ -35,10 +36,14 @@ export {
   MockAttestation,
   LiveCctp,
   RequiresLiveCctp,
+  InMemoryNonceStore,
+  ShapeAttestationVerifier,
   type Attestation,
   type AttestationSource,
   type CctpChainWriter,
   type EscrowCreditStore,
   type FundResult,
   type CctpFunderDeps,
+  type NonceStore,
+  type AttestationVerifier,
 } from "./cctp-funder";

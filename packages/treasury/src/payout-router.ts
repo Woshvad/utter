@@ -30,6 +30,30 @@ export interface DecimalsReader {
   decimals(token: Address): Promise<number>;
 }
 
+/** Basis-point denominator for a slippage tolerance (100% = 10000 bps). */
+const BPS_DENOMINATOR = 10_000n;
+
+/**
+ * Slippage / min-out bounds for the EURC swap leg. A hostile or buggy RFQ adapter
+ * controls both the quote and the realized swap return, so the router NEVER trusts
+ * the swap output unbounded: the caller declares either an absolute floor (`minOut`)
+ * or a tolerance from the quote (`maxSlippageBps`), and the router rejects a swap
+ * whose realized amount falls below that floor. Omit both for the strict default
+ * (the realized swap must be at least the quoted outAmount, zero slippage).
+ */
+export interface SwapBounds {
+  /**
+   * The absolute minimum base-unit amount of the output asset the payee will accept.
+   * The router rejects the payout when the realized swap is below this floor.
+   */
+  readonly minOut?: bigint;
+  /**
+   * The maximum slippage from the quote, in basis points, the payee tolerates. The
+   * router rejects a realized swap below quote.outAmount * (10000 - bps) / 10000.
+   */
+  readonly maxSlippageBps?: number;
+}
+
 /**
  * Per-payee payout configuration. The `asset` lives HERE (per-payee config), not on
  * the call - this is the asset-control invariant. EURC is opt-in; absent config
@@ -83,14 +107,34 @@ export class PayoutRouter {
    *
    * @param config The per-payee config carrying the (non-caller-controlled) asset.
    * @param amount The payout amount in USDC base units.
+   * @param bounds Optional slippage / min-out bounds for the EURC swap leg. Ignored
+   *   on the USDC straight-through path (no swap happens there).
    */
-  async route(config: PayeeConfig, amount: bigint): Promise<PayoutResult> {
+  async route(config: PayeeConfig, amount: bigint, bounds?: SwapBounds): Promise<PayoutResult> {
     if (isEurc(config)) {
       // EURC path (per-payee opt-in): route the USDC amount through StableFX, then
-      // pay EURC. The EURC decimals() is read at runtime (never hardcoded).
+      // pay EURC. Both decimals() are read at runtime (never hardcoded).
+      //
+      // DECIMALS-EQUALITY ASSERTION: the incoming `amount` is in USDC base units and
+      // the swap is modeled as a base-unit-in / base-unit-out transform, which is
+      // only sound when USDC and EURC share the same decimals. Both are documented as
+      // 6dp on Arc, but we do NOT assume it: read decimals() of BOTH and refuse the
+      // payout if they differ, rather than silently mis-scaling the amount across a
+      // decimals boundary (CHAIN-03 / T-08-UNITCONFUSION).
+      const usdcDecimals = await this.deps.decimalsReader.decimals(USDC);
+      const eurcDecimals = await this.deps.decimalsReader.decimals(EURC);
+      assertEqualDecimals(usdcDecimals, eurcDecimals);
+
       const quote = await this.deps.fx.quote(USDC, EURC, amount);
       const outAmount = await this.deps.fx.swap(quote);
-      const decimals = await this.deps.decimalsReader.decimals(EURC);
+      // SLIPPAGE / MIN-OUT GATE: a hostile or buggy RFQ adapter controls both the
+      // quote and the realized swap return, so the swap output is never trusted
+      // unbounded. Reject the payout when the realized swap (1) falls below the
+      // caller's declared floor (minOut / maxSlippageBps), or (2) falls below the
+      // quoted outAmount beyond the accepted tolerance (the adapter must honor its
+      // own quote). The default tolerance is zero: realized >= quoted.
+      assertWithinSwapBounds(quote.outAmount, outAmount, bounds);
+      const decimals = eurcDecimals;
       return {
         asset: "EURC",
         token: EURC,
@@ -114,4 +158,71 @@ export class PayoutRouter {
 /** Narrow a payee config to the EURC opt-in branch (the settle() isExact() idiom). */
 function isEurc(config: PayeeConfig): boolean {
   return config.asset === "EURC";
+}
+
+/**
+ * Refuse the USDC<->EURC base-unit identity transform unless the two tokens share
+ * decimals. The swap path treats a USDC base-unit amount as the EURC base-unit input
+ * 1:1, which silently mis-scales the money if the tokens have different decimals. We
+ * never assume both are 6dp; we read decimals() of each and require equality.
+ */
+function assertEqualDecimals(usdcDecimals: number, eurcDecimals: number): void {
+  if (usdcDecimals !== eurcDecimals) {
+    throw new Error(
+      "PayoutRouter: refusing the EURC swap - USDC and EURC report different " +
+        `decimals (USDC=${usdcDecimals}, EURC=${eurcDecimals}); the base-unit ` +
+        "identity transform is only sound when the decimals are equal",
+    );
+  }
+}
+
+/**
+ * Reject a swap whose realized output is unacceptable. Two independent floors apply:
+ *
+ *   (1) The caller's declared floor. `minOut` is an absolute base-unit floor;
+ *       `maxSlippageBps` is a tolerance below the quote. When both are given the
+ *       stricter (higher) floor wins. The realized swap must be at or above it.
+ *   (2) The quote-reconciliation floor. The adapter must honor the quote it just
+ *       produced: the realized swap must be at least quote.outAmount, less the
+ *       caller-accepted slippage tolerance (zero by default).
+ *
+ * Either breach throws before the payout is returned, so a hostile/buggy RFQ adapter
+ * cannot deliver less than the payee agreed to accept.
+ *
+ * @param quotedOut The base-unit outAmount the adapter quoted.
+ * @param realizedOut The base-unit amount the swap actually returned.
+ * @param bounds The caller's optional slippage / min-out bounds.
+ */
+function assertWithinSwapBounds(
+  quotedOut: bigint,
+  realizedOut: bigint,
+  bounds?: SwapBounds,
+): void {
+  // The tolerance the caller accepts below the quote (0 bps = realized must meet the
+  // quote exactly). Reject a nonsensical bps so a caller cannot disable the gate.
+  const bps = bounds?.maxSlippageBps ?? 0;
+  if (!Number.isInteger(bps) || bps < 0 || BigInt(bps) > BPS_DENOMINATOR) {
+    throw new Error(
+      "PayoutRouter: invalid maxSlippageBps (must be an integer in [0, 10000])",
+    );
+  }
+
+  // (2) Quote-reconciliation floor: the adapter must honor its own quote within the
+  // accepted tolerance. floor = quotedOut * (10000 - bps) / 10000.
+  const quoteFloor = (quotedOut * (BPS_DENOMINATOR - BigInt(bps))) / BPS_DENOMINATOR;
+
+  // (1) Caller's absolute floor (if any) combined with the quote floor: the realized
+  // swap must clear the strictest of every floor that applies.
+  let floor = quoteFloor;
+  if (bounds?.minOut !== undefined && bounds.minOut > floor) {
+    floor = bounds.minOut;
+  }
+
+  if (realizedOut < floor) {
+    throw new Error(
+      "PayoutRouter: refusing the payout - the realized swap output " +
+        `(${realizedOut}) is below the accepted minimum (${floor}); the StableFX ` +
+        "adapter under-delivered against the quote or the payee's min-out bound",
+    );
+  }
 }

@@ -19,6 +19,8 @@ import {
   type PayoutAsset,
   type DecimalsReader,
   type PayeeConfig,
+  type StableFxAdapter,
+  type Quote,
 } from "../src/index";
 
 // A decimals() reader that returns the value FROM a (mock) decimals() call, never a
@@ -142,14 +144,137 @@ describe("PayoutRouter (USDC default / EURC per-payee opt-in)", () => {
       fx: new MockStableFx(),
       decimalsReader: STD_DECIMALS,
     });
-    // The route() signature accepts ONLY (config, amount) - there is no caller-supplied
-    // asset override argument. The asset is read off the per-payee config object, so a
-    // caller cannot pass EURC for a USDC-configured payee.
+    // The route() signature is (config, amount, bounds?) - there is no caller-supplied
+    // ASSET override argument. The asset is read off the per-payee config object, so a
+    // caller cannot pass EURC for a USDC-configured payee. The third parameter is the
+    // optional swap slippage/min-out bounds, not an asset selector: it cannot flip a
+    // USDC payee to EURC.
     const usdcPayee: PayeeConfig = { payee: payeeAddr("55"), asset: "USDC" };
     const result = await router.route(usdcPayee, 1_000_000n);
     expect(result.asset).toBe<PayoutAsset>("USDC");
-    // route() is binary in (config, amount): no third asset arg exists to override with.
-    expect(router.route.length).toBe(2);
+    // Even passing slippage bounds (the only extra arg) keeps the asset USDC - bounds
+    // are not an asset override.
+    const stillUsdc = await router.route(usdcPayee, 1_000_000n, { minOut: 1n });
+    expect(stillUsdc.asset).toBe<PayoutAsset>("USDC");
+  });
+});
+
+/**
+ * A hostile/buggy StableFX adapter: it quotes one outAmount but its swap() returns a
+ * DIFFERENT (smaller) realized amount, modeling an RFQ adapter that under-delivers
+ * against its own quote. The router must reject this rather than pay the short amount.
+ */
+function shortfallFx(quotedOut: bigint, realizedOut: bigint): StableFxAdapter {
+  return {
+    kind: "mock",
+    async quote(from, to, amount): Promise<Quote> {
+      return { from, to, inAmount: amount, outAmount: quotedOut };
+    },
+    async swap(): Promise<bigint> {
+      return realizedOut;
+    },
+  };
+}
+
+describe("PayoutRouter slippage / min-out bound (a hostile RFQ cannot under-deliver)", () => {
+  const eurcPayee: PayeeConfig = { payee: payeeAddr("66"), asset: "EURC" };
+
+  it("rejects a swap whose realized amount is below the explicit minOut", async () => {
+    // The adapter honors its quote (realized == quoted) but the caller's absolute
+    // floor is higher: the payout must be refused.
+    const router = new PayoutRouter({
+      fx: shortfallFx(3_000_000n, 3_000_000n),
+      decimalsReader: STD_DECIMALS,
+    });
+    await expect(
+      router.route(eurcPayee, 3_000_000n, { minOut: 3_500_000n }),
+    ).rejects.toThrow(/below the accepted minimum|realized swap/i);
+  });
+
+  it("rejects a swap that under-delivers against its own quote (default zero tolerance)", async () => {
+    // The adapter quotes 3_000_000 but only returns 2_700_000 - a 10% shortfall the
+    // adapter itself controls. With no bounds (zero tolerance) the router rejects it.
+    const router = new PayoutRouter({
+      fx: shortfallFx(3_000_000n, 2_700_000n),
+      decimalsReader: STD_DECIMALS,
+    });
+    await expect(router.route(eurcPayee, 3_000_000n)).rejects.toThrow(
+      /below the accepted minimum|under-delivered against the quote/i,
+    );
+  });
+
+  it("rejects a shortfall beyond the accepted maxSlippageBps tolerance", async () => {
+    // Quote 1_000_000, realized 940_000 = 6% slippage. A 5% (500 bps) tolerance
+    // floor is 950_000, so the realized 940_000 is rejected.
+    const router = new PayoutRouter({
+      fx: shortfallFx(1_000_000n, 940_000n),
+      decimalsReader: STD_DECIMALS,
+    });
+    await expect(
+      router.route(eurcPayee, 1_000_000n, { maxSlippageBps: 500 }),
+    ).rejects.toThrow(/below the accepted minimum/i);
+  });
+
+  it("accepts a shortfall within the accepted maxSlippageBps tolerance", async () => {
+    // Quote 1_000_000, realized 960_000 = 4% slippage, inside a 5% (500 bps) tolerance.
+    const router = new PayoutRouter({
+      fx: shortfallFx(1_000_000n, 960_000n),
+      decimalsReader: STD_DECIMALS,
+    });
+    const result = await router.route(eurcPayee, 1_000_000n, { maxSlippageBps: 500 });
+    expect(result.amount).toBe(960_000n);
+    expect(result.swapped).toBe(true);
+  });
+
+  it("rejects an out-of-range maxSlippageBps (a caller cannot disable the gate)", async () => {
+    const router = new PayoutRouter({
+      fx: new MockStableFx(),
+      decimalsReader: STD_DECIMALS,
+    });
+    await expect(
+      router.route(eurcPayee, 1_000_000n, { maxSlippageBps: 10_001 }),
+    ).rejects.toThrow(/maxSlippageBps/i);
+  });
+
+  it("the USDC straight-through path is unaffected by bounds (no swap to bound)", async () => {
+    const router = new PayoutRouter({
+      fx: new MockStableFx(),
+      decimalsReader: STD_DECIMALS,
+    });
+    const usdcPayee: PayeeConfig = { payee: payeeAddr("77"), asset: "USDC" };
+    const result = await router.route(usdcPayee, 5_000_000n, { minOut: 9_999_999n });
+    expect(result.amount).toBe(5_000_000n);
+    expect(result.swapped).toBe(false);
+  });
+});
+
+describe("PayoutRouter decimals-equality assertion (no assumed 6dp on the swap path)", () => {
+  it("rejects the EURC swap when USDC and EURC report different decimals", async () => {
+    // EURC misreports 18dp while USDC is 6dp: the base-unit identity transform is
+    // unsound, so the router refuses the payout rather than silently mis-scaling.
+    const mismatched = fakeDecimalsReader({
+      [USDC.toLowerCase()]: 6,
+      [EURC.toLowerCase()]: 18,
+    });
+    const router = new PayoutRouter({
+      fx: new MockStableFx(),
+      decimalsReader: mismatched,
+    });
+    const eurcPayee: PayeeConfig = { payee: payeeAddr("88"), asset: "EURC" };
+    await expect(router.route(eurcPayee, 1_000_000n)).rejects.toThrow(
+      /different\s+decimals|decimals/i,
+    );
+  });
+
+  it("allows the EURC swap when both decimals are equal (the normal Arc case)", async () => {
+    const router = new PayoutRouter({
+      fx: new MockStableFx(),
+      decimalsReader: STD_DECIMALS,
+    });
+    const eurcPayee: PayeeConfig = { payee: payeeAddr("99"), asset: "EURC" };
+    const result = await router.route(eurcPayee, 1_000_000n);
+    expect(result.asset).toBe<PayoutAsset>("EURC");
+    expect(result.decimals).toBe(6);
   });
 });
 

@@ -18,9 +18,13 @@ import {
   MockAttestation,
   LiveCctp,
   RequiresLiveCctp,
+  InMemoryNonceStore,
+  ShapeAttestationVerifier,
   type CctpChainWriter,
   type EscrowCreditStore,
   type Attestation,
+  type AttestationSource,
+  type AttestationVerifier,
 } from "../src/index";
 
 const RECIPIENT = ("0x" + "ab".repeat(20)) as Address;
@@ -185,6 +189,103 @@ describe("CctpFunder.fund (burn -> mock-attest -> receiveMessage -> credit)", ()
     // The forged attestation never reached receiveMessage, never credited.
     expect(writer.receives).toHaveLength(0);
     expect(escrow.balances.size).toBe(0);
+  });
+});
+
+describe("CctpFunder replay-dedup (T-08-CCTPREPLAY: a replayed attestation cannot double-credit)", () => {
+  it("rejects a replayed attestation (same message nonce) and credits the escrow only once", async () => {
+    // A SHARED nonce store across two fund() calls (the production durability shape).
+    // MockAttestation always attests the SAME fixed burn message, so the second call
+    // replays the same nonce and must be rejected without a second credit.
+    const nonces = new InMemoryNonceStore();
+    const escrow = mockEscrowStore();
+    const writer1 = mockChainWriter();
+    const funder1 = new CctpFunder({
+      writer: writer1,
+      escrow,
+      attestation: new MockAttestation(),
+      nonces,
+    });
+    const amount = 4_000_000n;
+    const first = await funder1.fund(SRC_CHAIN, amount, RECIPIENT);
+    expect(first.minted).toBe(amount);
+    expect(escrow.balances.get(RECIPIENT.toLowerCase())).toBe(amount);
+
+    // Replay: a fresh funder sharing the SAME nonce store + the same attested message.
+    const writer2 = mockChainWriter();
+    const funder2 = new CctpFunder({
+      writer: writer2,
+      escrow,
+      attestation: new MockAttestation(),
+      nonces,
+    });
+    await expect(funder2.fund(SRC_CHAIN, amount, RECIPIENT)).rejects.toThrow(
+      /already consumed|replayed|T-08-CCTPREPLAY/i,
+    );
+    // The replay never minted and never credited a second time.
+    expect(writer2.receives).toHaveLength(0);
+    expect(escrow.balances.get(RECIPIENT.toLowerCase())).toBe(amount);
+  });
+
+  it("a first-seen nonce is claimed (the happy path is not blocked by the dedup)", async () => {
+    const claimed = await new InMemoryNonceStore().claim("0xdeadbeef");
+    expect(claimed).toBe(true);
+  });
+});
+
+describe("CctpFunder attestation verifier seam (live requires a real verifier)", () => {
+  /** A live attestation source that returns a well-shaped (but live-path) attestation. */
+  function liveLookingSource(): AttestationSource {
+    return {
+      kind: "live",
+      async attest(message): Promise<Attestation> {
+        return { message, signature: ("0x" + "cc".repeat(65)) as Hex };
+      },
+    };
+  }
+
+  it("refuses to mint when the source is live but only the default shape verifier is present", async () => {
+    const writer = mockChainWriter();
+    const escrow = mockEscrowStore();
+    // No verifier injected => the light ShapeAttestationVerifier default, which is
+    // rejected for a live source even though the signature is well-shaped.
+    const funder = new CctpFunder({
+      writer,
+      escrow,
+      attestation: liveLookingSource(),
+    });
+    await expect(funder.fund(SRC_CHAIN, 1_000_000n, RECIPIENT)).rejects.toThrow(
+      /requires a real.*verifier|shape check is not a signature/i,
+    );
+    expect(writer.receives).toHaveLength(0);
+    expect(escrow.balances.size).toBe(0);
+  });
+
+  it("mints on a live source when a real (kind:'live') verifier is injected", async () => {
+    const writer = mockChainWriter();
+    const escrow = mockEscrowStore();
+    const realVerifier: AttestationVerifier = {
+      kind: "live",
+      async verify() {
+        // A stub standing in for a real secp256k1 / Iris-public-key check.
+      },
+    };
+    const funder = new CctpFunder({
+      writer,
+      escrow,
+      attestation: liveLookingSource(),
+      verifier: realVerifier,
+    });
+    const result = await funder.fund(SRC_CHAIN, 1_000_000n, RECIPIENT);
+    expect(result.minted).toBe(1_000_000n);
+    expect(escrow.balances.get(RECIPIENT.toLowerCase())).toBe(1_000_000n);
+  });
+
+  it("the verifier seam still rejects a malformed attestation via the shape default", async () => {
+    const verifier = new ShapeAttestationVerifier();
+    expect(() =>
+      verifier.verify({ message: ("0x" + "11".repeat(32)) as Hex, signature: "0x" as Hex }),
+    ).toThrow(/attestation/i);
   });
 });
 
