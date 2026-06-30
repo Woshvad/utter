@@ -20,6 +20,7 @@ import {
   buildTraefikDynamicConfig,
   parseTraefikDynamicConfig,
   validateSlug,
+  RESERVED_SLUGS,
   SLUG_PATTERN,
 } from "../src/traefik-config";
 
@@ -134,5 +135,37 @@ describe("traefik-config - slug validation (M5, routing-boundary guard)", () => 
     expect(() => buildTraefikDynamicConfig({ slug: "bad.slug", domain: DOMAIN })).toThrow(
       /invalid slug/,
     );
+  });
+});
+
+describe("traefik-config - reserved-slug denylist (H2, control-plane router guard)", () => {
+  it("exports the reserved set covering the operator dynamic-file basenames", () => {
+    // The operator router files in infrastructure/traefik/dynamic are studio.yml and
+    // marketplace.yml; a creator slug matching either would overwrite that router.
+    expect(RESERVED_SLUGS.has("studio")).toBe(true);
+    expect(RESERVED_SLUGS.has("marketplace")).toBe(true);
+  });
+
+  it.each([
+    ["the operator studio router", "studio"],
+    ["the operator marketplace router", "marketplace"],
+    ["the traefik infra name", "traefik"],
+    ["the api infra name", "api"],
+    ["the app infra name", "app"],
+    ["the dashboard infra name", "dashboard"],
+    ["the ping infra name", "ping"],
+    ["the health infra name", "health"],
+  ])("rejects %s as a reserved slug", (_label, slug) => {
+    expect(() => validateSlug(slug)).toThrow(/reserved/);
+  });
+
+  it("buildTraefikDynamicConfig refuses a reserved slug (cannot clobber an operator router)", () => {
+    expect(() => buildTraefikDynamicConfig({ slug: "marketplace", domain: DOMAIN })).toThrow(
+      /reserved/,
+    );
+  });
+
+  it("still accepts a non-reserved charset-valid slug", () => {
+    expect(validateSlug("weather-bot")).toBe("weather-bot");
   });
 });

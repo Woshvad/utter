@@ -77,12 +77,39 @@ export const DEFAULT_RESOURCE_PORT = 8080;
 export const SLUG_PATTERN = /^[a-z0-9-]+$/;
 
 /**
+ * Slugs a creator may never claim. A per-resource dynamic file is written as
+ * `infrastructure/traefik/dynamic/<slug>.yml`, which is the SAME directory that
+ * holds the operator-owned router files (studio.yml, marketplace.yml). A slug that
+ * matches an operator file basename would atomically overwrite that operator router
+ * on write, and Traefik's file-provider hot-reload would then drop the operator
+ * Host() rule (a control-plane DoS via the normal create flow, H2). Rejecting these
+ * at the routing boundary means a creator-chosen slug can never clobber a control-
+ * plane router. The set covers every operator dynamic-file basename in
+ * infrastructure/traefik/dynamic ("studio", "marketplace") plus obvious infra names
+ * that must stay operator-reserved. Listed lowercase to match SLUG_PATTERN; the
+ * check is exact (the charset already forbids case/whitespace variants).
+ */
+export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
+  // Operator dynamic-file basenames in infrastructure/traefik/dynamic.
+  "studio",
+  "marketplace",
+  // Obvious infra / control-plane names kept off the creator namespace.
+  "traefik",
+  "api",
+  "app",
+  "dashboard",
+  "ping",
+  "health",
+]);
+
+/**
  * Validate + canonicalize a resource slug at the routing boundary. Returns the
- * slug unchanged when it matches {@link SLUG_PATTERN}; throws a clear error
- * otherwise. The router/service key and the `http://<slug>:8080` loadBalancer URL
- * are all derived from this one validated token so they can never diverge.
+ * slug unchanged when it matches {@link SLUG_PATTERN} and is not a
+ * {@link RESERVED_SLUGS} name; throws a clear error otherwise. The router/service
+ * key and the `http://<slug>:8080` loadBalancer URL are all derived from this one
+ * validated token so they can never diverge.
  *
- * @throws if the slug is empty or contains anything but `[a-z0-9-]`.
+ * @throws if the slug is empty, contains anything but `[a-z0-9-]`, or is reserved.
  */
 export function validateSlug(slug: string): string {
   if (!SLUG_PATTERN.test(slug)) {
@@ -90,6 +117,13 @@ export function validateSlug(slug: string): string {
       `invalid slug ${JSON.stringify(slug)}: a resource slug must match ${SLUG_PATTERN} ` +
         "(lowercase letters, digits, and hyphens only - no dots, spaces, or uppercase), " +
         "because the slug becomes the Traefik router key and the leftmost Host() label.",
+    );
+  }
+  if (RESERVED_SLUGS.has(slug)) {
+    throw new Error(
+      `invalid slug ${JSON.stringify(slug)}: that name is reserved for an operator router ` +
+        "and cannot be claimed by a resource, because the per-resource dynamic file " +
+        "shares a directory with the operator router files and would overwrite one.",
     );
   }
   return slug;

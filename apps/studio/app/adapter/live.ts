@@ -96,16 +96,40 @@ function labelForSlug(slug: string): string {
   return `utter:resource:${slug}`;
 }
 
+/** Slugs that must never be derived from a creator prompt. These mirror the deployer's
+ *  authoritative RESERVED_SLUGS denylist (services/deployer traefik-config): a slug that
+ *  matches an operator router file basename would overwrite that control-plane router on
+ *  deploy (H2). The deployer is the authoritative boundary and rejects these outright;
+ *  this client-side set is defense-in-depth so the studio never even derives a name the
+ *  deployer would reject. Kept lowercase to match the derived-slug charset. */
+const RESERVED_DERIVED_SLUGS: ReadonlySet<string> = new Set([
+  "studio",
+  "marketplace",
+  "traefik",
+  "api",
+  "app",
+  "dashboard",
+  "ping",
+  "health",
+]);
+
 /** Derive a bounded discovery slug from the prompt: lowercase, alnum-hyphen, trimmed,
- *  collapsed, length-capped. Falls back to a stable local slug for an empty result. */
-function deriveSlug(prompt: string): string {
+ *  collapsed, length-capped. A derived slug can NEVER be empty or a reserved operator
+ *  name: an empty result falls back to a stable local slug, and a reserved result is
+ *  deterministically transformed by an "api-" prefix so it stays valid (still matches
+ *  the deployer's [a-z0-9-] charset) and deterministic (no randomness that would break
+ *  tests or the canonical resourceId derivation). The deployer's validateSlug remains
+ *  the authoritative reject; this is defense-in-depth. */
+export function deriveSlug(prompt: string): string {
   const slug = prompt
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48)
     .replace(/-+$/g, "");
-  return slug.length > 0 ? slug : "local-resource";
+  if (slug.length === 0) return "local-resource";
+  if (RESERVED_DERIVED_SLUGS.has(slug)) return `api-${slug}`;
+  return slug;
 }
 
 /** A clearly-labeled LOCAL-DEV default owner/payout address for the seeded index.
