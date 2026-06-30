@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-import { createBudgetGuard } from "../src/mcp/budget.js";
+import { createBudgetGuard, warnOnUnboundedCaps } from "../src/mcp/budget.js";
 import {
   buildDiscoveryTool,
   buildEndpointTool,
@@ -140,6 +140,67 @@ describe("createBudgetGuard (T-07-DENIALOFWALLET)", () => {
     expect(guard.reserve("t", 1000n).ok).toBe(true);
     // A released reservation committed nothing.
     expect(guard.spentForDay()).toBe(0n);
+  });
+});
+
+describe("warnOnUnboundedCaps (M2 / T-07-DENIALOFWALLET)", () => {
+  it("warns (to the injected stderr-style sink) when any cap dimension is unbounded", () => {
+    const lines: string[] = [];
+    const log = (m: string) => lines.push(m);
+    // No per-tool cap, no per-day cap, no buyer ceiling -> a single warning naming all three.
+    warnOnUnboundedCaps({}, undefined, log);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/unbounded spend cap/i);
+    expect(lines[0]).toContain("MCP_PER_TOOL_CAP_BASE_UNITS");
+    expect(lines[0]).toContain("MCP_PER_DAY_CAP_BASE_UNITS");
+    expect(lines[0]).toContain("BUYER_MAX_CAP_TOKENS");
+  });
+
+  it("names ONLY the unbounded dimension when some caps are set", () => {
+    const lines: string[] = [];
+    const log = (m: string) => lines.push(m);
+    // per-tool + per-day set, buyer ceiling unset -> warn only about the buyer ceiling.
+    warnOnUnboundedCaps(
+      { perToolCapBaseUnits: 1000n, perDayCapBaseUnits: 5000n },
+      undefined,
+      log,
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("BUYER_MAX_CAP_TOKENS");
+    expect(lines[0]).not.toContain("MCP_PER_TOOL_CAP_BASE_UNITS");
+    expect(lines[0]).not.toContain("MCP_PER_DAY_CAP_BASE_UNITS");
+  });
+
+  it("does NOT warn when every cap dimension is bounded", () => {
+    const lines: string[] = [];
+    const log = (m: string) => lines.push(m);
+    warnOnUnboundedCaps(
+      { perToolCapBaseUnits: 1000n, perDayCapBaseUnits: 5000n },
+      10n,
+      log,
+    );
+    expect(lines).toHaveLength(0);
+  });
+
+  it("defaults to console.error (stderr), never stdout (Pitfall 1 / T-07-STDOUT)", () => {
+    const errLines: unknown[][] = [];
+    const outLines: unknown[][] = [];
+    const origErr = console.error;
+    const origOut = console.log;
+    console.error = (...a: unknown[]) => {
+      errLines.push(a);
+    };
+    console.log = (...a: unknown[]) => {
+      outLines.push(a);
+    };
+    try {
+      warnOnUnboundedCaps({}, undefined);
+    } finally {
+      console.error = origErr;
+      console.log = origOut;
+    }
+    expect(errLines).toHaveLength(1);
+    expect(outLines).toHaveLength(0);
   });
 });
 

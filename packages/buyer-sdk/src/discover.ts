@@ -29,6 +29,22 @@ function eqAddr(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/**
+ * Thrown when a resourceId-discovered card's payTo does not equal the resourceId the caller
+ * asked to pay (H4). A poisoned card for a desirable endpoint could otherwise route the
+ * buyer debit to an attacker resource split; binding payTo to the intended resourceId
+ * refuses to pay before any signature is produced.
+ */
+export class CardPayToMismatch extends Error {
+  constructor(intendedResourceId: string, cardPayTo: string) {
+    super(
+      `discover: card payTo ${cardPayTo} does not match the requested resourceId ` +
+        `${intendedResourceId} (refusing to pay)`,
+    );
+    this.name = "CardPayToMismatch";
+  }
+}
+
 /** A minimal fetch shape (injectable; defaults to the global fetch). */
 export type FetchLike = (
   input: string,
@@ -156,6 +172,10 @@ export async function discover(
   let card: Record<string, unknown> | null = null;
 
   if ("cardUrl" in ref) {
+    // The cardUrl path trusts the fetched card by definition: there is no independent
+    // resourceId to bind payTo against, so the resolved payTo is returned to the caller
+    // (in cardInputs) for confirmation. The escrow/asset pin + bytes32 payTo check below
+    // still apply.
     const fetcher = deps.fetcher ?? (globalThis.fetch as unknown as FetchLike);
     const url = ref.cardUrl.endsWith(CARD_PATH) ? ref.cardUrl : ref.cardUrl + CARD_PATH;
     const res = await fetcher(url, { method: "GET" });
@@ -186,5 +206,17 @@ export async function discover(
   // (3) Pay inputs come ONLY from the validated card, and readCardInputs additionally
   // PINS escrow/asset against the trusted @utter/chain constants + validates payTo and
   // the cap string (CR-01 / WR-05) - a poisoned-but-structurally-valid card throws here.
-  return { card, cardInputs: readCardInputs(card) };
+  const cardInputs = readCardInputs(card);
+
+  // (4) H4: BIND payTo to the requested resourceId. On the resourceId discovery path the
+  // caller named the exact resource it intends to pay; a poisoned card for a desirable
+  // endpoint could carry a well-formed bytes32 payTo pointing at an ATTACKER resource
+  // split. We refuse to pay unless cardInputs.payTo equals ref.resourceId (case-insensitive
+  // bytes32 compare). The cardUrl path has no independent resourceId to bind against, so it
+  // trusts the fetched card and returns the resolved payTo to the caller for confirmation.
+  if ("resourceId" in ref && !eqAddr(cardInputs.payTo, ref.resourceId)) {
+    throw new CardPayToMismatch(ref.resourceId, cardInputs.payTo);
+  }
+
+  return { card, cardInputs };
 }

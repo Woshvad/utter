@@ -30,7 +30,11 @@ import { selectBuyerTransport } from "../transport.js";
 import { createBuyerClient } from "../client.js";
 import { createDemoWiring } from "../demo.js";
 import { createMcpServerAsync } from "../mcp/server.js";
-import { createBudgetGuard, readBudgetCapsFromEnv } from "../mcp/budget.js";
+import {
+  createBudgetGuard,
+  readBudgetCapsFromEnv,
+  warnOnUnboundedCaps,
+} from "../mcp/budget.js";
 import type { CardListSource } from "../mcp/tools.js";
 import { createLiveCardSource } from "../mcp/live-discovery.js";
 
@@ -98,7 +102,9 @@ async function buildDemoServer(env: NodeJS.ProcessEnv) {
     env,
     maxCapTokens,
   });
-  const budget = createBudgetGuard(readBudgetCapsFromEnv(env));
+  const caps = readBudgetCapsFromEnv(env);
+  warnOnUnboundedCaps(caps, maxCapTokens);
+  const budget = createBudgetGuard(caps);
 
   return createMcpServerAsync({ client, cardSource: demo.cardSource, budget });
 }
@@ -133,7 +139,9 @@ async function buildLiveServer(env: NodeJS.ProcessEnv) {
     rawMaxCap && rawMaxCap.trim() !== "" ? BigInt(rawMaxCap.trim()) : undefined;
 
   const client = createBuyerClient({ transport, buyerWallet: wallet, env, maxCapTokens });
-  const budget = createBudgetGuard(readBudgetCapsFromEnv(env));
+  const caps = readBudgetCapsFromEnv(env);
+  warnOnUnboundedCaps(caps, maxCapTokens);
+  const budget = createBudgetGuard(caps);
 
   return createMcpServerAsync({ client, cardSource: liveCardSource(env), budget });
 }
