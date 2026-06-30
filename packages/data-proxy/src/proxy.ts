@@ -334,11 +334,21 @@ export function createDataProxy(opts: DataProxyOpts) {
     // record for the optional `dispatcher` key (the lib's RequestInit.dispatcher is
     // the concrete undici Dispatcher, which this module deliberately does not type
     // against) and passed through to the fetch seam.
+    // H1: never auto-follow a redirect. Without this, a 3xx from an allowlisted
+    // upstream is followed with fresh DNS to the Location target, bypassing every
+    // guard above (allowlist, block-set, host-equality, resolve-and-recheck, the
+    // M7 socket pin) because those run only on the first hop, and the injected
+    // upstream bearer rides along to an attacker-chosen host (cloud metadata,
+    // loopback, RFC1918). With "manual", fetch returns the 3xx itself; the relay
+    // below passes that status and body straight back to the caller. To reach a
+    // redirect target the untrusted caller must re-request through /proxy, which
+    // re-runs the full allowlist on the new host.
     const forwardInit: Record<string, unknown> = {
       method,
       headers: outHeaders,
       body,
       signal: ac.signal,
+      redirect: "manual",
     };
     if (pinDispatcher !== undefined) forwardInit.dispatcher = pinDispatcher;
 
