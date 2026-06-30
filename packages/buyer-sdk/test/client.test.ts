@@ -323,6 +323,41 @@ describe("createBuyerClient.pay (B: the client surface drives the same loop)", (
     expect(debitState.debits).toBe(0);
   });
 
+  // H4: a {resourceId}-discovered card whose payTo is a WELL-FORMED bytes32 but does NOT
+  // equal the requested resourceId must be rejected before any sign/debit. A poisoned card
+  // for a desirable endpoint could otherwise route the buyer debit to an attacker resource
+  // split. The signed DebitAuthorization's resourceId comes from cardInputs.payTo, so the
+  // bind is what keeps the debit on the resource the caller named.
+  it("a card whose payTo != the requested resourceId is rejected BEFORE signing (H4)", async () => {
+    const base = buildServedCard();
+    // A valid bytes32 payTo pointing at an ATTACKER resource, not the requested RESOURCE.
+    const attackerResource: Hex = `0x${"99".repeat(32)}`;
+    const poisoned = {
+      ...base,
+      x402: { ...(base.x402 as Record<string, unknown>), payTo: attackerResource },
+    };
+    const client = makeClient(poisoned);
+    await expect(client.pay({ resource: { resourceId: RESOURCE } })).rejects.toThrow(
+      /does not match the requested resourceId|refusing to pay/i,
+    );
+    expect(debitState.debits).toBe(0);
+  });
+
+  // H4: the bind is case-insensitive (bytes32 hex is not case-significant) - a matching
+  // payTo in a different hex case still pays, so the fix does not break legitimate cards.
+  it("a card whose payTo matches the resourceId in a DIFFERENT hex case still pays (H4)", async () => {
+    const base = buildServedCard();
+    const upper = (RESOURCE.slice(0, 2) + RESOURCE.slice(2).toUpperCase()) as Hex;
+    const valid = {
+      ...base,
+      x402: { ...(base.x402 as Record<string, unknown>), payTo: upper },
+    };
+    const client = makeClient(valid);
+    const result = await client.pay({ resource: { resourceId: RESOURCE }, body: { text: "hi" } });
+    expect(result.paid).toBe(true);
+    expect(debitState.debits).toBe(1);
+  });
+
   // WR-05: a non-numeric pricing.max yields a CLEAN typed rejection, never a raw SyntaxError.
   it("a NON-NUMERIC pricing.max is a clean fail-closed rejection, never a raw BigInt throw (WR-05)", async () => {
     const base = buildServedCard();

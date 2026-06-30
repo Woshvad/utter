@@ -201,6 +201,40 @@ export function createBudgetGuard(caps: BudgetCaps): BudgetGuard {
 }
 
 /**
+ * M2 (denial-of-wallet): warn ONCE to STDERR when any spend-cap dimension is unbounded. An
+ * unbounded cap lets a hostile card's advertised pricing.max become the only per-call bound
+ * (which amplifies a payTo-binding bypass), so we name each unset dimension and the env var
+ * that bounds it. The warning goes to STDERR (console.error) only - NEVER stdout, which
+ * carries the JSON-RPC stdio frames (Pitfall 1 / T-07-STDOUT). This only warns; it does NOT
+ * change any default value. The buyer per-call ceiling is config the bin reads separately
+ * (BUYER_MAX_CAP_TOKENS), so it is passed in rather than read from BudgetCaps.
+ */
+export function warnOnUnboundedCaps(
+  caps: BudgetCaps,
+  buyerCeilingTokens: bigint | undefined,
+  log: (msg: string) => void = console.error,
+): void {
+  const unbounded: string[] = [];
+  if (caps.perToolCapBaseUnits === undefined) {
+    unbounded.push("per-tool (set MCP_PER_TOOL_CAP_BASE_UNITS)");
+  }
+  if (caps.perDayCapBaseUnits === undefined) {
+    unbounded.push("per-day (set MCP_PER_DAY_CAP_BASE_UNITS)");
+  }
+  if (buyerCeilingTokens === undefined) {
+    unbounded.push("buyer per-call ceiling (set BUYER_MAX_CAP_TOKENS)");
+  }
+  if (unbounded.length > 0) {
+    log(
+      "utter-buyer-mcp: WARNING unbounded spend cap(s): " +
+        unbounded.join(", ") +
+        ". With no cap, a hostile card's advertised pricing.max is the only per-call bound " +
+        "(denial-of-wallet). The on-chain signed cap still applies per call.",
+    );
+  }
+}
+
+/**
  * Read the budget caps from env (`.env.local` config). A missing/blank var leaves that
  * dimension UNBOUNDED. Values are base-unit bigints (no decimals scaling here).
  */
