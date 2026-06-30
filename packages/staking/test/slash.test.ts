@@ -1,11 +1,11 @@
-// Slash trigger tests (STK-02). triggerSlash consumes a BondSlashReview (from the
-// ai-scorer 5-strike reducer) and drives TWO writes through the injected admin
-// walletClient:
-//   1. ResourceRegistry.slashAuthorization (ADVISORY indexer signal, Pitfall 7)
-//   2. StakingVault.slash with the ADMIN-supplied amount (the REAL spend)
-// LOAD-BEARING: the two contracts share NO on-chain state. The trigger must NOT read
-// back / reconcile the registry authorization before slashing - the admin amount is
-// authoritative. The spy asserts the call ORDER and that slash uses the admin amount.
+// Slash driver tests (STK-02). The slash is COUPLED across the registry and the
+// vault on chain: recordSlashAuthorization records a single-use PendingSlash with a
+// 1-day dispute window, and StakingVault.slash (driven by executeMaturedSlash) only
+// lands once the window elapses and the amount matches, because the vault calls
+// registry.consumeSlashAuthorization first. The driver is therefore two steps:
+//   1. recordSlashAuthorization: registry.slashAuthorization (starts the window).
+//   2. executeMaturedSlash: reads getPendingSlash FIRST and only broadcasts the
+//      vault slash when matured + matching; otherwise it does NOT broadcast.
 import { describe, it, expect, vi } from "vitest";
 import {
   STAKING_VAULT,
@@ -14,7 +14,7 @@ import {
   registryAbi,
 } from "@utter/chain";
 import type { BondSlashReview } from "@utter/ai-scorer";
-import { triggerSlash } from "../src/slash";
+import { recordSlashAuthorization, executeMaturedSlash } from "../src/slash";
 
 const RESOURCE = `0x${"cd".repeat(32)}` as `0x${string}`;
 
@@ -44,115 +44,77 @@ function mockAdmin() {
 }
 
 /**
- * A mock publicClient that acks the receipt wait and answers the WR-04 pre-flight
- * bond read with `bond` (default 10 USDC, well above the test slash). The pre-flight
- * read is the ONLY permitted read and happens BEFORE any write; no reconcile read
- * occurs between the two writes (the call-order tests assert the write sequence).
+ * A mock publicClient that acks the receipt wait, answers the WR-04 pre-flight bond
+ * read with `bond`, and answers getPendingSlash with the supplied pending tuple.
  */
-function mockPublicClient(bond = 10_000_000n) {
+function mockPublicClient(opts: {
+  bond?: bigint;
+  pending?: readonly [bigint, bigint];
+} = {}) {
+  const bond = opts.bond ?? 10_000_000n;
+  const pending = opts.pending ?? ([0n, 0n] as const);
   const waitForTransactionReceipt = vi.fn(async (_a: unknown) => ({ status: "success" }));
   const readContract = vi.fn(async (a: { functionName: string }) => {
     if (a.functionName === "bonds") return bond;
-    throw new Error("triggerSlash must NOT read to reconcile the slash amount");
+    if (a.functionName === "getPendingSlash") return pending;
+    throw new Error(`unexpected read: ${a.functionName}`);
   });
   return { client: { waitForTransactionReceipt, readContract } as never, readContract };
 }
 
-describe("triggerSlash (STK-02)", () => {
-  const AMOUNT = 1_000_000n; // base units, supplied by the admin/review
+describe("recordSlashAuthorization (STK-02 step 1)", () => {
+  const AMOUNT = 1_000_000n;
 
-  it("emits slashAuthorization THEN slash (advisory before the real spend)", async () => {
+  it("records the registry slashAuthorization (no vault write)", async () => {
     const admin = mockAdmin();
     const pub = mockPublicClient();
-    await triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
+    const result = await recordSlashAuthorization(
+      { admin: admin.client, publicClient: pub.client },
+      review(),
+      AMOUNT,
+    );
 
-    expect(admin.calls).toHaveLength(2);
-    // Step 1: advisory indexer signal on the registry.
+    expect(admin.calls).toHaveLength(1);
     expect(admin.calls[0]).toMatchObject({
       address: RESOURCE_REGISTRY,
       functionName: "slashAuthorization",
     });
-    // Step 2: the real spend on the vault.
-    expect(admin.calls[1]).toMatchObject({
-      address: STAKING_VAULT,
-      functionName: "slash",
-    });
-  });
-
-  it("drives StakingVault.slash with the ADMIN amount (not a registry-read amount)", async () => {
-    const admin = mockAdmin();
-    const pub = mockPublicClient();
-    await triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
-
-    const slashCall = admin.calls[1]!;
-    expect(slashCall.args).toEqual([RESOURCE, AMOUNT, "5 consecutive failing probes"]);
-    // The advisory call carries the SAME admin amount (consistent values).
     expect(admin.calls[0]!.args).toEqual([RESOURCE, AMOUNT, "5 consecutive failing probes"]);
+    expect(result.slashAuthorizationTx).toMatch(/^0x[0-9a-f]+$/);
   });
 
-  it("encodes via stakingVaultAbi / registryAbi", async () => {
+  it("encodes via registryAbi", async () => {
     const admin = mockAdmin();
     const pub = mockPublicClient();
-    await triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
-
-    const authArg = admin.writeContract.mock.calls[0]![0] as unknown as { abi: unknown };
-    const slashArg = admin.writeContract.mock.calls[1]![0] as unknown as { abi: unknown };
-    expect(authArg.abi).toBe(registryAbi);
-    expect(slashArg.abi).toBe(stakingVaultAbi);
+    await recordSlashAuthorization({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
+    const arg = admin.writeContract.mock.calls[0]![0] as unknown as { abi: unknown };
+    expect(arg.abi).toBe(registryAbi);
   });
 
-  it("does NOT reconcile against any on-chain authorization between the two writes", async () => {
+  it("WR-04: refuses an over-bond authorization BEFORE any write", async () => {
     const admin = mockAdmin();
-    const pub = mockPublicClient();
-    await triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
-    // The ONLY read is the WR-04 pre-flight bond read (functionName "bonds"), and it
-    // happens BEFORE any write - never a reconcile read between the two writes. The
-    // mock throws on any non-"bonds" read, so reaching here proves no reconcile read.
-    for (const call of pub.readContract.mock.calls) {
-      expect((call[0] as { functionName: string }).functionName).toBe("bonds");
-    }
-  });
-
-  it("WR-04: refuses an over-bond slash BEFORE any write (no dangling advisory)", async () => {
-    const admin = mockAdmin();
-    // Bond is 1 USDC but the admin amount is 1.5 USDC -> the slash would revert
-    // on-chain (SlashExceedsBond) AFTER the advisory is mined. The pre-flight catches
-    // it before EITHER write, so no advisory authorization is ever emitted.
-    const pub = mockPublicClient(1_000_000n);
+    const pub = mockPublicClient({ bond: 1_000_000n });
     await expect(
-      triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), 1_500_000n),
+      recordSlashAuthorization({ admin: admin.client, publicClient: pub.client }, review(), 1_500_000n),
     ).rejects.toThrow(/exceeds current bond|would revert/i);
     expect(admin.writeContract).not.toHaveBeenCalled();
-    // The pre-flight read happened before the refusal.
     expect(pub.readContract).toHaveBeenCalledWith(
       expect.objectContaining({ functionName: "bonds", args: [RESOURCE] }),
     );
   });
 
-  it("WR-04: allows a slash with amount equal to the current bond", async () => {
+  it("allows an authorization with amount equal to the current bond", async () => {
     const admin = mockAdmin();
-    const pub = mockPublicClient(AMOUNT); // bond exactly equals the slash amount
-    await triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
-    expect(admin.calls).toHaveLength(2);
+    const pub = mockPublicClient({ bond: AMOUNT });
+    await recordSlashAuthorization({ admin: admin.client, publicClient: pub.client }, review(), AMOUNT);
+    expect(admin.calls).toHaveLength(1);
   });
 
-  it("returns the two tx hashes for the indexer / operator audit", async () => {
-    const admin = mockAdmin();
-    const pub = mockPublicClient();
-    const result = await triggerSlash(
-      { admin: admin.client, publicClient: pub.client },
-      review(),
-      AMOUNT,
-    );
-    expect(result.slashAuthorizationTx).toMatch(/^0x[0-9a-f]+$/);
-    expect(result.slashTx).toMatch(/^0x[0-9a-f]+$/);
-  });
-
-  it("refuses a non-positive admin amount before any write (defends the real spend)", async () => {
+  it("refuses a non-positive amount before any write", async () => {
     const admin = mockAdmin();
     const pub = mockPublicClient();
     await expect(
-      triggerSlash({ admin: admin.client, publicClient: pub.client }, review(), 0n),
+      recordSlashAuthorization({ admin: admin.client, publicClient: pub.client }, review(), 0n),
     ).rejects.toThrow();
     expect(admin.writeContract).not.toHaveBeenCalled();
   });
@@ -160,14 +122,89 @@ describe("triggerSlash (STK-02)", () => {
   it("only fires from a STRIKE_LIMIT review (a sub-limit review is rejected)", async () => {
     const admin = mockAdmin();
     const pub = mockPublicClient();
-    // A review that did not reach the 5-strike limit must not drive a slash.
     await expect(
-      triggerSlash(
+      recordSlashAuthorization(
         { admin: admin.client, publicClient: pub.client },
         review({ consecutiveFailures: 3 }),
         AMOUNT,
       ),
     ).rejects.toThrow();
+    expect(admin.writeContract).not.toHaveBeenCalled();
+  });
+});
+
+describe("executeMaturedSlash (STK-02 step 2)", () => {
+  const AMOUNT = 1_000_000n;
+  const EXECUTABLE_AT = 1_000_000n; // a unix-seconds maturity timestamp
+
+  it("does NOT broadcast when the pending slash is not yet matured", async () => {
+    const admin = mockAdmin();
+    // Window still active: now is one second before executableAt.
+    const pub = mockPublicClient({ pending: [AMOUNT, EXECUTABLE_AT] });
+    const result = await executeMaturedSlash(
+      { admin: admin.client, publicClient: pub.client },
+      review(),
+      AMOUNT,
+      EXECUTABLE_AT - 1n,
+    );
+
+    expect(result).toMatchObject({ executed: false, reason: "not-yet-matured" });
+    expect(admin.writeContract).not.toHaveBeenCalled();
+    // It read getPendingSlash to make the decision, never the vault slash.
+    expect(pub.readContract).toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "getPendingSlash", args: [RESOURCE] }),
+    );
+  });
+
+  it("broadcasts StakingVault.slash when the pending slash IS matured + matching", async () => {
+    const admin = mockAdmin();
+    const pub = mockPublicClient({ pending: [AMOUNT, EXECUTABLE_AT] });
+    const result = await executeMaturedSlash(
+      { admin: admin.client, publicClient: pub.client },
+      review(),
+      AMOUNT,
+      EXECUTABLE_AT, // now == executableAt: matured (consume requires >=)
+    );
+
+    expect(result).toMatchObject({ executed: true });
+    expect(admin.calls).toHaveLength(1);
+    expect(admin.calls[0]).toMatchObject({ address: STAKING_VAULT, functionName: "slash" });
+    expect(admin.calls[0]!.args).toEqual([RESOURCE, AMOUNT, "5 consecutive failing probes"]);
+    const arg = admin.writeContract.mock.calls[0]![0] as unknown as { abi: unknown };
+    expect(arg.abi).toBe(stakingVaultAbi);
+  });
+
+  it("does NOT broadcast when there is no pending authorization", async () => {
+    const admin = mockAdmin();
+    const pub = mockPublicClient({ pending: [0n, 0n] });
+    const result = await executeMaturedSlash(
+      { admin: admin.client, publicClient: pub.client },
+      review(),
+      AMOUNT,
+      EXECUTABLE_AT,
+    );
+    expect(result).toMatchObject({ executed: false, reason: "no-pending-authorization" });
+    expect(admin.writeContract).not.toHaveBeenCalled();
+  });
+
+  it("does NOT broadcast when the recorded amount does not match", async () => {
+    const admin = mockAdmin();
+    const pub = mockPublicClient({ pending: [AMOUNT, EXECUTABLE_AT] });
+    const result = await executeMaturedSlash(
+      { admin: admin.client, publicClient: pub.client },
+      review(),
+      AMOUNT + 1n, // caller-supplied amount differs from the recorded one
+      EXECUTABLE_AT,
+    );
+    expect(result).toMatchObject({ executed: false, reason: "amount-mismatch", pendingAmount: AMOUNT });
+    expect(admin.writeContract).not.toHaveBeenCalled();
+  });
+
+  it("requires a public client with a getPendingSlash read", async () => {
+    const admin = mockAdmin();
+    await expect(
+      executeMaturedSlash({ admin: admin.client }, review(), AMOUNT, EXECUTABLE_AT),
+    ).rejects.toThrow(/public client|readContract|required/i);
     expect(admin.writeContract).not.toHaveBeenCalled();
   });
 });

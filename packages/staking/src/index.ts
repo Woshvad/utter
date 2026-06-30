@@ -1,8 +1,10 @@
 // @utter/staking - the StakingVault bond + takedown client (STK-01/02/03). It
 // reads/writes the deployed StakingVault (bond deposit, slash into the insurance
 // pool, refund, cooldown withdraw) and the ResourceRegistry pause/slashAuthorization
-// using stakingVaultAbi + registryAbi from @utter/chain. All amounts are USDC base
-// units; no 6/1e6 literal appears in any amount-math path (Pitfall 3).
+// using stakingVaultAbi + registryAbi from @utter/chain. The slash is a two-step
+// on-chain-coupled flow: record the registry authorization, then execute the vault
+// slash once the dispute window elapses. All amounts are USDC base units; no 6/1e6
+// literal appears in any amount-math path (Pitfall 3).
 //
 // On-chain writes go through INJECTABLE clients (the facilitator settle/relayer
 // pattern) so the autonomous suite proves the logic against a MOCK chain; LIVE
@@ -19,13 +21,16 @@ export {
   type BondGate,
 } from "./gate.js";
 
-// STK-02: the slash trigger - advisory slashAuthorization + the direct admin spend.
+// STK-02: the slash driver - record the registry authorization, then execute the
+// matured vault slash once the on-chain dispute window has elapsed.
 export {
-  triggerSlash,
+  recordSlashAuthorization,
+  executeMaturedSlash,
   type AdminWriter,
   type SlashPublicClient,
   type SlashDeps,
-  type SlashResult,
+  type RecordSlashResult,
+  type ExecuteSlashResult,
 } from "./slash.js";
 
 // STK-03 + W-1: insurance refund accounting + the honest-creator withdraw passthrough.
