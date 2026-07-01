@@ -20,6 +20,8 @@
     "@utter/sandbox": "workspace:*",
     "@utter/x402-arc": "workspace:*",
     "dockerode": "5.0.0",
+    "dotenv": "17.4.2",
+    "esbuild": "0.27.7",
     "hono": "4.12.26",
     "ioredis": "5.11.1",
     "viem": "2.52.2"
@@ -27,8 +29,6 @@
   "devDependencies": {
     "@secretlint/secretlint-rule-preset-recommend": "13.0.2",
     "@types/dockerode": "4.0.1",
-    "dotenv": "17.4.2",
-    "esbuild": "0.27.7",
     "secretlint": "13.0.2"
   }
 }

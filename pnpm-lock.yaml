@@ -307,7 +307,6 @@ importers:
       '@utter/chain':
         specifier: workspace:*
         version: link:../chain
-    devDependencies:
       viem:
         specifier: 2.52.2
         version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)
@@ -391,6 +390,12 @@ importers:
       dockerode:
         specifier: 5.0.0
         version: 5.0.0
+      dotenv:
+        specifier: 17.4.2
+        version: 17.4.2
+      esbuild:
+        specifier: 0.27.7
+        version: 0.27.7
       hono:
         specifier: 4.12.26
         version: 4.12.26
@@ -407,12 +412,6 @@ importers:
       '@types/dockerode':
         specifier: 4.0.1
         version: 4.0.1
-      dotenv:
-        specifier: 17.4.2
-        version: 17.4.2
-      esbuild:
-        specifier: 0.27.7
-        version: 0.27.7
       secretlint:
         specifier: 13.0.2
         version: 13.0.2
@@ -481,6 +480,9 @@ importers:
       ioredis:
         specifier: 5.11.1
         version: 5.11.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
       viem:
         specifier: 2.52.2
         version: 2.52.2(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.4.3)

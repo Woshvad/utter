@@ -458,29 +458,31 @@ data-proxy is the only allowed peer). The autonomous suite proves the probe logi
 an injected `connectProbe`; the live half is operator-gated on the provisioned gVisor
 host exactly like `createLiveHostProbe`.
 
-### 2. H4 lifecycle loop not auto-started in the live path - LOW (Phase 3)
+### 2. H4 lifecycle loop - auto-started on the gVisor host (RESOLVED)
 
-`createReconcileLoop`, the runaway reaper, the host concurrency cap, and
-`listResourceContainers` / `reapResourceContainer` are implemented and exported, but
-NO host bootstrap starts them - `services/deployer/src/server.ts` deliberately starts
-no loop. So on the live host today, orphan-reap (T-03-19), runaway quarantine, and the
-global host concurrency cap do NOT run against live pairs.
+The Phase 3 reconcile-loop bootstrap has landed. `services/deployer/src/server.ts`
+`start()` builds the loop via `buildReconcileLoop` and calls `loop.start()` whenever
+`UTTER_SANDBOX_HOST=1` resolves a real docker handle. So on the provisioned host,
+orphan-reap (T-03-19), runaway quarantine (`DEFAULT_RUNAWAY_POLICY`), the
+stale-deploying crash-recovery quarantine, and the global host concurrency cap all run
+against live pairs every tick (`RECONCILE_INTERVAL_MS`, default 15000). Off-host
+(dev/test, `UTTER_SANDBOX_HOST` unset) `resolveDockerHandle()` returns undefined, so the
+loop is never constructed and boot stays byte-unchanged.
 
-This is NOT a containment escape: the network topology, the host nftables, the
-per-container cgroup caps (pids/mem/cpu), and the escrow gate all still hold. The
-lifecycle defenses are simply inert until the Phase 3 wiring lands - a small deployer
-daemon that constructs the loop with the pair-aware adapters. Note
-`listResourceContainers` returns BOTH the handler and the sidecar under the same
-`io.utter.resource-id` label, so that wiring MUST be pair-aware (reaping one role must
-account for its sibling).
+The wiring is pair-aware: `listResourceContainers` returns BOTH the handler and the
+sidecar under the same `io.utter.resource-id` label, and the reap accounts for the
+sibling. The loop also passes `reapOrphanNetworks: () => reapOrphanPairNetworks(docker)`
+as the per-tick pairnet GC backstop (quick 260625-mwb, FIX E): the per-container reap
+(`reapResourceContainer`) is self-sufficient - `removePairNetwork` removes the pairnet
+exactly when its last endpoint detaches, off the network's own endpoint list - so this
+GC only sweeps crash/race stragglers (a pairnet that outlived its containers because the
+process died between the container remove and the network remove). It is a safety net,
+not the primary teardown. The loop interval is unref'd so it never keeps the process
+alive, and graceful shutdown stops the loop before the store client closes.
 
-PAIRNET GC BACKSTOP (quick 260625-mwb, FIX E): when the Phase-3 reconcile-loop bootstrap
-lands it should pass `reapOrphanNetworks: () => reapOrphanPairNetworks(docker)` as the
-per-tick backstop hook. The per-container reap (`reapResourceContainer`) is now
-self-sufficient - `removePairNetwork` removes the pairnet exactly when its last endpoint
-detaches, off the network's own endpoint list - so this GC only catches crash/race
-stragglers (a pairnet that outlived its containers because the process died between the
-container remove and the network remove). It is a safety net, not the primary teardown.
+Operator note: nothing to wire by hand. Set `UTTER_SANDBOX_HOST=1` in the deployer's
+environment (PROVISION.md §3) and the loop starts itself; the boot log prints either
+`reconcile loop started, interval <ms>ms` or `reconcile loop not started (no sandbox host)`.
 
 ---
 
