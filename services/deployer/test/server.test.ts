@@ -104,6 +104,13 @@ async function post(
   });
 }
 
+/** GET /deployments with the Bearer the route now requires (public-hardening D4). */
+async function getDeployments(app: Hono): Promise<Response> {
+  return app.request("/deployments", {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+}
+
 /** A valid benign request body (handler.ts + an inline openapi). */
 function benignBody(): DeployRequest {
   return {
@@ -285,7 +292,7 @@ describe("POST /deploy persists the deployment record (Track A subtask 4)", () =
     });
 
     // Before any deploy the read-through is empty.
-    const before = await app.request("/deployments");
+    const before = await getDeployments(app);
     expect(await before.json()).toEqual([]);
 
     const res = await post(app, { bearer: SECRET, body: benignBody() });
@@ -293,7 +300,7 @@ describe("POST /deploy persists the deployment record (Track A subtask 4)", () =
     // Drain the stream so the best-effort persist (after deploy resolves) has run.
     await res.text();
 
-    const after = await app.request("/deployments");
+    const after = await getDeployments(app);
     const records = (await after.json()) as Array<{
       slug: string;
       resourceId: string;
@@ -330,7 +337,7 @@ describe("POST /deploy persists the deployment record (Track A subtask 4)", () =
     // Write-then-launch: a "deploying" record preceded the throw, then it was flipped to
     // "failed" so reconcile excludes it from desired-running and reaps any partial
     // containers. The record is present (not absent).
-    const after = await app.request("/deployments");
+    const after = await getDeployments(app);
     const records = (await after.json()) as Array<{ status: string }>;
     expect(records).toHaveLength(1);
     expect(records[0]!.status).toBe("failed");
@@ -361,7 +368,7 @@ describe("POST /deploy persists the deployment record (Track A subtask 4)", () =
     // The record existed as "deploying" while deploy ran.
     expect(statusDuringDeploy).toBe("deploying");
     // And it was flipped to "running" after deploy resolved.
-    const after = await app.request("/deployments");
+    const after = await getDeployments(app);
     const records = (await after.json()) as Array<{ status: string; deployVersion: number }>;
     expect(records).toHaveLength(1);
     expect(records[0]!.status).toBe("running");
@@ -391,7 +398,7 @@ describe("POST /deploy persists the deployment record (Track A subtask 4)", () =
     expect(fake).toHaveBeenCalledTimes(0);
 
     // The original owner's record is unchanged (still running, no new record added).
-    const after = await app.request("/deployments");
+    const after = await getDeployments(app);
     const records = (await after.json()) as Array<{ resourceId: string; status: string }>;
     expect(records).toHaveLength(1);
     expect(records[0]!.resourceId).toBe(otherResource);
