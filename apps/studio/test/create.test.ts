@@ -14,8 +14,17 @@ import {
 
 // The /create action is now gated by requireCreator (CR-01); these action tests must
 // carry a valid session cookie. A long SESSION_SECRET makes the signed cookie stable.
+// The create-gate limit knobs are raised far above what this file exercises (three
+// same-address action calls sit exactly at the default 3/60s creator burst); the gate
+// singleton reads env lazily on first action call, so beforeAll is early enough. The
+// deny paths are covered in create-limits.test.ts with low knobs.
 beforeAll(() => {
   process.env.SESSION_SECRET = "test-session-secret-which-is-long-enough-32b";
+  process.env.CREATE_BURST_GLOBAL = "10000";
+  process.env.CREATE_LIMIT_GLOBAL_PER_DAY = "10000";
+  process.env.CREATE_LIMIT_PER_IP_PER_HOUR = "10000";
+  process.env.CREATE_BURST_PER_CREATOR = "10000";
+  process.env.CREATE_LIMIT_PER_CREATOR_PER_DAY = "10000";
 });
 
 /** Commit a session for the given address and return its Cookie header value. */

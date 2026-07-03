@@ -22,9 +22,24 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { parsePositiveInt } from "../limits/fixed-window.server.js";
 
 /** The shown-once API key prefix (so a leaked token is recognizable in support). */
 const API_KEY_PREFIX = "utk_";
+
+/**
+ * Thrown by FileApiKeyStore.mintFor when a creator already holds the maximum number
+ * of keys (API_KEYS_PER_CREATOR_MAX, default 50). Keys are stored as hashes on
+ * disk, so an unbounded mint loop would grow the persisted file without limit; the
+ * keys route catches this error specifically and surfaces the message inline.
+ */
+export class ApiKeyCapError extends Error {
+  readonly code = "api_key_cap" as const;
+  constructor(cap: number) {
+    super(`api key limit reached (${cap} keys per creator); use an existing key`);
+    this.name = "ApiKeyCapError";
+  }
+}
 
 /** SHA-256 hex of a raw key - the ONLY form persisted at rest. */
 export function hashApiKey(raw: string): string {
@@ -160,9 +175,16 @@ function defaultKeyStorePath(): string {
 export class FileApiKeyStore implements ApiKeyStore {
   private readonly filePath: string;
   private readonly hashesByCreator = new Map<string, Set<string>>();
+  private readonly maxKeysPerCreator: number;
 
-  constructor(filePath: string = defaultKeyStorePath()) {
+  constructor(
+    filePath: string = defaultKeyStorePath(),
+    opts: { maxKeysPerCreator?: number } = {},
+  ) {
     this.filePath = filePath;
+    this.maxKeysPerCreator =
+      opts.maxKeysPerCreator ??
+      parsePositiveInt(process.env.API_KEYS_PER_CREATOR_MAX, 50, "API_KEYS_PER_CREATOR_MAX");
     this.load();
   }
 
@@ -217,8 +239,13 @@ export class FileApiKeyStore implements ApiKeyStore {
   }
 
   async mintFor(creator: string): Promise<{ raw: string }> {
-    const { raw, hash } = mintApiKey();
     const set = this.hashesByCreator.get(creator) ?? new Set<string>();
+    // Hard per-creator cap: reject BEFORE minting so nothing is generated or
+    // persisted for an over-cap request.
+    if (set.size >= this.maxKeysPerCreator) {
+      throw new ApiKeyCapError(this.maxKeysPerCreator);
+    }
+    const { raw, hash } = mintApiKey();
     set.add(hash); // persist the HASH only; `raw` is returned and then discarded
     this.hashesByCreator.set(creator, set);
     this.persist();

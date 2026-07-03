@@ -18,6 +18,7 @@ import { useLoaderData } from "react-router";
 import type { FilterCriteria } from "@utter/marketplace";
 import { selectAdapter } from "../adapter/select.js";
 import { tryGetRevenue } from "../adapter/revenue.js";
+import { checkBrowseLimit, memoListMarketplace } from "../limits/browse.server.js";
 import type { ResourceCardData } from "../adapter/types.js";
 import { CardGrid } from "../components/discover/CardGrid.js";
 import { CategoryChips } from "../components/discover/CategoryChips.js";
@@ -79,6 +80,10 @@ export interface DiscoverData {
  * base-unit bigint.
  */
 export async function loader({ request }: LoaderFunctionArgs): Promise<DiscoverData> {
+  // Anonymous fan-out guard (S9): the per-IP browse limit runs FIRST, before any
+  // adapter read, and throws a 429 Response on deny (error boundary; abuse-only).
+  checkBrowseLimit(request);
+
   const url = new URL(request.url);
   const sp = url.searchParams;
   const adapter = selectAdapter(process.env);
@@ -120,11 +125,13 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<DiscoverD
   if (maxBasePrice !== undefined) criteria.maxBasePrice = maxBasePrice;
 
   // Read THROUGH the adapter (filterResources). Never recompute a price/reputation/bond.
-  let cards = await adapter.listMarketplace(criteria);
+  // The 30s TTL memo (shared with the creator-profile loader) keeps anonymous hits
+  // from amplifying into marketplace-service fan-out load.
+  let cards = await memoListMarketplace(adapter, criteria);
 
   // The distinct categories present (from the FULL listing, so the chips are stable) -
   // a second unfiltered read so chips reflect the catalogue, not the filtered subset.
-  const all = await adapter.listMarketplace({});
+  const all = await memoListMarketplace(adapter, {});
   const categories = Array.from(new Set(all.map((c) => c.category))).sort();
 
   // Free-text query: a slug/category contains match, applied AFTER the read-through

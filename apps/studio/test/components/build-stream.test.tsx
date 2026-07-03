@@ -14,14 +14,19 @@ import {
   type EventSourceLike,
 } from "../../app/components/build/BuildStream";
 
-/** A fake EventSource that captures the "stage" listener so the test can dispatch a
- *  BuildEvent into the component synchronously (no real network, no real EventSource). */
+/** A fake EventSource that captures the "stage" AND "error" listeners so the test can
+ *  drive both synchronously (no real network, no real EventSource). */
 class FakeEventSource implements EventSourceLike {
   stageListener?: (ev: { data: string }) => void;
+  errorListener?: (ev: { data: string }) => void;
+  closed = false;
   addEventListener(type: string, listener: (ev: { data: string }) => void): void {
     if (type === "stage") this.stageListener = listener;
+    if (type === "error") this.errorListener = listener;
   }
-  close(): void {}
+  close(): void {
+    this.closed = true;
+  }
 }
 
 describe("BuildStream streamed error render", () => {
@@ -56,5 +61,41 @@ describe("BuildStream streamed error render", () => {
     expect(
       screen.getByText(/generate failed: bundle failed validation/i),
     ).toBeInTheDocument();
+  });
+
+  it("shows an interruption banner + retry when the stream drops BEFORE settling (429/503)", () => {
+    // EventSource surfaces the new pre-stream 429/503 admission denials as a bare
+    // `error` with no body. Without the banner the six blocks freeze at "pending"
+    // forever; the banner makes the interruption visible and offers a reconnect.
+    const es = new FakeEventSource();
+    render(
+      <BuildStream eventsUrl="/resources/0xabc/events" eventSourceFactory={() => es} />,
+    );
+    act(() => {
+      es.errorListener?.({ data: "" });
+    });
+    expect(screen.getByTestId("build-interrupted")).toBeInTheDocument();
+    expect(screen.getByTestId("build-retry")).toBeInTheDocument();
+  });
+
+  it("does NOT show the interruption banner when the stream closes AFTER settling", () => {
+    // A clean server close after Live:ok also fires `error`; that must NOT read as an
+    // interruption. Same for a settled stage error (already shown as a failed row).
+    const es = new FakeEventSource();
+    render(
+      <BuildStream eventsUrl="/resources/0xabc/events" eventSourceFactory={() => es} />,
+    );
+    act(() => {
+      // Walk to the live moment, then the server closes the stream (error fires).
+      for (const stage of ["Generate", "Deploy", "Verify", "Mint", "Publish", "Live"]) {
+        es.stageListener?.({
+          data: JSON.stringify({ stage, status: "ok", log: "" }),
+        });
+      }
+    });
+    act(() => {
+      es.errorListener?.({ data: "" });
+    });
+    expect(screen.queryByTestId("build-interrupted")).not.toBeInTheDocument();
   });
 });

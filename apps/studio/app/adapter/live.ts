@@ -30,6 +30,8 @@ import { resourceIdForLabel, type Pricing } from "@utter/x402-arc";
 import { filterResources, type IndexRecord } from "@utter/marketplace";
 import { readUsdcBalance, readEscrowBalance, readBondStatus } from "@utter/chain";
 import type { Address } from "viem";
+import { buildSlots } from "../limits/build-slots.server.js";
+import { invalidateListMemo } from "../limits/browse.server.js";
 import type { LiveDeps } from "./live-deps.server.js";
 import type {
   BondStatusView,
@@ -212,6 +214,15 @@ export class LiveAdapter implements StudioDataAdapter {
 
   async createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
     const deps = this.requireDeps();
+
+    // 0. Take a build slot BEFORE anything is created. Each build is a claude-code
+    //    subprocess (~100-300MB), so the slot pool is the studio-side OOM guard. At
+    //    capacity acquire() throws TooManyBuildsError, which propagates to the create
+    //    action (which surfaces a capacity message) with nothing created and nothing
+    //    emitted. The slot is released in the background IIFE's finally below, where
+    //    channel.complete already runs, so every outcome (success, gate fail, throw)
+    //    frees it exactly once (release is idempotent).
+    const releaseSlot = buildSlots().acquire();
 
     // 1. Compute the deterministic identity + params UP FRONT, WITHOUT the bundle. None
     //    of this needs the generated bundle, so it can run before (and return ahead of)
@@ -406,6 +417,12 @@ export class LiveAdapter implements StudioDataAdapter {
         }
       } finally {
         channel.complete(resourceId);
+        releaseSlot();
+        // Drop the 30s browse memo so a just-published resource appears on
+        // /discover and the creator profile immediately, instead of being hidden
+        // behind a memo entry an anonymous visitor warmed. Cheap (one map clear on
+        // an infrequent, rate-limited event) and harmless on a failed build.
+        invalidateListMemo();
       }
     })();
 
@@ -416,15 +433,19 @@ export class LiveAdapter implements StudioDataAdapter {
     return { resourceId, eventsUrl: `/resources/${resourceId}/events` };
   }
 
-  async *subscribeBuildEvents(resourceId: string): AsyncIterable<BuildEvent> {
+  subscribeBuildEvents(
+    resourceId: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<BuildEvent> {
     const deps = this.requireDeps();
-    // Delegate to the per-resource channel: yield each BuildEvent the channel emits,
-    // terminating when the channel completes. The channel's subscribe reaches a yield
-    // (or a clean return for an unknown id) WITHOUT throwing first, so the SSE route
-    // never 500s on a throw-before-yield (T-1g-02).
-    for await (const event of deps.buildChannel.subscribe(resourceId)) {
-      yield event;
-    }
+    // Delegate to the per-resource channel. A REGULAR method (not async*) on purpose:
+    // the channel's capacity admission runs synchronously inside subscribe(), so a
+    // BuildChannelAtCapacityError throws HERE - at the route level, before any
+    // Response/stream exists - and the SSE route can return a real pre-stream 503.
+    // The returned generator itself still never throws before its first yield for an
+    // admitted stream (unknown ids wait, then settle - T-1g-02), and the optional
+    // signal makes a disconnected reader return instead of parking forever (S7).
+    return deps.buildChannel.subscribe(resourceId, opts);
   }
 
   async getResourceDetail(resourceId: string): Promise<ResourceDetail> {

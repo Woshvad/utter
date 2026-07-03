@@ -113,20 +113,44 @@ export function BuildStream({
 }: BuildStreamProps): React.ReactElement {
   const [stages, setStages] = React.useState<StageMap>(initialStages);
   const [announce, setAnnounce] = React.useState<string>("");
+  // True when the stream dropped BEFORE reaching a terminal state (Live ok or a stage
+  // error). EventSource surfaces a non-200 open (the new pre-stream 429/503 admission
+  // denials) as a bare `error` with no body, so without this the six blocks would
+  // freeze at "pending" forever and the server's Retry-After would be invisible. A
+  // clean server close after completion also fires `error`, so we gate on whether the
+  // build actually settled (settledRef) to avoid a false interruption banner.
+  const [interrupted, setInterrupted] = React.useState(false);
+  // Bumped by the Retry button to re-run the effect and reopen the EventSource.
+  const [attempt, setAttempt] = React.useState(0);
+  const settledRef = React.useRef(false);
 
   React.useEffect(() => {
+    settledRef.current = false;
+    setInterrupted(false);
+    setStages(initialStages());
     const factory =
       eventSourceFactory ??
       ((url: string) => new EventSource(url) as unknown as EventSourceLike);
     const es = factory(eventsUrl);
     es.addEventListener("stage", (e) => {
       const ev = JSON.parse(e.data) as BuildEvent;
+      // A build settles at Live:ok or at any stage error; after that a stream close is
+      // normal, not an interruption.
+      if ((ev.stage === "Live" && ev.status === "ok") || ev.status === "error") {
+        settledRef.current = true;
+      }
       setStages((s) => applyStage(s, ev));
       setAnnounce(`${ev.stage.toLowerCase()} ${ev.status}`);
     });
-    es.addEventListener("error", () => es.close()); // SSE auto-reconnects unless closed
+    es.addEventListener("error", () => {
+      es.close(); // SSE auto-reconnects unless closed
+      // Only a drop BEFORE the build settled is a real interruption to surface.
+      if (!settledRef.current) setInterrupted(true);
+    });
     return () => es.close();
-  }, [eventsUrl, eventSourceFactory]);
+  }, [eventsUrl, eventSourceFactory, attempt]);
+
+  const onRetry = React.useCallback(() => setAttempt((n) => n + 1), []);
 
   const isLive = stages.Live?.status === "done";
   // IN-01: only render the live URL as a clickable anchor when its scheme is http(s).
@@ -157,6 +181,30 @@ export function BuildStream({
               reset
             </a>
           </div>
+
+          {/* Interruption banner: the stream dropped before the build finished
+              (commonly a rate-limit / capacity 429/503 on the events route, which
+              EventSource cannot surface as a body). The endpoint may still be
+              building server-side; retry reopens the stream. */}
+          {interrupted ? (
+            <div
+              data-testid="build-interrupted"
+              className="mb-[14px] flex items-center justify-between gap-[12px] border border-hairline bg-raised p-[14px]"
+            >
+              <span className="font-mono text-[12px] text-ink-muted lowercase">
+                build stream interrupted (you may be rate limited). your endpoint may
+                still be building — retry to reconnect.
+              </span>
+              <button
+                type="button"
+                data-testid="build-retry"
+                onClick={onRetry}
+                className="flex-none cursor-pointer border border-hairline bg-transparent px-[14px] py-[8px] font-mono text-[12px] text-ink lowercase"
+              >
+                retry
+              </button>
+            </div>
+          ) : null}
 
           {/* seamless 1px grid - each cell paints its own bg */}
           <div className="flex flex-col gap-px border border-hairline bg-hairline">

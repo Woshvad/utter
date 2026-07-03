@@ -19,6 +19,7 @@ import { Link, useLoaderData } from "react-router";
 import type { AcceptsEntry } from "@utter/x402-arc";
 import { selectAdapter } from "../adapter/select.js";
 import { tryGetRevenue } from "../adapter/revenue.js";
+import { checkBrowseLimit, memoListMarketplace } from "../limits/browse.server.js";
 import type { PlaygroundResult, ResourceDetail } from "../adapter/types.js";
 import { usePayPerCall } from "../wallet/usePayPerCall.js";
 import { selectSubmitPayment } from "../wallet/submit-payment.js";
@@ -90,7 +91,13 @@ function formatPriceLabel(baseUnitsStr: string, decimals: number, metered: boole
   return metered ? `${dollars} metered` : dollars;
 }
 
-export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDetailData> {
+export async function loader({ params, request }: LoaderFunctionArgs): Promise<ResourceDetailData> {
+  // Per-IP + global browse admission BEFORE any adapter read: this public loader
+  // fans out into getResourceDetail + a decimals probe + a facilitator revenue read
+  // + the related-rail marketplace list, so an unthrottled enumeration of resource
+  // ids would amplify one HTTP request into a marketplace/facilitator/chain fan-out.
+  checkBrowseLimit(request);
+
   // T-06-PARAM: validate before the adapter so a crafted id cannot reach the source.
   if (!isSafeParam(params.id)) {
     throw new Response(JSON.stringify({ error: "bad_resource" }), {
@@ -131,12 +138,14 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<ResourceDe
   // deterministic fixture path through this action.
   const payMode = process.env.STUDIO_DATA_ADAPTER === "live" ? "live" : "fixture";
 
-  // The RELATED rail: read sibling cards THROUGH the same listMarketplace seam, drop
-  // the current resource, and project at most four into a wire-safe shape (priceLabel
-  // pre-formatted from the projected base units; no bigint crosses the wire).
+  // The RELATED rail: read sibling cards THROUGH the shared 30s memo (not a direct
+  // adapter.listMarketplace call), so a resource-detail spray cannot amplify into an
+  // uncached full marketplace list on every hit. Drop the current resource and
+  // project at most four into a wire-safe shape (priceLabel pre-formatted from the
+  // projected base units; no bigint crosses the wire).
   let related: RelatedItem[] = [];
   try {
-    const cards = await adapter.listMarketplace({});
+    const cards = await memoListMarketplace(adapter, {});
     related = cards
       .filter((c) => c.resourceId !== detail.resourceId)
       .slice(0, 4)

@@ -5,7 +5,16 @@
 // projected values, never recomputed (T-06-REDERIVE); (2) each FilterPanel/SortControl/
 // CategoryChips field maps 1:1 to a FilterCriteria field; (3) empty + no-results states
 // render the copywriting-contract lines.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// The discover loader now runs the shared browse limiter + a 30s list memo (S9).
+// Reset both per test so the listMarketplace spy assertions below observe a real
+// adapter call (a memo hit would bypass the seam) and the limiter never accumulates
+// across tests.
+beforeEach(async () => {
+  const { resetBrowseStateForTests } = await import("../app/limits/browse.server");
+  resetBrowseStateForTests();
+});
 
 describe("discover loader (read-through marketplace browse)", () => {
   it("lists every active fixture card through the adapter with no query", async () => {

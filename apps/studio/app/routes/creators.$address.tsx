@@ -20,6 +20,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
 import { tryGetRevenue } from "../adapter/revenue.js";
+import { checkBrowseLimit, memoListMarketplace } from "../limits/browse.server.js";
 import type { Hex, ResourceCardData } from "../adapter/types.js";
 import { CardGrid } from "../components/discover/CardGrid.js";
 import { ChannelHeader } from "../components/profile/ChannelHeader.js";
@@ -77,7 +78,14 @@ function emptyPayload(address: string, decimals: number): CreatorProfileData {
   };
 }
 
-export async function loader({ params }: LoaderFunctionArgs): Promise<CreatorProfileData> {
+export async function loader({
+  params,
+  request,
+}: LoaderFunctionArgs): Promise<CreatorProfileData> {
+  // Anonymous fan-out guard (S9): the per-IP browse limit runs FIRST, before any
+  // adapter read, and throws a 429 Response on deny (error boundary; abuse-only).
+  checkBrowseLimit(request);
+
   const adapter = selectAdapter(process.env);
 
   // Runtime money scale (no 6/1e6 literal): one decimals read through the adapter.
@@ -92,7 +100,8 @@ export async function loader({ params }: LoaderFunctionArgs): Promise<CreatorPro
 
   // List every card THROUGH the adapter, then resolve each card's owner via
   // getResourceDetail (the only carrier of `creator`) and keep matches for this address.
-  const allCards = await adapter.listMarketplace({});
+  // The 30s TTL memo is shared with the discover loader (S9).
+  const allCards = await memoListMarketplace(adapter, {});
   const owned = await Promise.all(
     allCards.map(async (card) => {
       const detail = await adapter.getResourceDetail(card.resourceId);
