@@ -341,6 +341,32 @@ export class ClaudeGenerator implements Generator {
               // Drain the iterator to run the agent loop to completion - the model output
               // is read back from the temp dir, never trusted from the message stream.
               void _msg;
+              // Usage telemetry: on the terminal result message ONLY, log one JSON line
+              // of token/cost counters (the operator's only signal for sizing the global
+              // create breaker from real cost). NEVER message content. Every field is
+              // optional-chained and the whole block is try/caught - a throw inside this
+              // for-await body would abort the agent loop.
+              try {
+                const m = _msg as {
+                  type?: string;
+                  total_cost_usd?: number;
+                  usage?: { input_tokens?: number; output_tokens?: number };
+                };
+                if (m?.type === "result") {
+                  console.log(
+                    JSON.stringify({
+                      evt: "generation_usage",
+                      model: this.config.model,
+                      inputTokens: m?.usage?.input_tokens,
+                      outputTokens: m?.usage?.output_tokens,
+                      totalCostUsd: m?.total_cost_usd,
+                      pass: genAttempt,
+                    }),
+                  );
+                }
+              } catch {
+                // Usage logging is best-effort; it must never break the drain loop.
+              }
             }
           } catch (err) {
             // A transient SDK/API error (rate limit, timeout, subprocess) throws here.
