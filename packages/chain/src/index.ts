@@ -66,8 +66,11 @@ export {
   readEscrowBalance,
   readBondStatus,
   readWithdrawals,
+  readDeposits,
   type EscrowBalance,
   type BondStatus,
   type WithdrawalRecord,
   type WithdrawalHistory,
+  type DepositRecord,
+  type DepositHistory,
 } from "./escrow";

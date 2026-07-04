@@ -9,12 +9,23 @@
 // Money discipline: TOTAL EARNINGS renders through the single UsdcAmount surface
 // (mono, decimal-aware, NO 1e6/6/18 literal); the aggregate is the projected
 // read-through creator earnings, NOT recomputed here (T-06-REDERIVE). The dashboard
-// leads yellow (money). The 12-month chart series have no real monthly history; they
-// are the representative comp series, clearly representative.
+// leads yellow (money). The two charts plot REAL per-resource data (each active
+// resource's read-through earnings and settled calls from the loader's rows) - there
+// is no fabricated series and no sample badge. Bar HEIGHTS are proportional (Number of
+// the base-unit earnings, normalized by the chart), never a decimal-scaled money render.
 import * as React from "react";
 import { UsdcAmount } from "../primitives/UsdcAmount";
-import { SampleBadge } from "../primitives/SampleBadge";
 import { BauhausChart, type ChartPoint, type TriadColor } from "../charts/BauhausChart";
+
+/** The minimal per-resource shape the charts plot (a structural subset of ResourceRow). */
+export interface RevenueChartRow {
+  /** The resource slug (the bar label). */
+  slug: string;
+  /** The resource's read-through creator earnings in base units (the revenue bar height). */
+  revenue: bigint;
+  /** The resource's settled call count (the calls bar height). */
+  calls: number;
+}
 
 export interface RevenuePanelProps {
   /** Aggregate creator earnings across all resources, base units (read-through). */
@@ -27,10 +38,8 @@ export interface RevenuePanelProps {
   strikes: number;
   /** Runtime USDC decimals (from getEscrowBalance). The ONLY money scale. */
   decimals: number;
-  /** Representative 12-point monthly revenue series (no real history). */
-  revenueSeries: number[];
-  /** Representative 12-point monthly calls series (no real history). */
-  callsSeries: number[];
+  /** The per-resource rows the two charts plot (real earnings + calls; empty => empty state). */
+  rows: RevenueChartRow[];
 }
 
 /** Format an integer count with thousands separators (locale-stable grouping). */
@@ -56,16 +65,17 @@ function StatCell({
   );
 }
 
-/** One chart card: a color-dot title row over a 12-bar BauhausChart. */
+/** One chart card: a color-dot title row over a per-resource BauhausChart. Renders an
+ *  honest empty state (never a fabricated bar) when there are no resources to plot. */
 function ChartCard({
   title,
   color,
-  values,
+  series,
   ariaLabel,
 }: {
   title: string;
   color: TriadColor;
-  values: number[];
+  series: ChartPoint[];
   ariaLabel: string;
 }): React.ReactElement {
   const dot: Record<TriadColor, string> = {
@@ -73,7 +83,6 @@ function ChartCard({
     blue: "var(--blue)",
     yellow: "var(--yellow)",
   };
-  const series: ChartPoint[] = values.map((v, i) => ({ label: `m${i + 1}`, value: v }));
   return (
     <div data-testid="chart-card" className="border border-hairline bg-raised p-[20px]">
       <div className="mb-[18px] flex items-center gap-[8px]">
@@ -83,10 +92,17 @@ function ChartCard({
           style={{ background: dot[color] }}
         />
         <span className="text-[14px] font-semibold">{title}</span>
-        {/* the 12-month series has no real history source - mark it as sample */}
-        <SampleBadge className="ml-auto" />
       </div>
-      <BauhausChart series={series} color={color} ariaLabel={ariaLabel} />
+      {series.length === 0 ? (
+        <div
+          data-testid="chart-empty"
+          className="flex h-[120px] items-center justify-center font-mono text-caption-mono text-ink-faint lowercase"
+        >
+          no resources yet
+        </div>
+      ) : (
+        <BauhausChart series={series} color={color} ariaLabel={ariaLabel} />
+      )}
     </div>
   );
 }
@@ -97,9 +113,14 @@ export function RevenuePanel({
   liveApis,
   strikes,
   decimals,
-  revenueSeries,
-  callsSeries,
+  rows,
 }: RevenuePanelProps): React.ReactElement {
+  // Build the two chart series from REAL per-resource rows. The revenue bar height is the
+  // proportional Number of the base-unit earnings (BauhausChart normalizes by the max, so
+  // absolute scale is irrelevant and no decimal literal is applied); the calls bar is the
+  // settled count. Empty rows -> empty series -> the ChartCard's honest empty state.
+  const revenueSeries: ChartPoint[] = rows.map((r) => ({ label: r.slug, value: Number(r.revenue) }));
+  const callsSeries: ChartPoint[] = rows.map((r) => ({ label: r.slug, value: r.calls }));
   return (
     <section data-testid="revenue-panel">
       {/* four stat cells in the seamless 1px hairline grid (the signature motif) */}
@@ -118,19 +139,20 @@ export function RevenuePanel({
         </StatCell>
       </div>
 
-      {/* two chart cards: revenue=yellow, calls=blue (the color discipline) */}
+      {/* two chart cards: revenue=yellow, calls=blue (the color discipline). Both plot
+          REAL per-resource data from the loader's rows. */}
       <div className="mb-[16px] grid grid-cols-2 gap-[16px]">
         <ChartCard
-          title="revenue · usdc / month"
+          title="revenue · usdc / resource"
           color="yellow"
-          values={revenueSeries}
-          ariaLabel="monthly revenue in usdc (representative)"
+          series={revenueSeries}
+          ariaLabel="creator earnings per resource"
         />
         <ChartCard
-          title="calls / month"
+          title="calls / resource"
           color="blue"
-          values={callsSeries}
-          ariaLabel="monthly calls (representative)"
+          series={callsSeries}
+          ariaLabel="settled calls per resource"
         />
       </div>
     </section>

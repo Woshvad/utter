@@ -128,16 +128,10 @@ export function ChannelHeader({
               <h1 className="m-0 text-[26px] font-semibold tracking-[-0.02em] text-ink">
                 {addressHandle(address)}
               </h1>
-              <div
-                data-testid="verified-creator-pill"
-                className="flex items-center gap-[6px] border border-hairline px-[10px] py-[4px]"
-              >
-                <span
-                  aria-hidden="true"
-                  className="inline-block h-[8px] w-[8px] rounded-full bg-blue"
-                />
-                <span className="font-mono text-[11px] text-ink-muted">verified creator</span>
-              </div>
+              {/* No "verified creator" pill: there is no per-creator verification signal on
+                  this surface (unlike a resource's real health.verified on the detail page),
+                  so an unconditional badge would fabricate trust. The real identity marks are
+                  the address handle above and the full address + chain below. */}
             </div>
             <div className="mt-[4px] font-mono text-[12px] text-ink-faint">
               {`${address} · arc testnet`}

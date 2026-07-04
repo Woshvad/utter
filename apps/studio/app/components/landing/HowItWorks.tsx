@@ -18,7 +18,7 @@ const STEPS: readonly Step[] = [
   { n: "2", title: "build", desc: "utter writes the handler and openapi spec." },
   { n: "3", title: "verify", desc: "sandboxed deploy, smoke tests, latency check." },
   { n: "4", title: "mint", desc: "onchain identity + bond, listed to the market." },
-  { n: "5", title: "earn", desc: "agents pay per call in usdc. you keep 90%." },
+  { n: "5", title: "earn", desc: "agents pay per call in usdc. you keep 70%." },
 ];
 
 export function HowItWorks(): React.ReactElement {

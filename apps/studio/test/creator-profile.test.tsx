@@ -180,9 +180,10 @@ describe("creator-profile screen (channel header + apis grid)", () => {
     expect(header).toBeInTheDocument();
     // the 88px avatar circle overlapping the banner.
     expect(within(header).getByTestId("creator-avatar")).toBeInTheDocument();
-    // the comp identity marks: a verified-creator pill + the address handle + follow button.
-    expect(within(header).getByTestId("verified-creator-pill")).toBeInTheDocument();
-    expect(within(header).getByText("verified creator")).toBeInTheDocument();
+    // the real identity marks: the address handle + follow button. There is NO
+    // "verified creator" pill (removed - no per-creator verification signal exists here,
+    // so an unconditional badge would fabricate trust).
+    expect(within(header).queryByTestId("verified-creator-pill")).not.toBeInTheDocument();
     expect(within(header).getByText("+ follow")).toBeInTheDocument();
     // the 10-segment reputation meter carries the derived score (not feedbackCount).
     const meter = within(header).getByTestId("reputation-meter");

@@ -42,14 +42,6 @@ function resolveExplorer(env: NodeJS.ProcessEnv): string {
   return arcTestnet.blockExplorers?.default.url ?? "";
 }
 
-/**
- * Representative 12-month chart series (comp 1055-1056). There is NO real monthly
- * revenue/calls history yet, so these are the comp's representative series, used only
- * for the bar heights - they are clearly representative, never faked live numbers.
- */
-const REVENUE_SERIES = [40, 55, 48, 70, 62, 85, 78, 95, 88, 100, 92, 110];
-const CALLS_SERIES = [30, 45, 52, 48, 66, 72, 60, 80, 88, 76, 94, 100];
-
 /** The aggregate stat-cell figures, summed across the listed resources. */
 export interface DashboardTotals {
   /** Sum of per-resource creator earnings, base units. */
@@ -254,8 +246,7 @@ export default function DashboardRoute(): React.ReactElement {
         liveApis={totals.liveApis}
         strikes={totals.strikes}
         decimals={decimals}
-        revenueSeries={REVENUE_SERIES}
-        callsSeries={CALLS_SERIES}
+        rows={rows}
       />
       {/* The LIVE withdrawable-earnings card: the creator's accrued escrow balance
           (useAccruedEarnings) with a confirm-gated withdraw that REUSES escrow.withdraw

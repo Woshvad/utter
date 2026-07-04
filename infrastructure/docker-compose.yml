@@ -271,6 +271,25 @@ services:
       # value in .env.local only. It must match the studio's MARKETPLACE_AUTH_SECRET.
       - MARKETPLACE_AUTH_SECRET=${MARKETPLACE_AUTH_SECRET:-}
       - NODE_ENV=${NODE_ENV:-}
+      # Publish-time verification probe (SCR-01): when set to the wildcard resources
+      # host (e.g. resources.utter.technology), selectProber arms the LiveHttpsProber
+      # (a no-pay card + 402 liveness/conformance probe against the deployed endpoint)
+      # instead of the always-pass fixture. EMPTY here; real value in .env.local only.
+      - SCORER_LIVE_HTTPS_HOST=${SCORER_LIVE_HTTPS_HOST:-}
+      # ERC-8004 identity mint (operator-gated, resolveIdentity in live-deps.ts). The
+      # real UPDATE-ONLY on-chain mint arms ONLY when all three reference registries
+      # AND the registry-admin key are set (the registries must be deployed on Arc
+      # first). EMPTY here; real values in .env.local only. The key is never logged.
+      - ERC8004_IDENTITY_REGISTRY=${ERC8004_IDENTITY_REGISTRY:-}
+      - ERC8004_REPUTATION_REGISTRY=${ERC8004_REPUTATION_REGISTRY:-}
+      - ERC8004_VALIDATION_REGISTRY=${ERC8004_VALIDATION_REGISTRY:-}
+      - REGISTRY_ADMIN_PRIVATE_KEY=${REGISTRY_ADMIN_PRIVATE_KEY:-}
+      # Fail-closed in prod: with =1 the marketplace refuses to list with the placeholder
+      # mint when the registries/key are unconfigured. Off by default (testnet unchanged).
+      - IDENTITY_MINT_REQUIRED=${IDENTITY_MINT_REQUIRED:-}
+      # Optional Arc RPC override for the mint + probe clients (defaults to the Arc
+      # testnet RPC in @utter/chain when unset).
+      - ARC_RPC_URL=${ARC_RPC_URL:-}
 
   # The durable Postgres backend (PAY-09/PAY-11, MKT-01/02). It lives on backendnet
   # ONLY (internal:true): a trusted backend net it shares with the facilitator and

@@ -17,4 +17,3 @@ export { Modal, type ModalProps } from "./Modal";
 export { Tabs, type TabsProps, type TabItem } from "./Tabs";
 export { CodeBlock, type CodeBlockProps } from "./CodeBlock";
 export { ErrorState, type ErrorStateProps } from "./ErrorState";
-export { SampleBadge, type SampleBadgeProps } from "./SampleBadge";

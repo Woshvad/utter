@@ -32,7 +32,6 @@ import {
 import { Composer } from "../components/build/Composer.js";
 import { BuildStream } from "../components/build/BuildStream.js";
 import { CardPreview } from "../components/detail/CardPreview.js";
-import { OpenApiPreview } from "../components/detail/OpenApiPreview.js";
 
 /** The loader payload: an optional prefill prompt read from ?prompt= (the iterate bar). */
 export interface CreateLoaderData {
@@ -49,10 +48,25 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<CreateLoa
   return { initialPrompt };
 }
 
-/** The action result the screen renders: either field errors or the created ids. */
+/** The action result the screen renders: either field errors or the created resource
+ *  plus the REAL values the live moment renders (no fabricated price/bond/name). */
 export type CreateActionData =
   | { ok: false; errors: ComposeFieldErrors }
-  | { ok: true; resourceId: string; eventsUrl: string };
+  | {
+      ok: true;
+      resourceId: string;
+      eventsUrl: string;
+      /** The prompt-derived preview slug (the live-moment headline + card name). */
+      name: string;
+      /** The creator's prompt - the honest agent-card description. */
+      prompt: string;
+      /** The creator's entered per-call price in base units (rendered via UsdcAmount). */
+      priceBaseUnits: bigint;
+      /** The creator's entered bond in base units (shown only when > 0). */
+      bondBaseUnits: bigint;
+      /** Runtime USDC decimals for the money renders (no 1e6/6 literal). */
+      decimals: number;
+    };
 
 /**
  * The deny split. ONLY a request carrying an `Authorization: Bearer` header is
@@ -136,7 +150,19 @@ export async function action({ request }: ActionFunctionArgs): Promise<CreateAct
   // surfaces an inline prompt field error rather than the something-broke screen.
   try {
     const { resourceId, eventsUrl } = await adapter.createResource(validation.spec);
-    return { ok: true, resourceId, eventsUrl };
+    // Return the REAL values the live moment renders: the creator's entered price + bond
+    // (base units, via the same runtime decimals) and the prompt-derived name + the prompt
+    // itself as the honest card description. No fabricated price/bond/name downstream.
+    return {
+      ok: true,
+      resourceId,
+      eventsUrl,
+      name: slugFromPrompt(validation.spec.prompt),
+      prompt: validation.spec.prompt,
+      priceBaseUnits: validation.spec.basePrice,
+      bondBaseUnits: validation.spec.bond,
+      decimals,
+    };
   } catch (err) {
     // Build-slot saturation is a capacity condition, not a generation failure: it
     // gets the same deny split as a rate limit, never the could-not-generate copy.
@@ -180,14 +206,6 @@ export default function CreateRoute(): React.ReactElement {
 
   const built = data && data.ok ? data : null;
   const errors = data && !data.ok ? data.errors : undefined;
-
-  // The prompt the creator submitted (mirrored back from the navigation form data
-  // while submitting; preview-only, never re-derives money or security state).
-  const submittedPrompt =
-    typeof navigation.formData?.get("prompt") === "string"
-      ? (navigation.formData.get("prompt") as string)
-      : undefined;
-  const previewName = slugFromPrompt(submittedPrompt);
 
   const idle = !built;
 
@@ -233,7 +251,10 @@ export default function CreateRoute(): React.ReactElement {
             <BuildStream
               eventsUrl={built.eventsUrl}
               resourceId={built.resourceId}
-              liveName={previewName}
+              liveName={built.name}
+              priceBaseUnits={built.priceBaseUnits}
+              bondBaseUnits={built.bondBaseUnits}
+              decimals={built.decimals}
             />
           ) : (
             <Composer
@@ -245,25 +266,28 @@ export default function CreateRoute(): React.ReactElement {
         </div>
       </div>
 
-      {/* right preview aside - appears once a build has started (comp 344-360) */}
+      {/* right preview aside - appears once a build has started (comp 344-360). The card
+          shows the REAL slug + the creator's own prompt as the description; the OpenAPI is
+          generated server-side during the build, so we link to the resource page (where the
+          real spec is served) rather than showing a fabricated sample snippet. */}
       {built ? (
         <aside className="w-[360px] flex-none border-l border-hairline bg-canvas p-[24px]">
           <div className="mb-[14px] font-mono text-[11px] tracking-[0.06em] text-ink-faint">
             AGENT CARD
           </div>
           <div className="mb-[20px]">
-            <CardPreview name={previewName} desc="scores tweet sentiment, -1..1" />
+            <CardPreview name={built.name} desc={built.prompt} />
           </div>
           <div className="mb-[14px] font-mono text-[11px] tracking-[0.06em] text-ink-faint">
             OPENAPI
           </div>
-          <OpenApiPreview snippet="POST /v1/score
-  body:
-    text: string
-  200:
-    score: number  // -1..1
-    label: string
-    confidence: number" />
+          <p className="m-0 border border-hairline bg-raised p-[14px] font-mono text-[11.5px] leading-[1.6] text-ink-muted">
+            the generated openapi spec is served on your{" "}
+            <a href={`/resources/${built.resourceId}`} className="text-blue hover:underline">
+              resource page
+            </a>{" "}
+            once the build finishes.
+          </p>
         </aside>
       ) : null}
     </div>
