@@ -216,9 +216,11 @@ services:
       # Empty writable config dir so the Agent SDK uses ANTHROPIC_API_KEY, never a
       # stray interactive Claude Code OAuth token. Operator normally does not set it.
       - CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-/tmp/utter-claude}
-      # Model used for generation. Defaults to the cheapest proven-to-pass-the-gates
-      # model; override to claude-sonnet-4-6 or claude-opus-4-8 in .env.local.
-      - DEFAULT_MODEL=${DEFAULT_MODEL:-claude-haiku-4-5-20251001}
+      # Model used for generation. Defaults to sonnet-5: the reliable + fast +
+      # affordable balance for handler codegen. Override in .env.local to
+      # claude-haiku-4-5-20251001 (cheapest) or claude-opus-4-8 (priciest/slowest,
+      # over-reasons with no convergence gain on this task).
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-claude-sonnet-5}
 
   # The trusted agent-facing marketplace (A2A card + discovery API). A first-party
   # platform control-plane service, NOT the gVisor untrusted boundary. It joins

@@ -623,10 +623,11 @@ can run the platform without it and switch it on later with no code change.
    401 for SDK use; the Agent SDK needs a real API key. The key is never baked into
    the image or logged; it is supplied at runtime through the empty compose default.
 
-2. Model, optional. The default model is `claude-haiku-4-5-20251001`, the cheapest
-   model proven to pass all four bundle gates. To trade cost for higher-quality
-   generation, set `DEFAULT_MODEL` in `.env.local` to `claude-sonnet-4-6` or
-   `claude-opus-4-8`.
+2. Model, optional. The default model is `claude-sonnet-5`, the reliable + fast +
+   affordable balance for handler codegen. Set `DEFAULT_MODEL` in `.env.local` to
+   `claude-haiku-4-5-20251001` (cheapest) or `claude-opus-4-8` (priciest/slowest;
+   it over-reasons and gives no convergence gain on this task, so it is not
+   recommended).
 
 3. Config dir, normally untouched. `CLAUDE_CONFIG_DIR` defaults to
    `/tmp/utter-claude` inside the container, an empty writable dir so the Agent SDK

@@ -31,8 +31,10 @@ export interface Generator {
  * Env-driven backend selection. Defaults to scaffold whenever AI_RUNTIME_GENERATOR
  * is `scaffold` OR ANTHROPIC_API_KEY is absent - so the autonomous suite never
  * reaches a model/network path. Otherwise selects the claude backend with the
- * configured model (DEFAULT_MODEL or claude-sonnet-4-6). Constructing the claude
- * backend is lazy: no network call happens until generate() runs.
+ * configured model (DEFAULT_MODEL or claude-sonnet-5 - the reliable, fast, and
+ * affordable default for handler codegen; opus over-reasons and is slower + pricier
+ * with no convergence gain on this task). Constructing the claude backend is lazy:
+ * no network call happens until generate() runs.
  */
 export function selectGenerator(env: NodeJS.ProcessEnv = process.env): Generator {
   if (env.AI_RUNTIME_GENERATOR === "scaffold" || !env.ANTHROPIC_API_KEY) {
@@ -40,6 +42,6 @@ export function selectGenerator(env: NodeJS.ProcessEnv = process.env): Generator
   }
   return new ClaudeGenerator({
     apiKey: env.ANTHROPIC_API_KEY,
-    model: env.DEFAULT_MODEL ?? "claude-sonnet-4-6",
+    model: env.DEFAULT_MODEL ?? "claude-sonnet-5",
   });
 }

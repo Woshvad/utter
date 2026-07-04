@@ -26,7 +26,7 @@ const SRC = join(HERE, "..", "src");
 
 describe("ClaudeGenerator (operator-gated - constructed, never invoked)", () => {
   it("has the claude discriminator", () => {
-    const gen = new ClaudeGenerator({ apiKey: "sk-ant-test", model: "claude-sonnet-4-6" });
+    const gen = new ClaudeGenerator({ apiKey: "sk-ant-test", model: "claude-sonnet-5" });
     expect(gen.backend).toBe("claude");
   });
 
