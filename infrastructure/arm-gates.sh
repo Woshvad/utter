@@ -29,23 +29,23 @@ command -v docker >/dev/null 2>&1 || die "docker not found"
 # The compose passthrough for these env vars must be present (it ships with this script).
 grep -q 'SCORER_LIVE_HTTPS_HOST' "$COMPOSE" || die "compose is missing the gate env passthrough - 'git pull' the latest master first"
 
-# --- upsert KEY=VALUE into .env.local (replace in place, else append). No secret echo. ---
+# --- upsert KEY=VALUE into .env.local. Removes EVERY existing line for the key, then
+# appends the new value at the end (dedup + last-wins, matching dotenv/compose). No echo. ---
 upsert_env() {
   local key="$1" val="$2" tmp
   tmp="$(mktemp)"
-  awk -v k="$key" -v v="$val" '
-    $0 ~ "^"k"=" { print k"="v; found=1; next }
-    { print }
-    END { if (!found) print k"="v }
-  ' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+  grep -vE "^$key=" "$ENV_FILE" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$ENV_FILE"
 }
 # read a single value from .env.local (empty if unset). Greps ONE key - it NEVER sources
 # the file: .env.local is dotenv format, not a bash script, so any value with a shell-
-# special char (space, (), <, >, quotes, #) would break `source`. Strips a trailing CR
-# (CRLF-edited files) and a single pair of surrounding quotes.
+# special char (space, (), <, >, quotes, #) would break `source`. Uses the LAST match
+# (dotenv/compose/node --env-file are last-wins, so a later real value overrides an earlier
+# placeholder). Strips a trailing CR (CRLF files) and a single pair of surrounding quotes.
 get_env() {
   local v
-  v="$(grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  v="$(grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
   v="$(printf '%s' "$v" | tr -d '\r')"
   # strip a dotenv-style inline comment (whitespace then # to end of line), then trim.
   v="$(printf '%s' "$v" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
