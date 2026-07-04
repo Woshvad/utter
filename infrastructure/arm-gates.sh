@@ -46,12 +46,24 @@ upsert_env() {
 get_env() {
   local v
   v="$(grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
-  v="${v%$'\r'}"
+  # strip all CRs, then trim leading/trailing whitespace (dotenv values may have either).
+  v="$(printf '%s' "$v" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   case "$v" in
     \"*\") v="${v#\"}"; v="${v%\"}" ;;
     \'*\') v="${v#\'}"; v="${v%\'}" ;;
   esac
   printf '%s' "$v"
+}
+
+# Normalize a private key to 0x + 64 lowercase-friendly hex (cast/forge want the 0x form).
+# Strips an existing 0x/0X, rejects any non-hex char or wrong length. Returns non-zero on
+# a malformed key so the caller can die with a clear message (never echoing the key).
+normalize_key() {
+  local k="$1"
+  k="${k#0x}"; k="${k#0X}"
+  case "$k" in *[!0-9a-fA-F]*) return 1 ;; esac
+  [ "${#k}" -eq 64 ] || return 1
+  printf '0x%s' "$k"
 }
 
 # Read only the values we need, WITHOUT sourcing .env.local (see get_env above).
@@ -62,24 +74,30 @@ DEPLOY_DOMAIN="$(get_env DEPLOY_DOMAIN)"
 [ -n "$PLATFORM_TREASURY_PRIVATE_KEY" ] || \
   die "PLATFORM_TREASURY_PRIVATE_KEY is not set in .env.local (the treasury key you already swept with)."
 
+# Normalize the treasury key to the 0x form cast/forge expect (trims already done in
+# get_env). A malformed key dies here with a clear message, never printing the key.
+TREASURY_KEY="$(normalize_key "$PLATFORM_TREASURY_PRIVATE_KEY")" || \
+  die "PLATFORM_TREASURY_PRIVATE_KEY in .env.local is not a 32-byte hex key (expected 64 hex chars, optional 0x)."
+
 # --- ensure foundry (forge + cast) is available; auto-install if missing ------------------
+# If a prior run already installed foundry, put it on PATH so we skip the reinstall.
+[ -d "$HOME/.foundry/bin" ] && export PATH="$HOME/.foundry/bin:$PATH"
 if ! command -v forge >/dev/null 2>&1 || ! command -v cast >/dev/null 2>&1; then
   say "foundry (forge/cast) not found - installing…"
   curl -L https://foundry.paradigm.xyz | bash
   export PATH="$HOME/.foundry/bin:$PATH"
-  "$HOME/.foundry/bin/foundryup" >/dev/null 2>&1 || foundryup
+  "$HOME/.foundry/bin/foundryup" || foundryup
   export PATH="$HOME/.foundry/bin:$PATH"
   command -v forge >/dev/null 2>&1 || die "forge still missing after install - install foundry manually (https://getfoundry.sh) and re-run"
 fi
 
-TREASURY_KEY="$PLATFORM_TREASURY_PRIVATE_KEY"
 TREASURY_ADDR="$(cast wallet address --private-key "$TREASURY_KEY")"
 say "treasury / registry-admin address: $TREASURY_ADDR"
 
 # Safety: if a DIFFERENT REGISTRY_ADMIN_PRIVATE_KEY is already set, warn - overwriting it
 # with the treasury key changes which address holds registry authority. The user asked for
 # them to be the same, so we proceed, but surface the change so a mismatch is never silent.
-CUR_ADMIN="$(get_env REGISTRY_ADMIN_PRIVATE_KEY)"
+CUR_ADMIN="$(normalize_key "$(get_env REGISTRY_ADMIN_PRIVATE_KEY)" 2>/dev/null || true)"
 if [ -n "$CUR_ADMIN" ] && [ "$CUR_ADMIN" != "$TREASURY_KEY" ]; then
   CUR_ADMIN_ADDR="$(cast wallet address --private-key "$CUR_ADMIN" 2>/dev/null || echo '?')"
   if [ "$CUR_ADMIN_ADDR" != "$TREASURY_ADDR" ]; then
