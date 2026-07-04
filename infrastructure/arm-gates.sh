@@ -138,11 +138,20 @@ HAVE_VAL="$(get_env ERC8004_VALIDATION_REGISTRY)"
 if [ -n "$HAVE_ID" ] && [ -n "$HAVE_REP" ] && [ -n "$HAVE_VAL" ]; then
   say "ERC-8004 registries already set (identity $HAVE_ID) - skipping deploy."
 else
+  # Foundry deps live in contracts/lib, which is GITIGNORED and installed via forge (they
+  # are NOT git submodules - there is no .gitmodules), so a fresh host clone lacks them.
+  # Clone the pinned versions if OpenZeppelin is missing, then build.
+  if [ ! -d "$REPO/contracts/lib/openzeppelin-contracts/contracts" ]; then
+    say "installing pinned foundry deps (OpenZeppelin v5.6.1 + forge-std v1.9.7)…"
+    rm -rf "$REPO/contracts/lib/openzeppelin-contracts" "$REPO/contracts/lib/forge-std"
+    git clone --depth 1 --branch v5.6.1 https://github.com/OpenZeppelin/openzeppelin-contracts.git \
+      "$REPO/contracts/lib/openzeppelin-contracts" || die "failed to clone openzeppelin-contracts v5.6.1 (check host git/network access)"
+    git clone --depth 1 --branch v1.9.7 https://github.com/foundry-rs/forge-std.git \
+      "$REPO/contracts/lib/forge-std" || die "failed to clone forge-std v1.9.7 (check host git/network access)"
+  fi
+  ( cd "$REPO/contracts" && forge build ) || die "forge build failed after installing deps (see output above)"
+
   say "deploying the 3 ERC-8004 reference registries to Arc testnet (broadcasts, costs gas)…"
-  ( cd "$REPO/contracts" && forge build >/dev/null 2>&1 ) || {
-    say "forge build failed - initializing contract submodules (forge-std)…"
-    git -C "$REPO" submodule update --init --recursive || true
-  }
   DEPLOY_OUT="$(cd "$REPO/contracts" && \
     REGISTRY_ADMIN_PRIVATE_KEY="$TREASURY_KEY" CONTRACT_OWNER="$TREASURY_ADDR" \
     forge script script/DeployErc8004.s.sol --rpc-url "$ARC_RPC_URL" --broadcast 2>&1)" || {
