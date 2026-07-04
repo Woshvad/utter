@@ -128,6 +128,23 @@ describe("claude-backend.ts source discipline (static assertions, no runtime cal
     // safe reason so the attempt can retry fresh or propagate to the build stream.
     expect(src).toContain("claude agent loop failed");
   });
+
+  it("logs usage telemetry ONLY on the result message, guarded, never content", () => {
+    // The generation_usage line is the operator's only real-cost signal for sizing
+    // the studio's global create breaker. It must fire only on the terminal result
+    // message, stay fully optional-chained, and never echo message content, the
+    // prompt, or the key. The drain-loop comment contract stays intact.
+    expect(src).toContain('evt: "generation_usage"');
+    expect(src).toContain('m?.type === "result"');
+    expect(src).toContain("m?.usage?.input_tokens");
+    expect(src).toContain("m?.usage?.output_tokens");
+    expect(src).toContain("m?.total_cost_usd");
+    // The logged model is the CONFIGURED model, not anything from the stream.
+    expect(src).toContain("model: this.config.model");
+    // No message content field is referenced by the telemetry block.
+    expect(src).not.toContain("m.result");
+    expect(src).not.toContain("m?.result");
+  });
 });
 
 describe("generate() barrel (autonomous: scaffold-only, no key)", () => {

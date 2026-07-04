@@ -64,6 +64,7 @@ import {
   type ReconcileErrorEvent,
 } from "./reconcile";
 import { DEFAULT_RUNAWAY_POLICY } from "./reaper";
+import { DEFAULT_MAX_CONCURRENT_RESOURCES } from "./concurrency";
 
 loadEnv({ path: ".env.local" });
 
@@ -106,6 +107,29 @@ export interface DeployerAppDeps {
    * (503). NEVER logged.
    */
   authSecret?: string;
+  /**
+   * OPTIONAL host-capacity admission for POST /deploy. THE UNIT IS CONTAINERS: every
+   * deploy launches TWO containers per resource (the untrusted handler plus its
+   * trusted gate sidecar). When present the route refuses (pre-stream 503) any
+   * deploy that would push running + in-flight containers past maxContainers.
+   * listRunning is the live container census (listResourceContainers on the host;
+   * tests inject a fake); it is fail-closed: a throw or a slow census refuses the
+   * deploy, never launches blind. Absent (the dev/test default) -> no admission
+   * check, byte-identical prior behavior.
+   */
+  capacity?: {
+    maxContainers: number;
+    listRunning: () => Promise<Array<{ resourceId: string; running: boolean }>>;
+  };
+  /**
+   * The hard per-deploy deadline in ms, applied ONLY when capacity is wired (a hung
+   * deploy would otherwise hold its 2 reserved container slots forever). Defaults to
+   * DEPLOY_TIMEOUT_MS / 600000 via start(). Expiry rejects into the existing
+   * error-frame path: the record flips to failed, the frame is emitted, the slots
+   * are released, and the reconcile loop's stale-deploying quarantine + orphan reap
+   * collects the zombie containers.
+   */
+  deployTimeoutMs?: number;
 }
 
 /**
@@ -158,6 +182,59 @@ function bearerMatches(authHeader: string | undefined, secret: string): boolean 
   return timingSafeEqual(tokenBuf, secretBuf);
 }
 
+/** How long the capacity census (listRunning) may take before the deploy is refused. */
+const CAPACITY_LIST_TIMEOUT_MS = 5000;
+
+/**
+ * The default hard per-deploy deadline (ms). Matches the reconcile loop's
+ * stale-deploying quarantine window (DEPLOY_TIMEOUT_MS, 10 min) so a deploy the
+ * route times out is also the one reconcile would have quarantined after a crash.
+ */
+const DEFAULT_DEPLOY_TIMEOUT_MS = 600000;
+
+/**
+ * Parse a positive-number env knob: trim -> Number -> (finite && > 0) ? value :
+ * fallback. NEVER Number(env.X ?? fallback): "" coerces to 0 (a zero cap would
+ * brick every deploy) and a typo like "5O" coerces to NaN (which would silently
+ * disable the admission compare). Unset/blank falls back silently (the normal
+ * unconfigured case); a set-but-invalid value logs a one-line warning so the
+ * operator sees the typo. These are host-capacity numbers, never secrets.
+ */
+export function parsePositiveInt(
+  raw: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallback;
+  const n = Number(trimmed);
+  if (Number.isFinite(n) && n > 0) return n;
+  console.warn(`${name}="${trimmed}" is not a positive number; using default ${fallback}`);
+  return fallback;
+}
+
+/**
+ * Race a promise against a hard deadline: expiry rejects with an Error carrying
+ * `message`. Handlers are always attached to the input promise, so a late settle
+ * after the deadline wins never surfaces as an unhandled rejection; the timer is
+ * cleared as soon as the input settles so no stray timeout lingers.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
  * Resolve the deployer stores from the environment, fail-closed on durability in
  * production (mirrors the facilitator's resolveAuthConfig fail-closed style).
@@ -205,14 +282,27 @@ export function buildDepsFromEnv(): DeployerAppDeps {
 /**
  * Build the deployer control-plane Hono app:
  *   GET  /health      -> { ok: true, service: "deployer" }
- *   GET  /deployments -> the desired-state deployment records (read-through)
+ *   GET  /deployments -> the desired-state deployment records (Bearer-gated read-through)
  *   POST /deploy      -> authenticated, gate-first SSE deploy of a GENERATED bundle
  * The GET routes touch no live/operator-gated dep. POST /deploy authenticates, validates,
- * gates PRE-STREAM, then streams DeployProgressEvent frames; the real deploy runs only on
- * the gVisor host (tests inject a fake).
+ * gates PRE-STREAM, admits against the host container capacity when the capacity dep is
+ * wired, then streams DeployProgressEvent frames; the real deploy runs only on the gVisor
+ * host (tests inject a fake).
  */
 export function createDeployerApp(deps: DeployerAppDeps): Hono {
   const app = new Hono();
+
+  // The count of containers admitted deploys are still holding (PART D1): incremented
+  // by 2 SYNCHRONOUSLY at admission (no await between the compare and the increment),
+  // decremented by 2 exactly once in the stream finally. Per-app closure state, like
+  // the routes themselves, so tests never share a counter across apps.
+  let inFlightContainers = 0;
+  // The resourceIds with an active reservation (refcounted for the rare same-resource
+  // concurrent deploy). An admitted deploy's 2 containers are counted via
+  // inFlightContainers, so once they ALSO appear in the live census they must be
+  // excluded from the census count - otherwise an overlapping deploy is counted twice
+  // (reservation + census) and the host's effective capacity is silently halved.
+  const reservedResources = new Map<string, number>();
 
   app.get("/health", (c) => c.json({ ok: true, service: "deployer" }));
 
@@ -235,7 +325,17 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
     }
   });
 
+  // GET /deployments is Bearer-gated with the SAME fail-closed check POST /deploy
+  // uses: the records carry resourceId/slug/cap/status, so an unset secret means 503
+  // (never an open endpoint) and a missing/wrong Bearer means 401.
   app.get("/deployments", async (c) => {
+    const secret = deps.authSecret?.trim();
+    if (!secret) {
+      return c.json({ error: "deployments disabled: DEPLOYER_AUTH_SECRET unset" }, 503);
+    }
+    if (!bearerMatches(c.req.header("authorization"), secret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
     const records = await deps.stores.deployments.list();
     // bigint cap is not JSON-serializable; surface it as a base-units string so the
     // read-through stays lossless without a 1e6 decimals literal.
@@ -320,6 +420,55 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
     // uses, so the persisted record's resourceId matches the deployed resource exactly.
     const resourceId = resourceIdForLabel(b.resourceLabel?.trim() || b.slug);
 
+    // (c2) CAPACITY ADMISSION (PART D1). Runs after auth + validation + gate and
+    // BEFORE streamSSE/recordDeployment, so an over-capacity deploy costs nothing and
+    // writes nothing. THE UNIT IS CONTAINERS: this deploy will launch TWO (handler +
+    // sidecar). Same-resource containers are excluded from the running count so an
+    // at-cap REDEPLOY of a live resource still admits (it force-replaces its own
+    // pair, net-add zero). The census is FAIL-CLOSED: a listRunning throw or a 5s
+    // timeout refuses the deploy rather than launching blind.
+    let admitted = false;
+    const capacity = deps.capacity;
+    if (capacity) {
+      let census: Array<{ resourceId: string; running: boolean }>;
+      try {
+        census = await withTimeout(
+          capacity.listRunning(),
+          CAPACITY_LIST_TIMEOUT_MS,
+          `capacity census timed out after ${CAPACITY_LIST_TIMEOUT_MS}ms`,
+        );
+      } catch {
+        return c.json({ error: "capacity check failed, retry shortly" }, 503);
+      }
+      // Count live containers, excluding THIS resource (a redeploy force-replaces its
+      // own pair, net-add zero) AND any resource that already holds a reservation
+      // (its census containers are already represented by inFlightContainers, so
+      // counting both would double it).
+      const running = census.filter(
+        (x) => x.running && x.resourceId !== resourceId && !reservedResources.has(x.resourceId),
+      ).length;
+      if (running + inFlightContainers + 2 > capacity.maxContainers) {
+        // The retry hint lives IN the error string (the studio surfaces only that);
+        // kept distinct from the auth-unset 503 string above.
+        return c.json({ error: "host at capacity, retry in ~60s" }, 503, {
+          "Retry-After": "60",
+        });
+      }
+      // Reserve the pair SYNCHRONOUSLY: no await between the compare above and this
+      // increment, so two concurrent deploys can never both pass the same compare.
+      inFlightContainers += 2;
+      reservedResources.set(resourceId, (reservedResources.get(resourceId) ?? 0) + 1);
+      admitted = true;
+    }
+
+    // The hard per-deploy deadline, applied only when capacity is wired (a hung
+    // deploy would hold its 2 reserved slots forever). Expiry rejects into the
+    // EXISTING catch below: the record flips to failed, the error frame is emitted,
+    // and the finally releases the slots.
+    const deployDeadlineMs = capacity
+      ? deps.deployTimeoutMs ?? DEFAULT_DEPLOY_TIMEOUT_MS
+      : undefined;
+
     // (d) STREAM the progress events. The error frame carries err.message ONLY (no stack,
     // no secret). streamSSE closes the stream when the callback returns.
     //
@@ -334,6 +483,11 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       const enqueue = (e: DeployProgressEvent): void => {
         writeQueue = writeQueue.then(() => stream.writeSSE({ data: JSON.stringify(e) }));
       };
+      // The OUTER try/finally releases the reserved container pair EXACTLY once on
+      // EVERY exit path: deploy success, deploy error, deadline expiry, and the
+      // SlugConflictError early return below. Without capacity (admitted false) the
+      // finally is a no-op, so dev/test behavior is unchanged.
+      try {
       // WRITE-THEN-LAUNCH (subtask 7): write a "deploying" record BEFORE launch so a
       // reconcile tick during the launch window treats the launching containers as
       // desired (not orphans to reap). A SlugConflictError here means the slug is owned
@@ -364,10 +518,22 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
 
       let sawDone = false;
       try {
-        const result = await deploy(req, (e) => {
+        // The deploy call, under the hard deadline when capacity is wired. Expiry
+        // rejects into the catch below so the record flips to failed, the error
+        // frame is emitted, and the outer finally releases the reserved slots
+        // (reconcile's stale-deploying quarantine + orphan reap collects the zombie).
+        const deployPromise = deploy(req, (e) => {
           if (e.phase === "done") sawDone = true;
           enqueue(e);
         });
+        const result =
+          deployDeadlineMs === undefined
+            ? await deployPromise
+            : await withTimeout(
+                deployPromise,
+                deployDeadlineMs,
+                `deploy timed out after ${deployDeadlineMs}ms`,
+              );
         // BEST-EFFORT desired-state persist (only reached when deploy RESOLVED). This
         // flips the "deploying" record to "running" (an idempotent redeploy of the just-
         // written record). The resource is already live, so a store failure must NOT turn
@@ -412,6 +578,18 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       }
       // Drain the queue before returning so streamSSE does not close mid-flush.
       await writeQueue;
+      } finally {
+        // Release the reserved container pair EXACTLY once (admitted flips false so
+        // no path can double-decrement), and drop this resource's reservation refcount
+        // so its census containers are counted normally again.
+        if (admitted) {
+          admitted = false;
+          inFlightContainers -= 2;
+          const refs = (reservedResources.get(resourceId) ?? 1) - 1;
+          if (refs <= 0) reservedResources.delete(resourceId);
+          else reservedResources.set(resourceId, refs);
+        }
+      }
     });
   });
 
@@ -540,6 +718,29 @@ export function handleReconcileError(
 /** Start the deployer HTTP server on the given port (default 8788). */
 export function start(port = Number(process.env.PORT ?? "8788")): void {
   const deps = buildDepsFromEnv();
+  // Resolve the docker handle FIRST (undefined off the sandbox host) so the capacity
+  // census can be wired into the app deps before the routes are built. The same
+  // handle feeds the reconcile loop below.
+  const docker = process.env.UTTER_SANDBOX_HOST === "1" ? resolveDockerHandle() : undefined;
+  if (docker) {
+    // PART D2: real capacity admission on the host. An UNSET MAX_CONCURRENT_RESOURCES
+    // means the DEFAULT CAP (that is the point), never "no cap"; the parse guard keeps
+    // ""/garbage from bricking (0) or silently disabling (NaN) the compare. The census
+    // is the same label-filtered container list the reconcile loop uses.
+    deps.capacity = {
+      maxContainers: parsePositiveInt(
+        process.env.MAX_CONCURRENT_RESOURCES,
+        DEFAULT_MAX_CONCURRENT_RESOURCES,
+        "MAX_CONCURRENT_RESOURCES",
+      ),
+      listRunning: () => listResourceContainers(docker),
+    };
+    deps.deployTimeoutMs = parsePositiveInt(
+      process.env.DEPLOY_TIMEOUT_MS,
+      DEFAULT_DEPLOY_TIMEOUT_MS,
+      "DEPLOY_TIMEOUT_MS",
+    );
+  }
   const app = createDeployerApp(deps);
   // Bind all interfaces (0.0.0.0) by default so the studio CONTAINER can reach this HOST
   // process via host.docker.internal (the docker bridge gateway). A 127.0.0.1-only bind
@@ -564,8 +765,9 @@ export function start(port = Number(process.env.PORT ?? "8788")): void {
   // `loop` is hoisted to function scope so the shutdown closure below can stop it after
   // the request drain and before the store client closes (so no tick fires a store call
   // against a closing client). loop?.stop() is idempotent and a no-op when undefined.
+  // `docker` was resolved above (before the app build) so the capacity census and the
+  // reconcile loop share one handle.
   let loop: ReconcileLoop | undefined;
-  const docker = process.env.UTTER_SANDBOX_HOST === "1" ? resolveDockerHandle() : undefined;
   if (docker) {
     loop = buildReconcileLoop(docker, deps, process.env);
     loop.start();

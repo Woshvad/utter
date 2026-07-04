@@ -22,6 +22,9 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useActionData, useLoaderData, useNavigation } from "react-router";
 import { selectAdapter } from "../adapter/select.js";
 import { requireCreator } from "../auth/requireCreator.server.js";
+import { createGate } from "../limits/create-gate.server.js";
+import { clientIpKey } from "../limits/client-ip.server.js";
+import { TooManyBuildsError } from "../limits/build-slots.server.js";
 import {
   validateComposeSpec,
   type ComposeFieldErrors,
@@ -51,11 +54,57 @@ export type CreateActionData =
   | { ok: false; errors: ComposeFieldErrors }
   | { ok: true; resourceId: string; eventsUrl: string };
 
+/**
+ * The deny split. ONLY a request carrying an `Authorization: Bearer` header is
+ * treated as a programmatic caller and gets a REAL 429 Response (JSON body +
+ * Retry-After). Everything else - every browser form post - gets the inline
+ * action-data errors shape so the composer renders the message instead of the root
+ * error boundary.
+ *
+ * WHY NOT an Accept heuristic: React Router v7 single-fetch form submissions send
+ * `Accept: * /*` (no text/html), so `!accept.includes("text/html")` misclassified
+ * EVERY hydrated-browser create as programmatic and threw the 429 into the app-wide
+ * error boundary ("something broke") for honest rate-limited creators - defeating
+ * the entire point of the inline deny copy. A Bearer header is a positive, reliable
+ * programmatic signal; session-cookie browser posts never carry one.
+ */
+function denyCreate(
+  request: Request,
+  reason: string,
+  retryAfterMs: number,
+  friendly: string,
+): CreateActionData {
+  const hasBearer = (request.headers.get("Authorization") ?? "").startsWith("Bearer ");
+  if (hasBearer) {
+    throw new Response(JSON.stringify({ error: "rate_limited", reason, retryAfterMs }), {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+      },
+    });
+  }
+  return { ok: false, errors: { prompt: friendly } };
+}
+
 export async function action({ request }: ActionFunctionArgs): Promise<CreateActionData> {
   // Access gate (CR-01 / T-06-PRIVESC): an unauthenticated request must NOT reach
   // adapter.createResource. requireCreator throws redirect(/auth) for a document
   // navigation or a 401 for a data/fetch request, so anon can never mint a resource.
-  await requireCreator(request);
+  const creator = await requireCreator(request);
+
+  // Admission gate, IMMEDIATELY after auth and BEFORE the getEscrowBalance chain
+  // read below: a denied request must not pay an Arc RPC round trip.
+  const verdict = createGate().check(creator, clientIpKey(request));
+  if (!verdict.allowed) {
+    const seconds = Math.max(1, Math.ceil(verdict.retryAfterMs / 1000));
+    return denyCreate(
+      request,
+      verdict.reason,
+      verdict.retryAfterMs,
+      `too many creates right now (${verdict.reason}), try again in about ${seconds}s`,
+    );
+  }
 
   const adapter = selectAdapter(process.env);
 
@@ -88,7 +137,17 @@ export async function action({ request }: ActionFunctionArgs): Promise<CreateAct
   try {
     const { resourceId, eventsUrl } = await adapter.createResource(validation.spec);
     return { ok: true, resourceId, eventsUrl };
-  } catch {
+  } catch (err) {
+    // Build-slot saturation is a capacity condition, not a generation failure: it
+    // gets the same deny split as a rate limit, never the could-not-generate copy.
+    if (err instanceof TooManyBuildsError) {
+      return denyCreate(
+        request,
+        "build_capacity",
+        60_000,
+        "studio is at build capacity, try again in a few minutes",
+      );
+    }
     return {
       ok: false,
       errors: {

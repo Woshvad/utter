@@ -38,7 +38,9 @@ Environment=NODE_ENV=production
 # Optional knobs an operator may uncomment (defaults shown):
 #Environment=PORT=8788
 #Environment=RECONCILE_INTERVAL_MS=15000
-#Environment=MAX_CONCURRENT_RESOURCES=50
+# MAX_CONCURRENT_RESOURCES counts CONTAINERS, not resources: every deploy runs TWO
+# containers (handler + gate sidecar), so 20 containers = 10 live resources.
+#Environment=MAX_CONCURRENT_RESOURCES=20
 #Environment=DEPLOY_TIMEOUT_MS=600000
 #Environment=SHUTDOWN_DRAIN_MS=10000
 #Environment=ALERT_WEBHOOK_URL=

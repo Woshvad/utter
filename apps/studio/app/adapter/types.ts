@@ -240,8 +240,13 @@ export interface StudioDataAdapter {
   readonly backend: AdapterBackend;
   /** Compose a resource (STU-01); returns the new id + its SSE events URL. */
   createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }>;
-  /** Stream the build pipeline stages (STU-02) for a resource. */
-  subscribeBuildEvents(resourceId: string): AsyncIterable<BuildEvent>;
+  /** Stream the build pipeline stages (STU-02) for a resource. The optional signal
+   *  lets the SSE route terminate a parked live-channel reader on disconnect or
+   *  lifetime expiry (S7); implementations without a parked wait may ignore it. */
+  subscribeBuildEvents(
+    resourceId: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<BuildEvent>;
   /** Read the resource detail projection (STU-03): card+health+bond+sandbox. */
   getResourceDetail(resourceId: string): Promise<ResourceDetail>;
   /** List marketplace cards (MKT-02) through the filter criteria. */

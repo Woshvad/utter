@@ -16,12 +16,15 @@
 import type { DeploymentRecord } from "./stores/memory";
 
 /**
- * The default global host cap. Derived from host memory headroom: roughly 256MB
- * per container on a 4GB host after the platform services, so about 10 resource
- * containers fit. Operator-tunable (the loop takes a maxConcurrent override); this
- * is a host-capacity number, not a money or scale literal.
+ * The default global host cap. The UNIT IS CONTAINERS, not resources: every deploy
+ * launches TWO containers per resource (the untrusted handler plus its trusted gate
+ * sidecar), so 20 containers = 10 live resources. Sized from host memory headroom:
+ * 20 containers at the 256MB per-container cap is about 5.1GB on the 8GB host,
+ * leaving room for the platform services. Operator-tunable via
+ * MAX_CONCURRENT_RESOURCES (parse-guarded in server.ts); this is a host-capacity
+ * number, not a money or scale literal.
  */
-export const DEFAULT_MAX_CONCURRENT_RESOURCES = 10;
+export const DEFAULT_MAX_CONCURRENT_RESOURCES = 20;
 
 /** Inputs to {@link admitLaunches}. */
 export interface AdmitLaunchesOpts {

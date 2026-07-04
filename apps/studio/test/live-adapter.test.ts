@@ -9,7 +9,7 @@
 // come from the stub publicClient's runtime decimals() read (6), never a literal.
 // runPlayground reuses runPlaygroundHarness verbatim, keeping the reserve-before-run
 // escrow gate intact (the gate reserves the cap BEFORE the handler runs).
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll } from "vitest";
 import type { PublicClient } from "viem";
 import { PAYMENT_ESCROW } from "@utter/chain";
 import { FIXTURE_CREATOR } from "../app/fixtures/index";
@@ -30,6 +30,14 @@ import { BuildEventChannel } from "../app/adapter/build-channel";
 import { runPlaygroundHarness } from "../app/adapter/playground-harness";
 import type { ComposeSpec, Hex, RevenueSummary } from "../app/adapter/types";
 import { FIXTURE_MARKETPLACE, FIXTURE_RESOURCE_ID } from "../app/fixtures/index";
+
+// createResource now takes a build slot from the module-singleton pool (S4) and
+// releases it when the background IIFE finishes. This file runs many creates, one of
+// which (the never-resolving generate stub) holds its slot for the whole file, so the
+// pool is raised far above the default 3. The pool reads env lazily on first acquire.
+beforeAll(() => {
+  process.env.MAX_CONCURRENT_BUILDS = "10000";
+});
 
 /** A clearly-fake unknown id for the not-found case (never seeded). */
 const UNKNOWN_ID =
