@@ -46,12 +46,15 @@ upsert_env() {
 get_env() {
   local v
   v="$(grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
-  # strip all CRs, then trim leading/trailing whitespace (dotenv values may have either).
-  v="$(printf '%s' "$v" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  v="$(printf '%s' "$v" | tr -d '\r')"
+  # strip a dotenv-style inline comment (whitespace then # to end of line), then trim.
+  v="$(printf '%s' "$v" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  # strip a single pair of surrounding quotes, then re-trim any interior whitespace.
   case "$v" in
     \"*\") v="${v#\"}"; v="${v%\"}" ;;
     \'*\') v="${v#\'}"; v="${v%\'}" ;;
   esac
+  v="$(printf '%s' "$v" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   printf '%s' "$v"
 }
 
@@ -76,8 +79,12 @@ DEPLOY_DOMAIN="$(get_env DEPLOY_DOMAIN)"
 
 # Normalize the treasury key to the 0x form cast/forge expect (trims already done in
 # get_env). A malformed key dies here with a clear message, never printing the key.
-TREASURY_KEY="$(normalize_key "$PLATFORM_TREASURY_PRIVATE_KEY")" || \
-  die "PLATFORM_TREASURY_PRIVATE_KEY in .env.local is not a 32-byte hex key (expected 64 hex chars, optional 0x)."
+if ! TREASURY_KEY="$(normalize_key "$PLATFORM_TREASURY_PRIVATE_KEY")"; then
+  # Self-diagnosing, key-free: report the length + which NON-hex chars remain (never the
+  # key material) so a bad line is fixable without another round trip.
+  _junk="$(printf '%s' "$PLATFORM_TREASURY_PRIVATE_KEY" | sed 's/^0[xX]//' | tr -d '0-9a-fA-F')"
+  die "PLATFORM_TREASURY_PRIVATE_KEY in .env.local is not a 32-byte hex key: got length ${#PLATFORM_TREASURY_PRIVATE_KEY}, non-hex chars=[$_junk] (expected 64 hex, optional 0x). Fix that line - remove any inline comment, quotes, or stray characters."
+fi
 
 # --- ensure foundry (forge + cast) is available; auto-install if missing ------------------
 # If a prior run already installed foundry, put it on PATH so we skip the reinstall.
