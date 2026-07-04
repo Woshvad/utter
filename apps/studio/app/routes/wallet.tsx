@@ -2,38 +2,51 @@
 //
 // The loader reads a runtime decimals through the adapter (getEscrowBalance) so the
 // SSR shell can render a 6dp-aware placeholder without a chain call (no 6/1e6
-// literal). The client wallet UI (escrow balance from useEscrowBalance, the
-// AddArcTestnet control, the deposit/withdraw forms) is rendered behind a mounted
-// guard to avoid the SSR hydration flash (Pitfall 6 / T-06-HYDRATION) - the server
-// renders the neutral disconnected state; the client fills in the connected account
-// + balance.
+// literal), plus the ArcScan explorer base for the transaction TxLinks. The client
+// wallet UI (escrow balance from useEscrowBalance, the AddArcTestnet control, the
+// deposit/withdraw forms, and the on-chain transaction feed) is rendered behind a
+// mounted guard to avoid the SSR hydration flash (Pitfall 6 / T-06-HYDRATION) - the
+// server renders the neutral disconnected state; the client fills in the connected
+// account + balance + real transaction history.
 //
-// Layout pixel-matches Design/Utter.dc.html comp lines 582-636: a 1100px content
-// column with an h1 "wallet & escrow", a top 1.3fr/1fr grid (escrow card + deposit
-// card) and a bottom 1.3fr/1fr grid (transaction history + agent spend caps). The
-// transaction-history and agent-spend-cap rows have NO real data source on this
-// surface, so they render the comp's deterministic representative sample data
-// (comp data 1041-1052) - clearly fixture, distinct from the real on-chain balance.
+// The transaction history is the connected account's REAL on-chain escrow events -
+// PaymentEscrow.Deposited (money in) + Withdrawn (money out), read via
+// useWalletTransactions - never fabricated sample rows. When no wallet is connected
+// (or the account has no escrow history) it renders an honest empty state.
 //
 // Wallet leads yellow (money) with red on the destructive withdraw confirm only.
 import * as React from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { useAccount } from "wagmi";
+import { arcTestnet } from "@utter/chain";
 import { selectAdapter } from "../adapter/select.js";
 import { requireCreator } from "../auth/requireCreator.server.js";
 import { useEscrowBalance } from "../wallet/useEscrowBalance.js";
 import { useAccruedEarnings } from "../wallet/useAccruedEarnings.js";
+import { useWalletTransactions, type WalletTx } from "../wallet/useWalletTransactions.js";
 import { AddArcTestnet } from "../wallet/AddArcTestnet.js";
 import { UsdcAmount } from "../components/primitives/UsdcAmount.js";
+import { TxLink } from "../components/primitives/TxLink.js";
 import { EscrowBalanceWidget } from "../components/wallet/EscrowBalanceWidget.js";
 import { DepositForm } from "../components/wallet/DepositForm.js";
 import { WithdrawForm } from "../components/wallet/WithdrawForm.js";
-import { SampleBadge } from "../components/primitives/SampleBadge.js";
 
-/** The serialized loader payload: the runtime decimals for the SSR placeholder. */
+/** The serialized loader payload: the runtime decimals + the ArcScan explorer base. */
 export interface WalletData {
   decimals: number;
+  explorer: string;
+}
+
+/**
+ * Resolve the ArcScan explorer base: the ARC_EXPLORER env (the repo-wide ArcScan
+ * source) if set, else the @utter/chain arcTestnet block-explorer URL. Mirrors the
+ * dashboard's resolveExplorer - we never hardcode a second explorer constant.
+ */
+function resolveExplorer(env: NodeJS.ProcessEnv): string {
+  const fromEnv = env.ARC_EXPLORER?.trim();
+  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  return arcTestnet.blockExplorers?.default.url ?? "";
 }
 
 export async function loader({ request }: LoaderFunctionArgs): Promise<WalletData> {
@@ -47,7 +60,7 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<WalletDat
   const { decimals } = await adapter.getEscrowBalance(
     "0x0000000000000000000000000000000000000000",
   );
-  return { decimals };
+  return { decimals, explorer: resolveExplorer(process.env) };
 }
 
 /** A small mounted guard: false on the server + first client render, true after mount. */
@@ -57,50 +70,27 @@ function useMounted(): boolean {
   return mounted;
 }
 
-// ---------------------------------------------------------------------------
-// Representative sample data (comp 1041-1052). These are NOT real on-chain
-// values - the wallet has no transaction feed or per-agent cap feed wired on
-// this surface yet. They render the comp's deterministic fixture so the screen
-// pixel-matches; they are intentionally distinct from the live escrow balance.
-// ---------------------------------------------------------------------------
-
-interface SampleTx {
-  /** "in" => money inflow (yellow); "out" => outflow (ink-muted). */
-  dir: "in" | "out";
-  label: string;
-  /** Pre-formatted human amount string (no scale math on this surface). */
-  amt: string;
-  hash: string;
-  time: string;
-}
-
-const SAMPLE_TXS: readonly SampleTx[] = [
-  { dir: "in", label: "deposit · usdc", amt: "+$50.00", hash: "0x7a3f…b21c", time: "2h ago" },
-  { dir: "out", label: "call · summarize-url", amt: "−$0.0080", hash: "0x91c2…44de", time: "5h ago" },
-  { dir: "in", label: "earnings · sentiment-score", amt: "+$12.84", hash: "0x55ab…0f12", time: "9h ago" },
-  { dir: "out", label: "call · fx-rates-live", amt: "−$0.0010", hash: "0x33de…aa90", time: "1d ago" },
-  { dir: "out", label: "withdraw · to wallet", amt: "−$200.00", hash: "0x12fa…77bd", time: "2d ago" },
-];
-
-interface SampleCap {
-  name: string;
-  used: string;
-  cap: string;
-  pct: number;
-}
-
-const SAMPLE_CAPS: readonly SampleCap[] = [
-  { name: "research-agent", used: "$1.24", cap: "$5.00 / day", pct: 25 },
-  { name: "ops-bot", used: "$8.90", cap: "$20.00 / day", pct: 45 },
-  { name: "scraper-3", used: "$1.98", cap: "$2.00 / day", pct: 99 },
-];
-
-/** A representative transaction row (fixture). Money-in rows lead yellow; money-out muted. */
-function TxRow({ tx }: { tx: SampleTx }): React.ReactElement {
-  const color = tx.dir === "in" ? "var(--yellow)" : "var(--ink-muted)";
+/**
+ * A real transaction row from the on-chain escrow feed. A deposit (money IN) leads
+ * yellow with a `+`; a withdrawal (money OUT) is muted with a `−`. The amount renders
+ * through the single UsdcAmount surface (runtime decimals, no literal); the hash links
+ * to ArcScan via TxLink; the block number is the real ordering metadata.
+ */
+function TxFeedRow({
+  tx,
+  decimals,
+  explorer,
+}: {
+  tx: WalletTx;
+  decimals: number;
+  explorer: string;
+}): React.ReactElement {
+  const isIn = tx.dir === "in";
+  const color = isIn ? "var(--yellow)" : "var(--ink-muted)";
   return (
     <div
       data-testid="wallet-tx-row"
+      data-dir={tx.dir}
       className="flex items-center gap-[14px] border-b border-hairline px-[18px] py-[14px]"
     >
       <span
@@ -109,43 +99,30 @@ function TxRow({ tx }: { tx: SampleTx }): React.ReactElement {
         style={{ width: 9, height: 9, background: color }}
       />
       <div className="min-w-0 flex-1">
-        <div className="text-[14px] font-medium text-ink">{tx.label}</div>
-        <div className="font-mono text-[11px] text-blue">{tx.hash} ↗</div>
+        <div className="text-[14px] font-medium text-ink lowercase">
+          {isIn ? "deposit" : "withdraw"}
+        </div>
+        <TxLink hash={tx.tx} explorer={explorer} className="text-[11px]" />
       </div>
       <div className="text-right">
-        <div className="font-mono text-[14px] font-bold tabular-nums" style={{ color }}>
-          {tx.amt}
+        <div className="flex items-center justify-end gap-[4px] font-mono text-[14px] font-bold tabular-nums" style={{ color }}>
+          <span aria-hidden="true">{isIn ? "+" : "−"}</span>
+          <UsdcAmount baseUnits={tx.amount} decimals={decimals} />
         </div>
-        <div className="font-mono text-[11px] text-ink-faint">{tx.time}</div>
-      </div>
-    </div>
-  );
-}
-
-/** A representative agent spend-cap row (fixture). Progress bar leads blue. */
-function CapRow({ cap }: { cap: SampleCap }): React.ReactElement {
-  return (
-    <div data-testid="wallet-cap-row" className="border-b border-hairline px-[18px] py-[16px]">
-      <div className="mb-[8px] flex items-center justify-between">
-        <span className="font-mono text-[13px] text-ink">{cap.name}</span>
-        <span className="font-mono text-[12px] text-ink-muted">
-          {cap.used} / {cap.cap}
-        </span>
-      </div>
-      <div className="h-[6px] border border-hairline bg-canvas">
-        <div className="h-full bg-blue" style={{ width: `${cap.pct}%` }} />
+        <div className="font-mono text-[11px] text-ink-faint">block #{tx.blockNumber.toString()}</div>
       </div>
     </div>
   );
 }
 
 export default function WalletRoute(): React.ReactElement {
-  const { decimals } = useLoaderData<typeof loader>();
+  const { decimals, explorer } = useLoaderData<typeof loader>();
   const mounted = useMounted();
   const { address } = useAccount();
 
-  // A monotonic token bumped after a deposit/withdraw confirms so the escrow balance
-  // re-reads (the move-money controls below call refresh()). Carries no money value.
+  // A monotonic token bumped after a deposit/withdraw confirms so the escrow balance +
+  // the transaction feed re-read (the move-money controls below call refresh()). Carries
+  // no money value.
   const [refreshToken, setRefreshToken] = React.useState(0);
   const refresh = React.useCallback(() => setRefreshToken((n) => n + 1), []);
 
@@ -159,9 +136,16 @@ export default function WalletRoute(): React.ReactElement {
   // refreshToken so it re-reads after a withdraw confirms.
   const accrued = useAccruedEarnings({ address: mounted ? address : undefined, refreshToken });
 
+  // Read the REAL on-chain transaction feed (Deposited + Withdrawn) for the connected
+  // account. Bypasses the adapter (a direct chain read, like the sibling read hooks); in
+  // fixture/disconnected mode it stays empty (no fabricated rows).
+  const txs = useWalletTransactions({ address: mounted ? address : undefined, refreshToken });
+
   // Prefer the runtime-read decimals; fall back to the loader's SSR decimals. The accrued
   // read shares the same USDC decimals; prefer whichever runtime read has resolved.
   const renderDecimals = accrued.decimals ?? balance.decimals ?? decimals;
+  const txDecimals = txs.decimals ?? renderDecimals;
+  const txRecords = txs.records ?? [];
 
   return (
     <div className="mx-auto max-w-[1100px] px-[32px] pb-[64px] pt-[28px]">
@@ -233,34 +217,47 @@ export default function WalletRoute(): React.ReactElement {
         )}
       </div>
 
-      {/* bottom grid: transaction history (1.3fr) + agent spend caps (1fr) */}
-      <div className="grid grid-cols-[1.3fr_1fr] gap-[16px]">
-        <section
-          data-testid="wallet-tx-history"
-          className="border border-hairline bg-raised"
-        >
-          <div className="flex items-center justify-between border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            <span>TRANSACTION HISTORY</span>
-            <SampleBadge />
+      {/* bottom: the REAL on-chain transaction history (deposits + withdrawals), full
+          width. No sample rows and no buyer-side spend-cap panel (spend caps are a
+          buyer/facilitator concept with no creator-side data source on this surface). */}
+      <section data-testid="wallet-tx-history" className="border border-hairline bg-raised">
+        <div className="flex items-center justify-between border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
+          <span>TRANSACTION HISTORY</span>
+        </div>
+        {!mounted || !address ? (
+          <div
+            data-testid="wallet-tx-disconnected"
+            className="px-[18px] py-[20px] font-mono text-[12px] text-ink-faint lowercase"
+          >
+            connect a wallet to see transactions
           </div>
-          {SAMPLE_TXS.map((tx) => (
-            <TxRow key={tx.hash} tx={tx} />
-          ))}
-        </section>
-
-        <section
-          data-testid="wallet-agent-caps"
-          className="border border-hairline bg-raised"
-        >
-          <div className="flex items-center justify-between border-b border-hairline px-[18px] py-[16px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            <span>AGENT SPEND CAPS</span>
-            <SampleBadge />
+        ) : txs.loading ? (
+          <div
+            data-testid="wallet-tx-loading"
+            className="px-[18px] py-[20px] font-mono text-[12px] text-ink-muted lowercase"
+          >
+            loading transactions…
           </div>
-          {SAMPLE_CAPS.map((cap) => (
-            <CapRow key={cap.name} cap={cap} />
-          ))}
-        </section>
-      </div>
+        ) : txs.error ? (
+          <div
+            data-testid="wallet-tx-error"
+            className="px-[18px] py-[20px] font-mono text-[12px] text-ink-muted lowercase"
+          >
+            transactions unavailable
+          </div>
+        ) : txRecords.length === 0 ? (
+          <div
+            data-testid="wallet-tx-empty"
+            className="px-[18px] py-[20px] font-mono text-[12px] text-ink-faint lowercase"
+          >
+            no transactions yet
+          </div>
+        ) : (
+          txRecords.map((t) => (
+            <TxFeedRow key={t.tx} tx={t} decimals={txDecimals} explorer={explorer} />
+          ))
+        )}
+      </section>
     </div>
   );
 }

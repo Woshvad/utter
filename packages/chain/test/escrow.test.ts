@@ -6,7 +6,7 @@
 // bond reads hit STAKING_VAULT, and that bad inputs throw.
 import { describe, it, expect } from "vitest";
 import type { Address, PublicClient } from "viem";
-import { readEscrowBalance, readBondStatus, readWithdrawals } from "../src/escrow";
+import { readEscrowBalance, readBondStatus, readWithdrawals, readDeposits } from "../src/escrow";
 import { USDC, PAYMENT_ESCROW, STAKING_VAULT } from "../src/addresses";
 
 const ACCOUNT = "0xDa8c5726f596E8dae99e6dDEBa8AEa1c8bE9A4a5" as Address;
@@ -185,6 +185,63 @@ describe("readWithdrawals", () => {
     const { client } = mockLogClient(6, []);
     await expect(
       readWithdrawals(client, "not-an-address" as Address),
+    ).rejects.toThrow(/invalid account address/);
+  });
+});
+
+describe("readDeposits", () => {
+  it("decodes Deposited logs to {tx, amount, blockNumber}, newest-first, with runtime decimals", async () => {
+    // Two logs out of block order; the 20n one must sort first (newest-first).
+    const { client, getLogsCalls } = mockLogClient(6, [
+      { args: { account: ACCOUNT, amount: 2_000_000n }, transactionHash: TX_A, blockNumber: 10n },
+      { args: { account: ACCOUNT, amount: 5_000_000n }, transactionHash: TX_B, blockNumber: 20n },
+    ]);
+
+    const history = await readDeposits(client, ACCOUNT);
+
+    expect(history.decimals).toBe(6);
+    expect(history.records).toEqual([
+      { tx: TX_B, amount: 5_000_000n, blockNumber: 20n },
+      { tx: TX_A, amount: 2_000_000n, blockNumber: 10n },
+    ]);
+
+    // The getLogs call MUST target PAYMENT_ESCROW, filter by the Deposited event, and
+    // pin the indexed account topic via args.
+    expect(getLogsCalls).toHaveLength(1);
+    const call = getLogsCalls[0]!;
+    expect(call.address).toBe(PAYMENT_ESCROW);
+    expect(call.event.name).toBe("Deposited");
+    expect(call.args).toEqual({ account: ACCOUNT });
+    expect(call.fromBlock).toBe(0n);
+  });
+
+  it("honors a pinned fromBlock and always scans to the chain head", async () => {
+    const { client, getLogsCalls } = mockLogClient(6, []);
+    await readDeposits(client, ACCOUNT, { fromBlock: 12_345n });
+    const call = getLogsCalls[0]!;
+    expect(call.fromBlock).toBe(12_345n);
+    expect(call.toBlock).toBe("latest");
+  });
+
+  it("returns an empty record list (with decimals) when there are no logs", async () => {
+    const { client } = mockLogClient(6, []);
+    const history = await readDeposits(client, ACCOUNT);
+    expect(history).toEqual({ records: [], decimals: 6 });
+  });
+
+  it("drops a pending log (null blockNumber / transactionHash) from the records", async () => {
+    const { client } = mockLogClient(6, [
+      { args: { account: ACCOUNT, amount: 1_000_000n }, transactionHash: TX_A, blockNumber: 10n },
+      { args: { account: ACCOUNT, amount: 2_000_000n }, transactionHash: null, blockNumber: null },
+    ]);
+    const history = await readDeposits(client, ACCOUNT);
+    expect(history.records).toEqual([{ tx: TX_A, amount: 1_000_000n, blockNumber: 10n }]);
+  });
+
+  it("throws on an invalid account address", async () => {
+    const { client } = mockLogClient(6, []);
+    await expect(
+      readDeposits(client, "not-an-address" as Address),
     ).rejects.toThrow(/invalid account address/);
   });
 });

@@ -2,36 +2,35 @@
 //
 // PUBLIC screen (no requireCreator) rendered INSIDE the app shell <main>. It is the
 // "connect utter to your agent" surface: it shows the two copy-paste snippets a buyer
-// needs (the mcp server config + the buyer-sdk call), a recent-paid-calls feed, and a
-// spend-cap card. The sidebar already carries an "mcp connect" nav item -> /mcp;
-// registering this route makes it resolve (no more 404).
+// needs (the mcp server config + the buyer-sdk call) and a short honest pointer to where
+// real per-agent activity shows up. The snippets are copy-paste TEMPLATES: the wallet is
+// an obvious placeholder the buyer fills in, and the daily cap is a documented default
+// they edit - not fabricated live data. There is NO fake "recent paid calls" feed or live
+// spend-cap meter on this public page (there is no buyer-side data source here); a
+// connected agent's real calls + caps surface in the buyer's own wallet.
 //
-// Triad discipline: this buyer screen LEADS BLUE (identity / info / links); the money
-// (the spend cap) is the lone YELLOW accent. The recent-paid-calls rows, the config
-// values, and the spend-cap figures are REPRESENTATIVE sample data (deterministic,
-// clearly fixture) - there is no real buyer-side feed wired here yet. The spend-cap
-// "$5.00" / "$1.24" are representative caps, not a live money read, so they are plain
-// strings (no 1e6/6 literal anywhere; if real money is ever wired here it must go
-// through UsdcAmount at runtime decimals).
+// Triad discipline: this buyer screen LEADS BLUE (identity / info / links). No money is
+// rendered live here, so there is no 1e6/6 literal anywhere; if real money is ever wired
+// here it must go through UsdcAmount at runtime decimals.
 //
 // SSR safety: navigator.clipboard is touched ONLY inside the copy button's onClick
 // handler, never during render, so the screen renders server-side without a crash.
 import * as React from "react";
 import { Link } from "react-router";
-import { SampleBadge } from "../components/primitives/SampleBadge.js";
 
-/** The mcp server config snippet (representative values, comp 757-765). */
+/** The mcp server config snippet: a copy-paste TEMPLATE. `wallet` is a placeholder the
+ *  buyer replaces with their own address; `daily` is a documented default cap they edit. */
 const MCP_CONFIG_SNIPPET = `{
   "mcpServers": {
     "utter": {
       "url": "https://mcp.utter.sh",
-      "wallet": "0x4f2a…91c0",
+      "wallet": "0xYOUR_WALLET_ADDRESS",
       "caps": { "daily": "$5.00" }
     }
   }
 }`;
 
-/** The buyer-sdk call snippet (representative, comp 772-779). */
+/** The buyer-sdk call snippet (a copy-paste template). */
 const BUYER_SDK_SNIPPET = `import { Utter } from "utter-sdk"
 
 const u = new Utter({ wallet })
@@ -74,23 +73,6 @@ function CodeCard({ label, code }: { label: string; code: string }): React.React
   );
 }
 
-/** A recent-paid-call row: a triangle glyph + label + tx hash + amount (comp 787-792).
- *  Representative sample data (deterministic; clearly fixture). */
-interface PaidCall {
-  label: string;
-  hash: string;
-  amt: string;
-  /** The amount color token class - blue for info rows, yellow for the money emphasis. */
-  amtClass: string;
-}
-
-const RECENT_PAID_CALLS: readonly PaidCall[] = [
-  { label: "sentiment-score", hash: "0x91c0…7af2", amt: "$0.0042", amtClass: "text-ink" },
-  { label: "geocode-address", hash: "0x4f2a…11b8", amt: "$0.0018", amtClass: "text-ink" },
-  { label: "summarize-doc", hash: "0xa3d1…9e04", amt: "$0.0090", amtClass: "text-ink" },
-  { label: "fx-rate-usdc", hash: "0x77c5…2d10", amt: "$0.0006", amtClass: "text-ink" },
-];
-
 export default function McpConnectRoute(): React.ReactElement {
   return (
     <div className="max-w-[1100px] px-[32px] pt-[28px] pb-[64px]">
@@ -112,52 +94,16 @@ export default function McpConnectRoute(): React.ReactElement {
         <CodeCard label="buyer sdk" code={BUYER_SDK_SNIPPET} />
       </div>
 
-      {/* bottom grid: recent paid calls (1.4fr) + spend cap (1fr) (comp 783-802) */}
-      <div className="grid grid-cols-[1.4fr_1fr] gap-[16px]">
-        {/* RECENT PAID CALLS (comp 784-794) */}
-        <div className="border border-hairline bg-raised">
-          <div className="flex items-center justify-between border-b border-hairline p-[16px_18px] font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            <span>RECENT PAID CALLS</span>
-            <SampleBadge />
-          </div>
-          {RECENT_PAID_CALLS.map((tx) => (
-            <div
-              key={tx.hash}
-              className="flex items-center gap-[14px] border-b border-hairline p-[13px_18px]"
-            >
-              {/* triangle glyph (comp 788) */}
-              <div
-                aria-hidden="true"
-                className="h-0 w-0 flex-none border-y-[6px] border-l-[10px] border-y-transparent border-l-ink-faint"
-              />
-              <span className="flex-1 text-[13px]">{tx.label}</span>
-              <span className="font-mono text-[12px] text-blue">{tx.hash}</span>
-              <span className={`font-mono text-[13px] font-bold ${tx.amtClass}`}>{tx.amt}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* SPEND CAP (comp 795-801) - the lone YELLOW money accent */}
-        <div className="border border-hairline bg-raised p-[20px]">
-          <div className="mb-[16px] flex items-center justify-between font-mono text-[12px] tracking-[0.06em] text-ink-faint">
-            <span>SPEND CAP</span>
-            <SampleBadge />
-          </div>
-          <div className="mb-[4px] font-mono text-[36px] font-bold text-yellow">$5.00</div>
-          <div className="mb-[18px] font-mono text-[12px] text-ink-muted">
-            per day · $1.24 used
-          </div>
-          {/* 6px progress bar with a 25% blue fill (comp 799) */}
-          <div className="mb-[18px] h-[6px] border border-hairline bg-canvas">
-            <div className="h-full w-[25%] bg-blue" />
-          </div>
-          <Link
-            to="/wallet"
-            className="block w-full bg-blue p-[12px] text-center font-mono text-[14px] font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-white"
-          >
-            manage caps
+      {/* honest pointer: there is no buyer-side feed on this public page. A connected
+          agent's real paid calls + spend caps surface in the buyer's own wallet. */}
+      <div className="border border-hairline bg-raised p-[20px]">
+        <p className="m-0 text-[14px] text-ink-muted">
+          once your agent is connected, its paid calls and spend caps show up in your{" "}
+          <Link to="/wallet" className="text-blue hover:underline">
+            wallet
           </Link>
-        </div>
+          .
+        </p>
       </div>
 
       {/* keep /keys reachable now that the nav shows "mcp connect" instead of keys */}

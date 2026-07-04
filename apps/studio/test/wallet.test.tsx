@@ -6,6 +6,7 @@
 // reader (no chain). A source grep asserts no 5042002 / decimals literal in the
 // wallet render path (T-06-DECIMALS) and that the config uses arcTestnet + ssr:true.
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { DepositHistory, WithdrawalHistory } from "@utter/chain";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -202,6 +203,82 @@ describe("useAccruedEarnings (readEscrowBalance / PaymentEscrow.balanceOf, runti
   });
 });
 
+describe("useWalletTransactions (merged Deposited + Withdrawn feed, newest-first)", () => {
+  it("merges deposits (in) + withdrawals (out) newest-first with runtime decimals", async () => {
+    const { useWalletTransactions } = await import("../app/wallet/useWalletTransactions");
+    // Two deposits (blocks 30, 10) + one withdrawal (block 20). The merged feed must be
+    // newest-first by blockNumber, each row tagged with its direction.
+    const depositsReader = vi.fn(async (): Promise<DepositHistory> => ({
+      records: [
+        { tx: "0xdep30", amount: 5_000_000n, blockNumber: 30n },
+        { tx: "0xdep10", amount: 1_000_000n, blockNumber: 10n },
+      ],
+      decimals: 6,
+    }));
+    const withdrawalsReader = vi.fn(async (): Promise<WithdrawalHistory> => ({
+      records: [{ tx: "0xwd20", amount: 2_000_000n, blockNumber: 20n }],
+      decimals: 6,
+    }));
+
+    let snapshot: ReturnType<typeof useWalletTransactions> | undefined;
+    function Probe(): React.ReactElement {
+      snapshot = useWalletTransactions({
+        address: "0x1111111111111111111111111111111111111111",
+        depositsReader,
+        withdrawalsReader,
+      });
+      return React.createElement("div");
+    }
+    render(React.createElement(Probe));
+    await waitFor(() => expect(snapshot?.records?.length).toBe(3));
+    expect(snapshot?.records?.map((r) => [r.dir, r.blockNumber])).toEqual([
+      ["in", 30n],
+      ["out", 20n],
+      ["in", 10n],
+    ]);
+    expect(snapshot?.decimals).toBe(6);
+    expect(snapshot?.loading).toBe(false);
+    expect(depositsReader).toHaveBeenCalledWith("0x1111111111111111111111111111111111111111");
+    expect(withdrawalsReader).toHaveBeenCalledWith("0x1111111111111111111111111111111111111111");
+  });
+
+  it("is a no-op (loading:false, no records) when no address is connected", async () => {
+    const { useWalletTransactions } = await import("../app/wallet/useWalletTransactions");
+    const depositsReader = vi.fn(async () => ({ records: [], decimals: 6 }));
+    const withdrawalsReader = vi.fn(async () => ({ records: [], decimals: 6 }));
+    let snapshot: ReturnType<typeof useWalletTransactions> | undefined;
+    function Probe(): React.ReactElement {
+      snapshot = useWalletTransactions({ address: undefined, depositsReader, withdrawalsReader });
+      return React.createElement("div");
+    }
+    render(React.createElement(Probe));
+    await waitFor(() => expect(snapshot?.loading).toBe(false));
+    expect(snapshot?.records).toBeUndefined();
+    expect(depositsReader).not.toHaveBeenCalled();
+    expect(withdrawalsReader).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the error message when a reader rejects", async () => {
+    const { useWalletTransactions } = await import("../app/wallet/useWalletTransactions");
+    const depositsReader = vi.fn(async () => ({ records: [], decimals: 6 }));
+    const withdrawalsReader = vi.fn(async () => {
+      throw new Error("logs read failed");
+    });
+    let snapshot: ReturnType<typeof useWalletTransactions> | undefined;
+    function Probe(): React.ReactElement {
+      snapshot = useWalletTransactions({
+        address: "0x1111111111111111111111111111111111111111",
+        depositsReader,
+        withdrawalsReader,
+      });
+      return React.createElement("div");
+    }
+    render(React.createElement(Probe));
+    await waitFor(() => expect(snapshot?.error).toBe("logs read failed"));
+    expect(snapshot?.loading).toBe(false);
+  });
+});
+
 describe("EscrowBalanceWidget (read-only comp card: 52px mono balance + pill + chain)", () => {
   it("renders the balance mono via UsdcAmount, a no-copy address pill and the arc testnet label", async () => {
     const { EscrowBalanceWidget } = await import("../app/components/wallet/EscrowBalanceWidget");
@@ -258,7 +335,9 @@ describe("wallet render path + root providers (no literal; providers wired)", ()
     "../app/wallet/AddArcTestnet.tsx",
     "../app/wallet/useEscrowBalance.ts",
     "../app/wallet/useAccruedEarnings.ts",
+    "../app/wallet/useWalletTransactions.ts",
     "../app/components/wallet/EscrowBalanceWidget.tsx",
+    "../app/components/primitives/TxLink.tsx",
     "../app/components/shell/WalletPill.tsx",
     "../app/routes/wallet.tsx",
   ];

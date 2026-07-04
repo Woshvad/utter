@@ -51,6 +51,25 @@ export interface WithdrawalHistory {
   decimals: number;
 }
 
+/** One on-chain PaymentEscrow.Deposited record - an account's money IN (the inflow
+ * counterpart to WithdrawalRecord; identical shape). */
+export interface DepositRecord {
+  /** The on-chain tx hash of the deposit (for the ArcScan TxLink). */
+  tx: Hex;
+  /** The deposited amount in USDC base units (bigint). */
+  amount: bigint;
+  /** The block number the deposit landed in (drives newest-first ordering). */
+  blockNumber: bigint;
+}
+
+/** An account's deposit history: the records (newest-first) + runtime decimals. */
+export interface DepositHistory {
+  /** Deposit records, newest-first. */
+  records: DepositRecord[];
+  /** Decimals read from USDC at runtime (never a literal). */
+  decimals: number;
+}
+
 /** A resource's bond status as read from the StakingVault, amounts in base units. */
 export interface BondStatus {
   /** The posted bond amount in USDC base units (bigint), from `bonds(resourceId)`. */
@@ -161,6 +180,66 @@ export async function readWithdrawals(
   // `amount` is required (strict getLogs); tx/blockNumber are nullable only for pending
   // logs, already excluded by the filter above.
   const records: WithdrawalRecord[] = logs
+    .filter((l) => l.blockNumber != null && l.transactionHash != null)
+    .map((l) => ({
+      tx: l.transactionHash as Hex,
+      amount: l.args.amount,
+      blockNumber: l.blockNumber as bigint,
+    }))
+    .sort((a, b) => (a.blockNumber < b.blockNumber ? 1 : a.blockNumber > b.blockNumber ? -1 : 0));
+
+  return { records, decimals };
+}
+
+/**
+ * Read an account's PaymentEscrow.Deposited events - the inflows that
+ * `escrow.deposit` emitted - formatted with USDC's runtime decimals. This is the
+ * money-IN mirror of readWithdrawals: the same indexed-`account` getLogs filter, the
+ * same full-history-by-default scan (fromBlock 0n, pinnable), the same strict decode
+ * and newest-first ordering, and the same runtime decimals discipline. A pure read;
+ * it never touches a write path.
+ *
+ * @throws if `account` is not a valid EVM address (ASVS V5 input validation).
+ */
+export async function readDeposits(
+  client: PublicClient,
+  account: Address,
+  opts?: { escrowAddress?: Address; fromBlock?: bigint },
+): Promise<DepositHistory> {
+  if (!isAddress(account)) {
+    throw new Error(`readDeposits: invalid account address: ${account}`);
+  }
+
+  const escrowAddress = opts?.escrowAddress ?? PAYMENT_ESCROW;
+  const fromBlock = opts?.fromBlock ?? 0n;
+
+  // Resolve the Deposited event item from escrowAbi so the fragment stays single-
+  // sourced (the same ABI the money path decodes against), never re-typed here.
+  const depositedEvent = getAbiItem({ abi: escrowAbi, name: "Deposited" });
+
+  // Read USDC decimals() and the account's Deposited logs together. `decimals` comes
+  // from chain, never a literal - the CHAIN-03 enforcement point. The logs are filtered
+  // by the indexed `account` topic against the escrow.
+  const [decimals, logs] = await Promise.all([
+    client.readContract({
+      address: USDC,
+      abi: erc20Abi,
+      functionName: "decimals",
+    }),
+    client.getLogs({
+      address: escrowAddress,
+      event: depositedEvent,
+      args: { account },
+      fromBlock,
+      toBlock: "latest",
+      // strict: only fully-decoding logs survive, so a record always carries a decoded
+      // `amount` (defense in depth for a money read - a partial log is dropped, not zeroed).
+      strict: true,
+    }),
+  ]);
+
+  // Drop pending logs (no blockNumber / txHash yet), map to records, sort newest-first.
+  const records: DepositRecord[] = logs
     .filter((l) => l.blockNumber != null && l.transactionHash != null)
     .map((l) => ({
       tx: l.transactionHash as Hex,

@@ -90,6 +90,8 @@ export interface BuildStreamProps {
   liveUrl?: string;
   /** The per-call price in base units (rendered only via UsdcAmount, no literal). */
   priceBaseUnits?: bigint;
+  /** The posted bond in base units (rendered via UsdcAmount only when > 0; no literal). */
+  bondBaseUnits?: bigint;
   /** Decimals from a runtime read (passed straight to UsdcAmount). */
   decimals?: number;
   /** Injectable EventSource factory for tests (defaults to the global). */
@@ -108,6 +110,7 @@ export function BuildStream({
   liveName,
   liveUrl,
   priceBaseUnits,
+  bondBaseUnits,
   decimals,
   eventSourceFactory,
 }: BuildStreamProps): React.ReactElement {
@@ -156,7 +159,6 @@ export function BuildStream({
   // IN-01: only render the live URL as a clickable anchor when its scheme is http(s).
   const safeLiveUrl = safeHttpUrl(liveUrl);
   const name = liveName ?? "your-endpoint";
-  const bondFmt = "$5";
   const playgroundHref = resourceId ? `/resources/${resourceId}` : "/discover";
 
   return (
@@ -258,22 +260,36 @@ export function BuildStream({
                   {liveUrl}
                 </span>
               ) : (
-                <span data-testid="build-live-url" className="font-mono text-[14px] text-blue">
-                  {`https://${name}.resources.utter.app`}
-                </span>
+                // No server-known URL yet (the deployed slug is assigned server-side and
+                // is not carried on the SSE stream): link to the canonical resource page
+                // instead of fabricating a URL.
+                <a
+                  href={playgroundHref}
+                  data-testid="build-live-url"
+                  className="font-mono text-[14px] text-blue"
+                >
+                  view your endpoint →
+                </a>
               )}
-              <span className="font-mono text-[13px] text-yellow">
-                {priceBaseUnits !== undefined && decimals !== undefined ? (
-                  <>
-                    <UsdcAmount baseUnits={priceBaseUnits} decimals={decimals} />
-                    {" / call"}
-                  </>
-                ) : (
-                  "$0.0100 / call"
-                )}
-              </span>
+              {/* Real per-call price (the creator's entered basePrice), rendered only via
+                  UsdcAmount at runtime decimals. Omitted rather than faked when absent. */}
+              {priceBaseUnits !== undefined && decimals !== undefined ? (
+                <span className="font-mono text-[13px] text-yellow">
+                  <UsdcAmount baseUnits={priceBaseUnits} decimals={decimals} />
+                  {" / call"}
+                </span>
+              ) : null}
+              {/* verified is real (the build passed the Verify gate); the bond is shown
+                  only when a real bond > 0 was posted (testnet bonds are commonly 0). */}
               <span className="font-mono text-[12px] text-ink-faint">
-                {`· verified · ${bondFmt} bond`}
+                {"· verified"}
+                {bondBaseUnits !== undefined && bondBaseUnits > 0n && decimals !== undefined ? (
+                  <>
+                    {" · "}
+                    <UsdcAmount baseUnits={bondBaseUnits} decimals={decimals} />
+                    {" bond"}
+                  </>
+                ) : null}
               </span>
             </div>
 

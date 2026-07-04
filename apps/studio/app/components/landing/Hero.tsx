@@ -142,7 +142,7 @@ export function Hero(): React.ReactElement {
         <ProofBlock
           glyph={<span className="inline-block" style={{ width: 14, height: 14, background: "var(--yellow)" }} />}
           title="earn per call"
-          note="$0.01 / call in usdc · you keep 90%"
+          note="$0.01 / call in usdc · you keep 70%"
           mono
         />
         <ProofBlock

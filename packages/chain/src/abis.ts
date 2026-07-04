@@ -127,6 +127,21 @@ export const escrowAbi = [
       { name: "nonce", type: "bytes32", indexed: false },
     ],
   },
+  // Deposited(account, amount) - emitted by PaymentEscrow.deposit when an account
+  // funds its internal balanceOf with `amount` USDC base units. Copied verbatim from
+  // contracts/src/PaymentEscrow.sol `event Deposited(address indexed account, uint256
+  // amount)` so the log decodes byte-for-byte. The wallet transaction feed filters on
+  // the indexed `account` topic (the money-IN counterpart to Withdrawn). Purely
+  // additive: does not alter Debited/Withdrawn decoding, the function fragments, or any
+  // write path. amount is USDC base units; no decimals literal.
+  {
+    type: "event",
+    name: "Deposited",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
   // Withdrawn(account, amount) - emitted by PaymentEscrow.withdraw when an account
   // pulls `amount` USDC base units out of its internal balanceOf. Copied verbatim from
   // contracts/src/PaymentEscrow.sol `event Withdrawn(address indexed account, uint256
