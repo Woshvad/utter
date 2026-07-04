@@ -39,14 +39,27 @@ upsert_env() {
     END { if (!found) print k"="v }
   ' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
 }
-# read a single value from .env.local (empty if unset)
-get_env() { grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true; }
+# read a single value from .env.local (empty if unset). Greps ONE key - it NEVER sources
+# the file: .env.local is dotenv format, not a bash script, so any value with a shell-
+# special char (space, (), <, >, quotes, #) would break `source`. Strips a trailing CR
+# (CRLF-edited files) and a single pair of surrounding quotes.
+get_env() {
+  local v
+  v="$(grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  v="${v%$'\r'}"
+  case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+  esac
+  printf '%s' "$v"
+}
 
-# Load the current env so we can read the treasury key + optional overrides.
-set -a; . "$ENV_FILE"; set +a
-ARC_RPC_URL="${ARC_RPC_URL:-$DEFAULT_RPC}"
+# Read only the values we need, WITHOUT sourcing .env.local (see get_env above).
+PLATFORM_TREASURY_PRIVATE_KEY="$(get_env PLATFORM_TREASURY_PRIVATE_KEY)"
+ARC_RPC_URL="$(get_env ARC_RPC_URL)"; ARC_RPC_URL="${ARC_RPC_URL:-$DEFAULT_RPC}"
+DEPLOY_DOMAIN="$(get_env DEPLOY_DOMAIN)"
 
-[ -n "${PLATFORM_TREASURY_PRIVATE_KEY:-}" ] || \
+[ -n "$PLATFORM_TREASURY_PRIVATE_KEY" ] || \
   die "PLATFORM_TREASURY_PRIVATE_KEY is not set in .env.local (the treasury key you already swept with)."
 
 # --- ensure foundry (forge + cast) is available; auto-install if missing ------------------
