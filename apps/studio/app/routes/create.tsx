@@ -240,7 +240,7 @@ export default function CreateRoute(): React.ReactElement {
                   }}
                 />
               </div>
-              <h1 className="mb-[10px] text-[36px] font-semibold tracking-[-0.03em] text-ink">
+              <h1 className="mb-[10px] text-[28px] font-semibold tracking-[-0.03em] text-ink lg:text-[36px]">
                 utter a sentence.
               </h1>
               <p className="m-0 text-[16px] text-ink-muted">
