@@ -29,18 +29,27 @@ const NAV: ReadonlyArray<{ label: string; href: string }> = [
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const adapter = selectAdapter(process.env);
-  // Display address: the SIWE session address when present, else the fixture creator.
-  // This NEVER gates - public in-shell routes (playground, profile) render the shell too.
-  const account = (await getAuthAddress(request)) ?? FIXTURE_CREATOR;
+  // The SIWE-authenticated address, or null when nobody is signed in.
+  const authAddress = await getAuthAddress(request);
+  // Display address for the avatar/profile link: the session address when present, else
+  // the fixture creator. This NEVER gates - public in-shell routes (playground, profile)
+  // render the shell too.
+  const account = authAddress ?? FIXTURE_CREATOR;
 
-  // Escrow figure for the sidebar footer + topbar pill. Best-effort: a live-backend
-  // read can throw RequiresLiveServicesError, in which case the shell shows "-".
+  // Escrow figure for the sidebar footer + topbar pill. Read ONLY for a REAL signed-in
+  // address: an anonymous visitor must never see a balance. Falling back to the fixture
+  // address here would read THAT address's public on-chain escrow and render it as if it
+  // were the visitor's own balance (misleading). No session -> no figure (the shell shows
+  // "-" and the topbar pill is hidden). Best-effort: a live-backend read can throw, in
+  // which case the shell also shows "-".
   let escrow: { raw: string; decimals: number } | null = null;
-  try {
-    const bal = await adapter.getEscrowBalance(account as Hex);
-    escrow = { raw: bal.raw.toString(), decimals: bal.decimals };
-  } catch {
-    escrow = null;
+  if (authAddress) {
+    try {
+      const bal = await adapter.getEscrowBalance(authAddress as Hex);
+      escrow = { raw: bal.raw.toString(), decimals: bal.decimals };
+    } catch {
+      escrow = null;
+    }
   }
 
   // "Your resources" list. Read through listMarketplace (no filter); map to the
