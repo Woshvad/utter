@@ -221,6 +221,14 @@ export interface DeployResourceSpec {
    * route validates it before it reaches here).
    */
   creator?: Address;
+  /**
+   * The resource's A2A agent card (JSON string) the trusted sidecar serves at
+   * /.well-known/agent-card.json. The untrusted handler has no card route, so without this
+   * the free card path proxies to the handler and 404s -> agent discovery + the marketplace
+   * publish probe fail. Sourced from the gated bundle's agent-card.json; absent (echo) -> the
+   * card path proxies as before. Public platform metadata, not a secret.
+   */
+  agentCard?: string;
 }
 
 /**
@@ -544,6 +552,10 @@ export async function deployResource(
     // passes only the A2A discovery card). pricing.maxResponseBytes flows via `pricing`,
     // so fix F2's MAX_RESPONSE_BYTES reaches the sidecar's metering + bounded proxy read.
     freePaths: spec.freePaths,
+    // The trusted sidecar serves this A2A card at /.well-known/agent-card.json (the untrusted
+    // handler has no card route, so the free card path would otherwise proxy to it + 404, and
+    // agent discovery + the marketplace publish probe would fail). Absent (echo) -> proxied.
+    ...(spec.agentCard ? { agentCard: spec.agentCard } : {}),
     // Build the handler image from the ALREADY-GATED generated bundle dir when present;
     // absent, launchResourcePair bundles the echo gate-less handler (back-compat).
     ...(spec.handlerBundleDir ? { handlerBundleDir: spec.handlerBundleDir } : {}),
@@ -903,6 +915,10 @@ export async function deployGatedBundle(
       // The on-chain split recipient (the 70% payee): the studio's SIWE creator, threaded
       // through so earnings accrue to the creator, not the admin key. Undefined -> fallback.
       creator: params.creator,
+      // The gated bundle's A2A card, served by the sidecar at /.well-known/agent-card.json so
+      // the resource is discoverable + passes the marketplace publish probe (the untrusted
+      // handler has no card route). Undefined bundle entry -> echo/card-path-proxies fallback.
+      agentCard: params.bundle["agent-card.json"],
     },
     fetchImpl,
     opts,

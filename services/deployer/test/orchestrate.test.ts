@@ -415,6 +415,38 @@ describe("buildHandlerServiceEnv / buildSidecarServiceEnv", () => {
     expect(env.FREE_PATHS).toBe("/.well-known/agent-card.json,/healthz");
   });
 
+  it("sidecar env emits AGENT_CARD_JSON when an agent card is provided, omits it otherwise", () => {
+    const card = JSON.stringify({ name: "weather", protocolVersion: "0.3.0" });
+    const withCard = buildSidecarServiceEnv({
+      facilitatorUrl: "http://172.20.0.5:8787",
+      resourceId: RESOURCE_ID,
+      cap: 10_000n,
+      pricing: PRICING,
+      maxTimeoutSeconds: 30,
+      handlerUrl: "http://172.30.0.9:8080",
+      facilitatorToken: FACILITATOR_TOKEN,
+      classifierSchema: CLASSIFIER_SCHEMA,
+      agentCard: card,
+      port: 8080,
+    });
+    // The sidecar serves this card at the card path (the untrusted handler has no card route).
+    expect(withCard.AGENT_CARD_JSON).toBe(card);
+
+    // Omitted when absent (echo/back-compat) -> the card path proxies to the handler as before.
+    const withoutCard = buildSidecarServiceEnv({
+      facilitatorUrl: "http://172.20.0.5:8787",
+      resourceId: RESOURCE_ID,
+      cap: 10_000n,
+      pricing: PRICING,
+      maxTimeoutSeconds: 30,
+      handlerUrl: "http://172.30.0.9:8080",
+      facilitatorToken: FACILITATOR_TOKEN,
+      classifierSchema: CLASSIFIER_SCHEMA,
+      port: 8080,
+    });
+    expect(withoutCard.AGENT_CARD_JSON).toBeUndefined();
+  });
+
   it("handler env carries NEITHER MAX_RESPONSE_BYTES NOR FREE_PATHS (only the sidecar gates)", () => {
     const env = buildHandlerServiceEnv({
       resourceId: RESOURCE_ID,

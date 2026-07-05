@@ -463,6 +463,12 @@ export interface BuildSidecarServiceEnvOpts {
    * the echo's only free route. Each entry is matched exactly, never by prefix (#3).
    */
   freePaths?: string[];
+  /**
+   * The resource's A2A agent card (JSON string) the sidecar serves at the card path. Emitted
+   * as AGENT_CARD_JSON when set; absent (echo) -> the card path proxies to the handler. It is
+   * public platform metadata (the finalized agent-card.json from the gated bundle), not a secret.
+   */
+  agentCard?: string;
   /** The container listen port. */
   port: number;
 }
@@ -520,6 +526,13 @@ export function buildSidecarServiceEnv(opts: BuildSidecarServiceEnvOpts): Record
   // commas and matches each entry exactly, never by prefix (#3).
   const freePaths = opts.freePaths ?? [...DEFAULT_SIDECAR_FREE_PATHS];
   env.FREE_PATHS = freePaths.join(",");
+
+  // Emit the A2A agent card so the sidecar serves it at the card path (the untrusted handler
+  // has no card route; without this the free card path proxies to the handler and 404s, which
+  // fails agent discovery + the marketplace publish probe). Public metadata, never a secret.
+  if (opts.agentCard && opts.agentCard.trim().length > 0) {
+    env.AGENT_CARD_JSON = opts.agentCard;
+  }
 
   return env;
 }
@@ -738,6 +751,12 @@ export interface LaunchResourcePairOpts {
    * entry is matched exactly, never by prefix (#3).
    */
   freePaths?: string[];
+  /**
+   * The resource's A2A agent card (JSON string) the trusted sidecar serves at the card path
+   * (the untrusted handler has no card route). Threaded to buildSidecarServiceEnv as
+   * AGENT_CARD_JSON; absent (echo) -> the card path proxies to the handler. Not a secret.
+   */
+  agentCard?: string;
   /** Dev-only override for the handler's network (default: the per-slug pairnet). */
   handlerNetwork?: string;
   /** Override the sidecar's PRIMARY network (default PAIR_NETWORKS.sidecar = ingress). */
@@ -930,6 +949,8 @@ export async function launchResourcePair(
       facilitatorToken: opts.facilitatorToken,
       classifierSchema: opts.classifierSchema,
       ...(opts.freePaths ? { freePaths: opts.freePaths } : {}),
+      // The sidecar serves this card at the card path (the handler has no card route).
+      ...(opts.agentCard ? { agentCard: opts.agentCard } : {}),
       port: PAIR_PORT,
     }),
     name: sidecarName,

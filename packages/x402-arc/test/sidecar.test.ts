@@ -342,6 +342,40 @@ describe("createSidecarGateApp", () => {
     expect(hRec.called).toBe(true);
   });
 
+  it("8b. with agentCard configured, the sidecar SERVES the card itself (200); the handler is NOT proxied", async () => {
+    // The untrusted handler has NO card route, so proxying the free card path to it 404s (the
+    // real bug that failed the marketplace publish probe). With a card configured, the TRUSTED
+    // sidecar serves it directly, so discovery works without ever touching the handler.
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const card = JSON.stringify({ name: "weather", protocolVersion: "0.3.0" });
+    const app = createSidecarGateApp(cfg({ agentCard: card }), {
+      facilitatorFetcher: facilitatorStub(fac),
+      // The handler would 404 the card path; assert it is NEVER reached.
+      handlerFetcher: handlerStub({ rec: hRec, status: 404, body: "not found" }),
+    });
+    const res = await app.request("/.well-known/agent-card.json", { method: "GET" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(card);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    // The trusted sidecar served it: NO gate (verify) AND the untrusted handler was NOT proxied.
+    expect(fac.calls).toHaveLength(0);
+    expect(hRec.called).toBe(false);
+  });
+
+  it("8c. agentCard is served ONLY on the exact card GET; another free path still proxies", async () => {
+    const fac: FacRecord = { calls: [], authByPath: {} };
+    const hRec: HandlerRecord = { called: false };
+    const app = createSidecarGateApp(cfg({ agentCard: JSON.stringify({ name: "x" }) }), {
+      facilitatorFetcher: facilitatorStub(fac),
+      handlerFetcher: handlerStub({ rec: hRec, status: 200, body: "ok" }),
+    });
+    // /healthz is a free path but NOT the card path, so it still bypasses to the handler.
+    const res = await app.request("/healthz", { method: "GET" });
+    expect(res.status).toBe(200);
+    expect(hRec.called).toBe(true);
+  });
+
   it("9. with facilitatorToken set, /verify + /settle + /release carry Bearer <token>", async () => {
     const fac: FacRecord = { calls: [], authByPath: {} };
     const hRec: HandlerRecord = { called: false };
@@ -584,6 +618,15 @@ describe("loadSidecarConfig", () => {
     );
     expect(resolved.facilitatorToken).toBe("tok-xyz");
     expect(resolved.freePaths).toEqual(["/.well-known/", "/status", "/ping"]);
+  });
+
+  it("reads a valid AGENT_CARD_JSON into agentCard; absent -> undefined; malformed -> throws", () => {
+    const card = JSON.stringify({ name: "weather", protocolVersion: "0.3.0" });
+    expect(loadSidecarConfig(env({ AGENT_CARD_JSON: card })).agentCard).toBe(card);
+    // Absent -> the card path proxies as before (undefined).
+    expect(loadSidecarConfig(env()).agentCard).toBeUndefined();
+    // Malformed JSON fails fast at boot rather than serving garbage the discovery probe rejects.
+    expect(() => loadSidecarConfig(env({ AGENT_CARD_JSON: "{not json" }))).toThrow(/AGENT_CARD_JSON/);
   });
 
   it("compiles CLASSIFIER_SCHEMA into a strict classifier when valid", () => {
