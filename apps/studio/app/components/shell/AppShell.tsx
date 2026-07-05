@@ -106,9 +106,13 @@ function SidebarContent({
         ))}
       </nav>
 
-      <div className="border-t border-hairline px-[20px] pb-[8px] pt-[18px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-faint">
-        your resources
-      </div>
+      {/* The "your resources" section header shows only when the signed-in creator owns
+          resources; a signed-out (or empty) shell hides it rather than labeling nothing. */}
+      {resources && resources.length > 0 ? (
+        <div className="border-t border-hairline px-[20px] pb-[8px] pt-[18px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-faint">
+          your resources
+        </div>
+      ) : null}
       <nav aria-label="your resources" className="flex-1 overflow-y-auto py-[4px]">
         {resources && resources.length > 0
           ? resources.map((r) => (

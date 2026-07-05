@@ -6,9 +6,6 @@
 import * as React from "react";
 import { UsdcAmount } from "../primitives/UsdcAmount";
 
-/** The fixture creator used when no connected address is handy (comp avatar -> profile). */
-const FIXTURE_CREATOR = "0x1111111111111111111111111111111111111111";
-
 /**
  * Derive a deterministic avatar initial from the connected account address: the first
  * hex character after the 0x prefix, uppercased. Falls back to a neutral dot when no
@@ -46,9 +43,6 @@ export function TopBar({
   onMenu,
 }: TopBarProps): React.ReactElement {
   const hasEscrow = escrowBaseUnits !== undefined && escrowDecimals !== undefined;
-  const profileAddress = account ?? FIXTURE_CREATOR;
-  // The avatar initial reflects the connected account (not a hardcoded letter).
-  const initial = avatarInitial(account);
 
   // Local controlled query so the search fires on submit (Enter / the search glyph),
   // not on every keystroke. onSearch stays optional, so the input is no-op-safe.
@@ -128,16 +122,41 @@ export function TopBar({
         utter
       </button>
 
-      {/* 34px blue account avatar with the account-derived initial -> profile */}
-      <a
-        href={`/creators/${profileAddress}`}
-        aria-label="account"
-        data-testid="account-avatar"
-        className="flex h-[34px] w-[34px] items-center justify-center rounded-full bg-blue text-[14px] font-bold text-white cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue"
-        style={{ color: "#fff" }}
-      >
-        {initial}
-      </a>
+      {account ? (
+        // signed in: 34px blue avatar with the account-derived initial -> the creator profile
+        <a
+          href={`/creators/${account}`}
+          aria-label="account"
+          data-testid="account-avatar"
+          className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-full bg-blue text-[14px] font-bold text-white cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue"
+          style={{ color: "#fff" }}
+        >
+          {avatarInitial(account)}
+        </a>
+      ) : (
+        // signed out: a NEUTRAL sign-in affordance -> /auth (no fixture identity, no initial)
+        <a
+          href="/auth"
+          aria-label="sign in"
+          data-testid="sign-in"
+          className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-full border border-hairline bg-raised text-ink-muted cursor-pointer outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-blue"
+        >
+          <svg
+            width="17"
+            height="17"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="8" r="3.2" />
+            <path d="M5.5 20a6.5 6.5 0 0 1 13 0" />
+          </svg>
+        </a>
+      )}
     </header>
   );
 }

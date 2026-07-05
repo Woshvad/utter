@@ -26,6 +26,7 @@ import {
   FIXTURE_ACCRUED_EARNINGS,
   FIXTURE_BOND_STATUS,
   FIXTURE_BUILD_EVENTS,
+  FIXTURE_CREATOR,
   FIXTURE_ESCROW_BALANCE,
   FIXTURE_MARKETPLACE,
   FIXTURE_RESOURCE_DETAIL,
@@ -80,6 +81,9 @@ export class FixtureAdapter implements StudioDataAdapter {
     // into IndexRecord shape, filter, then project back to ResourceCardData.
     const records: IndexRecord[] = FIXTURE_MARKETPLACE.map((c) => ({
       resourceId: c.resourceId,
+      // The fixture resources are owned by the fixture creator, so a signed-in-as-fixture
+      // dev/test sees them in the shell's "your resources" (a signed-out visitor sees none).
+      creator: FIXTURE_CREATOR,
       agentId: c.agentId,
       slug: c.slug,
       category: c.category,
@@ -94,6 +98,7 @@ export class FixtureAdapter implements StudioDataAdapter {
     const matched = filterResources(records, criteria);
     return matched.map((r) => ({
       resourceId: r.resourceId as Hex,
+      ...(r.creator ? { creator: r.creator as Hex } : {}),
       agentId: r.agentId,
       slug: r.slug,
       category: r.category,

@@ -120,6 +120,9 @@ export interface ResourceDetail {
 /** A marketplace discovery card (the listMarketplace return row). */
 export interface ResourceCardData {
   resourceId: Hex;
+  /** The owner/creator address (optional; the durable index projection). Lets the shell
+   *  scope its "your resources" list to the signed-in creator without an N+1 detail read. */
+  creator?: Hex;
   agentId: string;
   slug: string;
   category: string;
