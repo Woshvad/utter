@@ -423,10 +423,16 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       gateGeneratedBundle(b.bundle);
     } catch (e) {
       if (e instanceof BundleGateError) {
-        return c.json(
-          { error: "bundle rejected", violations: e.violations.map((v) => v.rule) },
-          400,
+        const rules = e.violations.map((v) => v.rule);
+        // Log the violated rule names so the reason is visible in the deployer logs even
+        // when a client only surfaces {error}. Rule names are NON-secret (the gate already
+        // redacts any secret preview); an empty list means the static check itself errored
+        // (fail-closed). No handler source or secret value is logged.
+        console.warn(
+          `deploy: pre-build gate rejected the bundle (slug=${String(b.slug)}): ` +
+            `${rules.join(", ") || "fail-closed (static check errored)"}`,
         );
+        return c.json({ error: "bundle rejected", violations: rules }, 400);
       }
       throw e;
     }

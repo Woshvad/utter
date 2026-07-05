@@ -180,6 +180,33 @@ describe("streamDeploy (offline, stubbed fetch SSE)", () => {
     expect(caught?.message).not.toContain(SECRET);
   });
 
+  it("appends the pre-build gate violation rule names to a 400 bundle-rejected error", async () => {
+    globalThis.fetch = (async () =>
+      ({
+        ok: false,
+        status: 400,
+        async text() {
+          return JSON.stringify({
+            error: "bundle rejected",
+            violations: ["disallowed-import", "generic-api-key-assignment"],
+          });
+        },
+      }) as unknown as Response) as typeof fetch;
+
+    let caught: Error | undefined;
+    try {
+      await collect(streamDeploy(makeParams(), { deployerUrl: DEPLOYER_URL, authSecret: SECRET }));
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.message).toMatch(/bundle rejected/);
+    // The violated rule names are surfaced so the reason is not an opaque "bundle rejected".
+    expect(caught?.message).toMatch(/disallowed-import/);
+    expect(caught?.message).toMatch(/generic-api-key-assignment/);
+    expect(caught?.message).not.toContain(SECRET);
+  });
+
   it("rejects on an error frame with that frame's message", async () => {
     const frames = [
       { phase: "register", status: "ok", message: "identity registered" },
