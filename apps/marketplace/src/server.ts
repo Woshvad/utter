@@ -303,6 +303,11 @@ export function createMarketplaceApp(deps: MarketplaceAppDeps): Hono {
       return c.json({ error: "publish disabled: MARKETPLACE_AUTH_SECRET unset" }, 503);
     }
     if (!bearerMatches(c.req.header("authorization"), secret)) {
+      // OBSERVABILITY: a publish that never lists otherwise leaves NO trace (Hono does not
+      // log requests), which is exactly what made the empty-discover bug invisible. Log the
+      // OUTCOME of every publish attempt (never the bearer, card, or secret) so an operator
+      // can see WHY a resource did not list. A bearer mismatch is a config error worth naming.
+      console.warn("[marketplace] publish rejected: 401 unauthorized (bearer mismatch)");
       return c.json({ error: "unauthorized" }, 401);
     }
 
@@ -311,15 +316,24 @@ export function createMarketplaceApp(deps: MarketplaceAppDeps): Hono {
     try {
       body = await c.req.json();
     } catch {
+      console.warn("[marketplace] publish rejected: 400 bad_request (body is not JSON)");
       return c.json({ error: "bad_request" }, 400);
     }
     const req = parsePublishRequest(body);
-    if (!req) return c.json({ error: "bad_request" }, 400);
+    if (!req) {
+      console.warn("[marketplace] publish rejected: 400 bad_request (malformed publish fields)");
+      return c.json({ error: "bad_request" }, 400);
+    }
 
     // (c) Run the pipeline. Map each gate failure to its status by instanceof; rethrow
-    // anything else so a real server fault surfaces as a 500 via Hono.
+    // anything else so a real server fault surfaces as a 500 via Hono. Every outcome is
+    // logged with the resourceId + the gate reason (bearer/card/secret are never logged) so
+    // a silent probe/mint failure is visible in `docker compose logs marketplace`.
     try {
       const result = await deps.publishPipeline.publishResource(req);
+      console.log(
+        `[marketplace] published ${req.resourceId} as agentId ${result.agentId.toString()} (listed)`,
+      );
       return c.json(
         {
           listed: true,
@@ -331,17 +345,29 @@ export function createMarketplaceApp(deps: MarketplaceAppDeps): Hono {
       );
     } catch (e) {
       if (e instanceof PublishBlocked) {
+        console.warn(`[marketplace] publish ${req.resourceId} not listed: 403 blocked (${e.reason})`);
         return c.json({ error: "blocked", reason: e.reason }, 403);
       }
       if (e instanceof PublishHeldForReview) {
+        console.warn(`[marketplace] publish ${req.resourceId} not listed: 202 held for review (${e.reason})`);
         return c.json({ status: "review", reason: e.reason }, 202);
       }
       if (e instanceof PublishUnverified) {
+        // The LiveHttpsProber gate: the deployed endpoint could not be verified (often an
+        // unreachable card / non-402 unpaid call / latency budget). Named so an operator sees it.
+        console.warn(`[marketplace] publish ${req.resourceId} not listed: 422 unverified (${e.reason})`);
         return c.json({ error: "unverified", reason: e.reason }, 422);
       }
       if (e instanceof PublishRejected) {
+        console.warn(`[marketplace] publish ${req.resourceId} not listed: 422 rejected (${e.message})`);
         return c.json({ error: "rejected", reason: e.message }, 422);
       }
+      // An unmapped fault (500) is most often the ERC-8004 mint or a probe fetch throwing —
+      // e.g. Arc RPC unreachable. Log the message (no stack, no secret) BEFORE the rethrow so
+      // it is not lost; Hono still surfaces the 500 to the caller.
+      console.error(
+        `[marketplace] publish ${req.resourceId} not listed: 500 error (${(e as Error).message})`,
+      );
       throw e;
     }
   });
