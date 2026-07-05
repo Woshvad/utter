@@ -94,6 +94,24 @@ describe("queryMarketplaceResources (offline, stubbed fetch JSON)", () => {
     expect(out[0]?.health.verified).toBe(true);
   });
 
+  it("carries an address-shaped creator back (durable ownership), leaving it undefined when absent or malformed", async () => {
+    const OWNER = "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
+    globalThis.fetch = (async () =>
+      makeJsonResponse(200, [
+        makeRow({ creator: OWNER }),
+        makeRow({ resourceId: `0x${"a1".repeat(32)}` }), // no creator field
+        makeRow({ resourceId: `0x${"a2".repeat(32)}`, creator: "0xnothex" }), // malformed -> dropped
+      ])) as unknown as typeof fetch;
+
+    const out = await queryMarketplaceResources({ marketplaceUrl: MARKETPLACE_URL });
+    // The address-shaped creator round-trips so the dashboard's ownership scope survives a
+    // studio restart; a legacy row without it, or a malformed value, is left undefined (never
+    // thrown) so the ownership filter falls back to the local-dev placeholder (no real wallet).
+    expect(out[0]?.creator?.toLowerCase()).toBe(OWNER.toLowerCase());
+    expect(out[1]?.creator).toBeUndefined();
+    expect(out[2]?.creator).toBeUndefined();
+  });
+
   it("strips a trailing slash from the marketplace URL before appending /resources", async () => {
     let capturedUrl = "";
     globalThis.fetch = (async (url: string) => {

@@ -611,6 +611,37 @@ describe("LiveAdapter create flow with the real deployer seam (injected deployBu
     expect(stages).toContain("Publish");
   });
 
+  it("threads the SIWE creator (opts.creator) to the deployer as the on-chain split recipient", async () => {
+    // The on-chain creator is the 70% payee. The studio must route it to the SIWE-authenticated
+    // creator so a resource's earnings accrue to THEM, not the deployer admin/relayer key.
+    let captured: { creator?: string } | undefined;
+    const deployBundle: LiveDeps["deployBundle"] = (params) => {
+      captured = params;
+      return (async function* (): AsyncGenerator<BuildEvent> {
+        yield { stage: "Deploy", status: "ok", log: "sandbox launched" };
+      })();
+    };
+    const adapter = await makeLiveAdapter(validateBundle, deployBundle);
+    const CREATOR = "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c";
+    const { resourceId } = await adapter.createResource(makeComposeSpec(), { creator: CREATOR });
+    await drainBuild(adapter, resourceId);
+    expect(captured?.creator).toBe(CREATOR);
+  });
+
+  it("omits the deployer creator when no SIWE creator is passed (fallback to RESOURCE_CREATOR/admin)", async () => {
+    let captured: { creator?: string } | undefined;
+    const deployBundle: LiveDeps["deployBundle"] = (params) => {
+      captured = params;
+      return (async function* (): AsyncGenerator<BuildEvent> {
+        yield { stage: "Deploy", status: "ok", log: "sandbox launched" };
+      })();
+    };
+    const adapter = await makeLiveAdapter(validateBundle, deployBundle);
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+    await drainBuild(adapter, resourceId);
+    expect(captured?.creator).toBeUndefined();
+  });
+
   it("a deployer throw surfaces a Deploy(error) and still completes the channel (no hang)", async () => {
     const SECRET_SHAPED = "Bearer sk_live_should_never_appear";
     const deployBundle: LiveDeps["deployBundle"] = () =>
@@ -678,6 +709,21 @@ describe("LiveAdapter create flow with the marketplace publish seam (injected pu
     expect(publish?.log).toContain("marketplace");
     expect(collected.at(-1)?.stage).toBe("Live");
     expect(collected.at(-1)?.status).toBe("ok");
+  });
+
+  it("passes the SIWE creator to publishToMarketplace so the durable index carries the owner (restart-proof dashboard)", async () => {
+    let captured: import("../app/adapter/marketplace-client.server").PublishParams | undefined;
+    const publishToMarketplace: LiveDeps["publishToMarketplace"] = async (params) => {
+      captured = params;
+      return { listed: true, agentId: "7" };
+    };
+    const adapter = await makeLiveAdapter(validateBundle, undefined, publishToMarketplace);
+    const CREATOR = "0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+    const { resourceId } = await adapter.createResource(makeComposeSpec(), { creator: CREATOR });
+    await drainBuild(adapter, resourceId);
+    // The same authenticated owner recorded on the local IndexRecord is persisted to the durable
+    // marketplace index, so the dashboard's owned-resources view survives a studio restart.
+    expect(captured?.creator).toBe(CREATOR);
   });
 
   it("emits Publish:error (bearer-free) and STILL emits Live:ok when publishToMarketplace throws", async () => {
@@ -819,5 +865,41 @@ describe("LiveAdapter listMarketplace with the discovery read seam (injected lis
     // absent.
     expect(all.map((c) => c.resourceId)).toContain(FIXTURE_RESOURCE_ID);
     expect(all.map((c) => c.resourceId)).not.toContain(LIVE_ONLY_ID);
+  });
+
+  it("getResourceDetail reads the DURABLE marketplace (listResources) when bound, carrying the creator", async () => {
+    // After a studio restart the in-memory index is reseeded empty; a resource created before
+    // the restart must still resolve its owner from the DURABLE marketplace so the dashboard's
+    // ownership scope (sameAddress(detail.creator, the authed creator)) survives the restart.
+    const OWNER = "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a" as Hex;
+    const durable = liveRecords();
+    durable[0]!.creator = OWNER;
+    const adapter = await makeAdapterWithListResources(async () => durable.map((r) => ({ ...r })));
+
+    const detail = await adapter.getResourceDetail(LIVE_ONLY_ID);
+    // LIVE_ONLY_ID is NOT in the seeded in-memory store, proving the record came from the
+    // durable seam - and its creator is carried through recordToDetail for the ownership scope.
+    expect(detail.resourceId).toBe(LIVE_ONLY_ID);
+    expect(detail.creator.toLowerCase()).toBe(OWNER.toLowerCase());
+  });
+
+  it("getResourceDetail falls through to the local index for a fresh-create id not yet in the durable list", async () => {
+    // A JUST-created resource is upserted to the in-memory store immediately but may not yet be
+    // listed in the durable marketplace (publish is async/gate-guarded, or a listing failure is
+    // non-fatal). getResourceDetail must still resolve it from the local index rather than 404.
+    const adapter = await makeAdapterWithListResources(async () => []); // durable list empty
+    const detail = await adapter.getResourceDetail(FIXTURE_RESOURCE_ID);
+    expect(detail.resourceId).toBe(FIXTURE_RESOURCE_ID);
+  });
+
+  it("getResourceDetail falls through to the local index when the durable read THROWS (outage, not a 404)", async () => {
+    // A marketplace OUTAGE must not turn an owned resource into a 404 (which would also block
+    // requireResourceOwner-gated actions). listResources() is fail-loud; getResourceDetail must
+    // catch it and resolve an in-memory hit instead of throwing.
+    const adapter = await makeAdapterWithListResources(async () => {
+      throw new Error("marketplace GET /resources could not be reached (ECONNREFUSED)");
+    });
+    const detail = await adapter.getResourceDetail(FIXTURE_RESOURCE_ID);
+    expect(detail.resourceId).toBe(FIXTURE_RESOURCE_ID);
   });
 });

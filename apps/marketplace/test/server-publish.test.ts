@@ -150,6 +150,42 @@ describe("POST /resources publishes, then serves + lists the resource", () => {
   });
 });
 
+describe("POST /resources persists the creator (durable dashboard ownership)", () => {
+  // The studio sends the SIWE creator so the DURABLE (Postgres) index carries the owner; that
+  // is what makes the studio dashboard's owned-resources view survive a studio restart. GET
+  // /resources spreads the record, so the creator round-trips out for the studio to filter on.
+  const CREATOR = `0x${"cd".repeat(20)}`; // a valid 20-byte address
+
+  it("an authed publish carrying a creator lists it WITH that creator", async () => {
+    const { app } = buildApp({ secret: SECRET });
+    const res = await postResources(app, { ...publishBody(), creator: CREATOR }, `Bearer ${SECRET}`);
+    expect(res.status).toBe(201);
+
+    const listRes = await app.request("/resources");
+    const list = (await listRes.json()) as Array<{ resourceId: string; creator?: string }>;
+    const listed = list.find((r) => r.resourceId === RESOURCE);
+    expect(listed).toBeDefined();
+    expect(listed!.creator?.toLowerCase()).toBe(CREATOR.toLowerCase());
+  });
+
+  it("rejects a malformed creator with 400 (never silently dropped or coerced)", async () => {
+    const { app } = buildApp({ secret: SECRET });
+    const res = await postResources(app, { ...publishBody(), creator: "0xnothex" }, `Bearer ${SECRET}`);
+    expect(res.status).toBe(400);
+  });
+
+  it("a publish with NO creator still lists (legacy/anonymous; creator undefined)", async () => {
+    const { app } = buildApp({ secret: SECRET });
+    const res = await postResources(app, publishBody(), `Bearer ${SECRET}`);
+    expect(res.status).toBe(201);
+    const listRes = await app.request("/resources");
+    const list = (await listRes.json()) as Array<{ resourceId: string; creator?: string }>;
+    const listed = list.find((r) => r.resourceId === RESOURCE);
+    expect(listed).toBeDefined();
+    expect(listed!.creator).toBeUndefined();
+  });
+});
+
 describe("POST /resources blocks a prohibited-use prompt (nothing served or listed)", () => {
   it("an authed prohibited-use prompt -> 403 blocked, and nothing is served/listed", async () => {
     const { app } = buildApp({ secret: SECRET });

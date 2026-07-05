@@ -93,6 +93,18 @@ export interface PublishPipelineDeps {
    * exercise the index projection compose the pipeline unchanged.
    */
   cardStore?: CardStore;
+  /**
+   * Resolve the resource's IMMUTABLE on-chain ResourceRegistry owner (the money recipient
+   * the escrow split credits). When bound and it returns a non-null address, the LISTING step
+   * uses IT as the index `creator` (the dashboard's ownership key), OVERRIDING any caller-
+   * supplied creator - so the durable index owner is provably the same address the settlement
+   * credits and can never be hijacked by a slug-colliding second publisher (H3). Returns null
+   * for an unregistered resource (or on any read error, best-effort), in which case the
+   * pipeline refuses to overwrite an existing record's creator (first-writer-wins) and only
+   * then falls back to the claimed creator. Optional: unbound (the testnet/default + tests) ->
+   * refuse-overwrite + claimed-creator only, byte-identical to before.
+   */
+  resolveOwner?: (resourceId: Hex) => Promise<Hex | null>;
 }
 
 /** The publish request: the spec + the (pre-finalize) built card + its served URL. */
@@ -101,6 +113,15 @@ export interface PublishRequest {
   prompt: string;
   /** The on-chain resourceId (bytes32). */
   resourceId: Hex;
+  /**
+   * The resource creator/owner address (the SIWE wallet that created it). Optional and
+   * additive. Persisted onto the index record so the durable marketplace store carries the
+   * owner: this is what makes the studio dashboard's owned-resources view survive a studio
+   * restart (the in-memory index is reseeded empty on restart). It is a discovery/ownership
+   * projection only, never a money authority (settlement reads the on-chain registry, not
+   * this field).
+   */
+  creator?: Hex;
   /** The listing category (data / compute / ...). */
   category: string;
   /** The built A2A card (pre-finalize; the mint sets identity.agentId). */
@@ -290,11 +311,33 @@ export function createPublishPipeline(deps: PublishPipelineDeps): PublishPipelin
         );
       }
 
+      // H3 OWNERSHIP BINDING - the durable index `creator` is the dashboard's ownership key
+      // AND the requireResourceOwner gate, so it MUST NOT be a freely caller-supplied value a
+      // slug-colliding second publisher can overwrite (that would hijack another creator's
+      // listing + leak their revenue). Bind it, in order:
+      //   1. the IMMUTABLE on-chain ResourceRegistry owner (the money recipient the escrow
+      //      credits) when resolvable - the SAME address the deployer registered, so the
+      //      dashboard owner provably equals the money recipient and cannot diverge;
+      //   2. else an existing durable record's creator (REFUSE-OVERWRITE / first-writer-wins)
+      //      so a second creator re-creating the same slug cannot take over an existing listing;
+      //   3. else the claimed req.creator (a fresh, first-ever publish with no on-chain owner).
+      // resolveOwner is best-effort (it returns null on an unregistered resource or a read
+      // error); the .catch is defense-in-depth so a publish never fails on the ownership read.
+      const onChainOwner = deps.resolveOwner
+        ? await deps.resolveOwner(resourceId).catch(() => null)
+        : null;
+      const existingRecord = await deps.indexStore.get(resourceId);
+      const boundCreator = onChainOwner ?? existingRecord?.creator ?? req.creator;
+
       // (6) INDEX UPSERT - the read-through projection record, active=true. The store
       // mirrors the card x402 pricing + the projected bond/reputation; it authors none
       // of them (T-05-06-INDEXTRUST). This is the LISTING step.
       const record: IndexRecord = {
         resourceId,
+        // The owner/creator projection (optional, additive), bound above to the immutable
+        // on-chain owner / first-writer / claimed creator so the dashboard's ownership scope
+        // survives a restart AND cannot be hijacked by a slug-colliding re-publish.
+        creator: boundCreator,
         agentId: minted.agentId.toString(),
         slug: req.slug ?? cardSlug(finalizedCard),
         category,

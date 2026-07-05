@@ -88,6 +88,8 @@ export interface LiveDeps {
     slug: string;
     resourceLabel: string;
     pricing: Pricing;
+    /** The on-chain split recipient (the creator's 70% payee) - the SIWE creator. */
+    creator?: string;
   }) => AsyncIterable<BuildEvent>;
   /**
    * List a deployed resource in the marketplace SERVICE (the A2A discovery surface agents
@@ -131,6 +133,36 @@ export function resolveCardUrl(slug: string, env: NodeJS.ProcessEnv = process.en
   const domain = raw.replace(/^https?:\/\//, "").replace(/\/+$/, "").replace(/\.+$/, "");
   const apex = domain.startsWith("resources.") ? domain : `resources.${domain}`;
   return `https://${slug}.${apex}/.well-known/agent-card.json`;
+}
+
+/** The discovery-read memo TTL (ms). Short: it exists to collapse a single render's
+ *  listMarketplace + per-card getResourceDetail burst into ONE marketplace GET, not to serve a
+ *  long-lived cache. Discovery data tolerates a few seconds of staleness. */
+const LIST_MEMO_TTL_MS = 3000;
+
+/**
+ * Wrap a discovery-list reader in a short-TTL, promise-coalescing memo. Caching the PROMISE (not
+ * the resolved value) also coalesces CONCURRENT in-flight calls (the dashboard fires its per-card
+ * getResourceDetail reads with Promise.all), so a burst of N reads shares ONE underlying GET. A
+ * rejected fetch is NOT cached (the entry is dropped) so the next call retries a failed read. The
+ * memo is created per buildLiveDeps call (per request), so it never leaks state across requests.
+ */
+export function memoizeList(
+  fn: () => Promise<IndexRecord[]>,
+  ttlMs: number,
+): () => Promise<IndexRecord[]> {
+  let cached: { at: number; value: Promise<IndexRecord[]> } | undefined;
+  return () => {
+    const now = Date.now();
+    if (cached && now - cached.at < ttlMs) return cached.value;
+    const value = fn();
+    cached = { at: now, value };
+    // Drop a rejected fetch so a later call retries instead of re-serving the failed promise.
+    value.catch(() => {
+      if (cached?.value === value) cached = undefined;
+    });
+    return value;
+  };
 }
 
 /**
@@ -315,8 +347,13 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
   const authSecret = env.DEPLOYER_AUTH_SECRET?.trim();
   const deployBundle =
     deployerUrl && authSecret
-      ? (p: { bundle: Bundle; slug: string; resourceLabel: string; pricing: Pricing }) =>
-          streamDeploy(p, { deployerUrl, authSecret })
+      ? (p: {
+          bundle: Bundle;
+          slug: string;
+          resourceLabel: string;
+          pricing: Pricing;
+          creator?: string;
+        }) => streamDeploy(p, { deployerUrl, authSecret })
       : undefined;
 
   // Bind the marketplace publish seam ONLY when both the marketplace URL and the bearer
@@ -335,8 +372,16 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
   // does NOT require MARKETPLACE_AUTH_SECRET (unlike publishToMarketplace above): when the
   // marketplace URL is configured, listMarketplace reads the live marketplace SERVICE;
   // unbound, it falls back to the seeded local-dev index. No bearer is read or passed here.
+  //
+  // The read is wrapped in a short-TTL, promise-coalescing memo (memoizeList). The dashboard +
+  // creator-profile loaders call listMarketplace ONCE and then getResourceDetail per owned card,
+  // all against THIS deps object within a single render; without the memo that is an N+1 full-
+  // list GET against the marketplace (a public-page amplification vector, MED review finding).
+  // The memo collapses the burst to ONE GET. Staleness is bounded to LIST_MEMO_TTL_MS and a
+  // just-created resource still resolves via the in-memory index fall-through in getResourceDetail,
+  // so the memo never hides a fresh create.
   const listResources = marketplaceUrl
-    ? () => queryMarketplaceResources({ marketplaceUrl })
+    ? memoizeList(() => queryMarketplaceResources({ marketplaceUrl }), LIST_MEMO_TTL_MS)
     : undefined;
 
   // Capture the module-singleton index store once so both the deps `indexStore` field and

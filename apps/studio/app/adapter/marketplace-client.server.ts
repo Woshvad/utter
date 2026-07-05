@@ -29,6 +29,10 @@ export interface PublishParams {
   card: Record<string, unknown>;
   cardUrl: string;
   slug: string;
+  /** The resource creator/owner (the SIWE wallet that created it). Persisted to the durable
+   *  marketplace index so the dashboard's owned-resources view survives a studio restart.
+   *  Sent only when defined; the marketplace validates it as an address. */
+  creator?: string;
 }
 
 /**
@@ -45,7 +49,8 @@ export async function publishResource(
 ): Promise<{ listed: boolean; agentId?: string }> {
   const url = `${opts.marketplaceUrl.replace(/\/+$/, "")}/resources`;
 
-  // The publish body: exactly the fields the marketplace's parsePublishRequest reads.
+  // The publish body: exactly the fields the marketplace's parsePublishRequest reads. The
+  // creator is sent only when defined so a legacy/anonymous publish stays byte-identical.
   const body = {
     prompt: params.prompt,
     resourceId: params.resourceId,
@@ -53,6 +58,7 @@ export async function publishResource(
     card: params.card,
     cardUrl: params.cardUrl,
     slug: params.slug,
+    ...(params.creator !== undefined ? { creator: params.creator } : {}),
   };
 
   let res: Response;

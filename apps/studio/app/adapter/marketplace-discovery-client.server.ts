@@ -33,6 +33,7 @@ import type { IndexRecord } from "@utter/marketplace";
  */
 interface ResourceRow {
   resourceId: unknown;
+  creator: unknown;
   agentId: unknown;
   slug: unknown;
   category: unknown;
@@ -102,7 +103,7 @@ function rowToRecord(raw: unknown): IndexRecord {
       "marketplace GET /resources returned a malformed row: active is not a boolean",
     );
   }
-  return {
+  const record: IndexRecord = {
     resourceId: requireString(row.resourceId, "resourceId") as IndexRecord["resourceId"],
     agentId: requireString(row.agentId, "agentId"),
     slug: requireString(row.slug, "slug"),
@@ -125,6 +126,14 @@ function rowToRecord(raw: unknown): IndexRecord {
     cardUrl: requireString(row.cardUrl, "cardUrl"),
     active: row.active,
   };
+  // creator (optional/additive): the owner projection the durable marketplace persists. Carry
+  // it back when present + address-shaped so the dashboard's ownership scope survives a studio
+  // restart (a legacy row without it, or a malformed value, is left undefined, not thrown -
+  // the ownership filter then falls back to the local-dev placeholder, matching no real wallet).
+  if (typeof row.creator === "string" && /^0x[0-9a-fA-F]{40}$/.test(row.creator)) {
+    record.creator = row.creator as IndexRecord["creator"];
+  }
+  return record;
 }
 
 /**

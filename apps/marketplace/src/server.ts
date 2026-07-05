@@ -79,6 +79,11 @@ function isBytes32Hex(value: unknown): value is Hex {
   return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
 }
 
+/** True iff value is a 0x-prefixed 20-byte (40 hex char) address string (a creator/owner). */
+function isAddressHex(value: unknown): value is Hex {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value);
+}
+
 /** True iff value is a plain object (a card / nested object), not null or an array. */
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -103,16 +108,20 @@ function isHttpUrl(value: unknown): value is string {
  */
 function parsePublishRequest(body: unknown): PublishRequest | null {
   if (!isObject(body)) return null;
-  const { prompt, resourceId, category, card, cardUrl, slug, reputation } = body;
+  const { prompt, resourceId, category, card, cardUrl, slug, reputation, creator } = body;
   if (typeof prompt !== "string" || prompt.length === 0) return null;
   if (!isBytes32Hex(resourceId)) return null;
   if (typeof category !== "string" || category.length === 0) return null;
   if (!isObject(card)) return null;
   if (!isHttpUrl(cardUrl)) return null;
   if (slug !== undefined && typeof slug !== "string") return null;
+  // creator (optional): the owner/creator address projection. When present it MUST be a
+  // 20-byte hex address (a malformed value is a 400, never silently dropped or coerced).
+  if (creator !== undefined && !isAddressHex(creator)) return null;
 
   const req: PublishRequest = { prompt, resourceId, category, card, cardUrl };
   if (typeof slug === "string") req.slug = slug;
+  if (isAddressHex(creator)) req.creator = creator;
   if (reputation !== undefined) {
     if (typeof reputation !== "string") return null;
     try {

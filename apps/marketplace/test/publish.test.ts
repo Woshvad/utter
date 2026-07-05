@@ -103,6 +103,7 @@ describe("publish pipeline (createPublishPipeline)", () => {
     bond?: bigint;
     probe?: ProbeResult;
     identity?: ReturnType<typeof mockIdentity>;
+    resolveOwner?: (resourceId: Hex) => Promise<Hex | null>;
   }) {
     const identity = opts.identity ?? mockIdentity();
     return {
@@ -115,6 +116,7 @@ describe("publish pipeline (createPublishPipeline)", () => {
         identity,
         indexStore,
         bondReader: async () => opts.bond ?? 2_000_000n,
+        resolveOwner: opts.resolveOwner,
       }),
     };
   }
@@ -146,6 +148,93 @@ describe("publish pipeline (createPublishPipeline)", () => {
     expect(record!.health.verified).toBe(true);
     expect(record!.bond).toBe(2_000_000n);
     expect(record!.cardUrl).toBe(CARD_URL);
+  });
+
+  // H3 OWNERSHIP BINDING: the durable index `creator` (the dashboard ownership key + the
+  // requireResourceOwner gate) must be bound to the immutable on-chain owner / first-writer,
+  // NOT a freely caller-supplied value a slug-colliding second publisher can overwrite.
+  const CLAIMED_A: Hex = `0x${"a1".repeat(20)}`;
+  const CLAIMED_B: Hex = `0x${"b2".repeat(20)}`;
+  const CHAIN_OWNER: Hex = `0x${"c3".repeat(20)}`;
+
+  it("binds index.creator to the ON-CHAIN owner, OVERRIDING a different claimed creator (H3, no hijack)", async () => {
+    const { card } = buildSpec();
+    // resolveOwner returns the immutable on-chain owner; the publisher CLAIMS a different creator.
+    const { pipeline } = buildPipeline({ resolveOwner: async () => CHAIN_OWNER });
+    await pipeline.publishResource({
+      prompt: "Return the current weather for a city",
+      resourceId: RESOURCE,
+      category: "data",
+      card,
+      cardUrl: CARD_URL,
+      creator: CLAIMED_B,
+    });
+    // The stored owner is the on-chain owner, NOT the claimed creator - so the dashboard owner
+    // provably equals the money recipient and a colliding publisher cannot take over the listing.
+    const record = await indexStore.get(RESOURCE);
+    expect(record!.creator!.toLowerCase()).toBe(CHAIN_OWNER.toLowerCase());
+    expect(record!.creator!.toLowerCase()).not.toBe(CLAIMED_B.toLowerCase());
+  });
+
+  it("REFUSES to overwrite an existing record's creator when no on-chain owner is resolvable (first-writer-wins)", async () => {
+    const { card } = buildSpec();
+    // First publish (creator A) with no on-chain owner resolvable -> stores A.
+    const first = buildPipeline({ resolveOwner: async () => null });
+    await first.pipeline.publishResource({
+      prompt: "Return the current weather for a city",
+      resourceId: RESOURCE,
+      category: "data",
+      card,
+      cardUrl: CARD_URL,
+      creator: CLAIMED_A,
+    });
+    expect((await indexStore.get(RESOURCE))!.creator!.toLowerCase()).toBe(CLAIMED_A.toLowerCase());
+
+    // A SECOND publish for the SAME resourceId claiming a DIFFERENT creator (B): the existing
+    // creator (A) is preserved (refuse-overwrite), so B cannot hijack ownership via a collision.
+    const second = buildPipeline({ resolveOwner: async () => null });
+    await second.pipeline.publishResource({
+      prompt: "Return the current weather for a city",
+      resourceId: RESOURCE,
+      category: "data",
+      card,
+      cardUrl: CARD_URL,
+      creator: CLAIMED_B,
+    });
+    expect((await indexStore.get(RESOURCE))!.creator!.toLowerCase()).toBe(CLAIMED_A.toLowerCase());
+  });
+
+  it("uses the claimed creator on a fresh first publish when no on-chain owner is resolvable", async () => {
+    const { card } = buildSpec();
+    const { pipeline } = buildPipeline({ resolveOwner: async () => null });
+    await pipeline.publishResource({
+      prompt: "Return the current weather for a city",
+      resourceId: RESOURCE,
+      category: "data",
+      card,
+      cardUrl: CARD_URL,
+      creator: CLAIMED_A,
+    });
+    expect((await indexStore.get(RESOURCE))!.creator!.toLowerCase()).toBe(CLAIMED_A.toLowerCase());
+  });
+
+  it("never fails a publish when resolveOwner throws (best-effort; falls back to claimed/existing)", async () => {
+    const { card } = buildSpec();
+    const { pipeline } = buildPipeline({
+      resolveOwner: async () => {
+        throw new Error("rpc down");
+      },
+    });
+    const result = await pipeline.publishResource({
+      prompt: "Return the current weather for a city",
+      resourceId: RESOURCE,
+      category: "data",
+      card,
+      cardUrl: CARD_URL,
+      creator: CLAIMED_A,
+    });
+    expect(result.listed).toBe(true);
+    expect((await indexStore.get(RESOURCE))!.creator!.toLowerCase()).toBe(CLAIMED_A.toLowerCase());
   });
 
   it("moderation block stops publication before listing (no mint, no index record)", async () => {

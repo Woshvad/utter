@@ -7,7 +7,8 @@
 // deployer registers and the resource advertises. No network, no chain call.
 import { describe, it, expect } from "vitest";
 import { resourceIdForLabel, ECHO_RESOURCE_LABEL } from "@utter/x402-arc";
-import { resolveCardUrl, buildLiveDeps } from "../app/adapter/live-deps.server";
+import { resolveCardUrl, buildLiveDeps, memoizeList } from "../app/adapter/live-deps.server";
+import type { IndexRecord } from "@utter/marketplace";
 
 describe("resolveCardUrl (DEPLOY_DOMAIN agent-card URL)", () => {
   it("builds https://<slug>.resources.<domain>/.well-known/agent-card.json from DEPLOY_DOMAIN", () => {
@@ -89,5 +90,41 @@ describe("buildLiveDeps publishToMarketplace seam (env-conditional binding)", ()
       MARKETPLACE_AUTH_SECRET: "   ",
     } as NodeJS.ProcessEnv);
     expect(deps.publishToMarketplace).toBeUndefined();
+  });
+});
+
+describe("memoizeList (discovery-read coalescing memo, kills the dashboard N+1)", () => {
+  it("coalesces a CONCURRENT burst into ONE underlying fetch", async () => {
+    let calls = 0;
+    const memo = memoizeList(async () => {
+      calls += 1;
+      return [] as IndexRecord[];
+    }, 3000);
+    // Mirror the dashboard's Promise.all(getResourceDetail-per-card) fan-out: N concurrent reads.
+    await Promise.all([memo(), memo(), memo(), memo(), memo()]);
+    expect(calls).toBe(1);
+  });
+
+  it("serves a second call within the TTL from cache (no re-fetch)", async () => {
+    let calls = 0;
+    const memo = memoizeList(async () => {
+      calls += 1;
+      return [] as IndexRecord[];
+    }, 3000);
+    await memo();
+    await memo();
+    expect(calls).toBe(1);
+  });
+
+  it("does NOT cache a rejected fetch: the next call retries the read", async () => {
+    let calls = 0;
+    const memo = memoizeList(async () => {
+      calls += 1;
+      throw new Error("marketplace unreachable");
+    }, 3000);
+    await expect(memo()).rejects.toThrow();
+    await expect(memo()).rejects.toThrow();
+    // A failed fetch is dropped from the cache so the second call really retries (calls=2).
+    expect(calls).toBe(2);
   });
 });

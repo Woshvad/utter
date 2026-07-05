@@ -282,6 +282,43 @@ describe("POST /deploy happy path + trust boundary (T-ny2-04)", () => {
   });
 });
 
+describe("POST /deploy threads the on-chain creator (the 70% split recipient routing)", () => {
+  // The studio sends its SIWE-authenticated creator so a resource's earnings accrue to ITS
+  // creator, not the deployer admin key. The route validates the address and threads it into
+  // the deploy request; deployResource then registers spec.creator over the
+  // RESOURCE_CREATOR/admin fallback. The escrow split math is byte-unchanged - only WHICH
+  // address the registry records changes.
+  const CREATOR = `0x${"cd".repeat(20)}`; // a valid 20-byte address
+
+  it("passes a valid creator through to the deploy request", async () => {
+    const fake = makeFakeDeploy();
+    const app = createDeployerApp({ stores: createInMemoryStores(), authSecret: SECRET, deploy: fake });
+    const res = await post(app, { bearer: SECRET, body: { ...benignBody(), creator: CREATOR } });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(fake).toHaveBeenCalledTimes(1);
+    expect(fake.mock.calls[0]![0].creator).toBe(CREATOR);
+  });
+
+  it("400s a malformed creator PRE-STREAM and never calls deploy (a clean 400, not a register throw)", async () => {
+    const fake = makeFakeDeploy();
+    const app = createDeployerApp({ stores: createInMemoryStores(), authSecret: SECRET, deploy: fake });
+    const res = await post(app, { bearer: SECRET, body: { ...benignBody(), creator: "0xnothex" } });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid creator");
+    expect(fake).toHaveBeenCalledTimes(0);
+  });
+
+  it("leaves creator undefined when absent so the deployer falls back to RESOURCE_CREATOR/admin", async () => {
+    const fake = makeFakeDeploy();
+    const app = createDeployerApp({ stores: createInMemoryStores(), authSecret: SECRET, deploy: fake });
+    const res = await post(app, { bearer: SECRET, body: benignBody() });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(fake.mock.calls[0]![0].creator).toBeUndefined();
+  });
+});
+
 describe("POST /deploy persists the deployment record (Track A subtask 4)", () => {
   it("a successful deploy writes a record GET /deployments returns (running, correct slug + derived resourceId)", async () => {
     const fake = makeFakeDeploy();

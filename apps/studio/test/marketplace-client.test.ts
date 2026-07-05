@@ -78,6 +78,26 @@ describe("publishResource (offline, stubbed fetch JSON)", () => {
     expect(out.agentId).toBe("7");
   });
 
+  it("includes the creator in the body only when provided (durable dashboard ownership)", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return makeJsonResponse(201, { listed: true });
+    }) as unknown as typeof fetch;
+
+    // With a creator: it is sent so the marketplace persists the owner into the durable index.
+    const CREATOR = "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
+    await publishResource(makeParams({ creator: CREATOR }), {
+      marketplaceUrl: MARKETPLACE_URL,
+      authSecret: SECRET,
+    });
+    expect(capturedBody.creator).toBe(CREATOR);
+
+    // Without a creator: the field is OMITTED (byte-identical to the legacy publish body).
+    await publishResource(makeParams(), { marketplaceUrl: MARKETPLACE_URL, authSecret: SECRET });
+    expect("creator" in capturedBody).toBe(false);
+  });
+
   it("strips a trailing slash from the marketplace URL before appending /resources", async () => {
     let capturedUrl = "";
     globalThis.fetch = (async (url: string) => {
