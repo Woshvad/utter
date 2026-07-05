@@ -4,7 +4,12 @@
 // A2A v1.0.0 `supportedInterfaces` shape (RESEARCH Pitfall 6).
 import { describe, it, expect } from "vitest";
 import { USDC, PAYMENT_ESCROW } from "@utter/chain";
-import { buildAgentCard, validateAgentCard, A2A_PROTOCOL_VERSION } from "../src/agent-card.js";
+import {
+  buildAgentCard,
+  finalizeAgentCard,
+  validateAgentCard,
+  A2A_PROTOCOL_VERSION,
+} from "../src/agent-card.js";
 import type { ResourceSpec } from "../src/types.js";
 
 const spec: ResourceSpec = {
@@ -53,6 +58,41 @@ describe("buildAgentCard (A2A v0.3.0 + x402)", () => {
     expect((card.identity as { agentId: string }).agentId).toBe("placeholder");
     expect((card.health as { verified: boolean }).verified).toBe(false);
     expect((card.bond as { posted: boolean }).posted).toBe(false);
+  });
+});
+
+describe("finalizeAgentCard (stamp the real resourceId payTo + url)", () => {
+  const RESOURCE_ID = `0x${"ab".repeat(32)}`;
+
+  it("replaces the placeholder x402.payTo with the resourceId (the marketplace payTo-binding gate needs this)", () => {
+    const built = JSON.stringify(buildAgentCard(spec));
+    // The built card carries the placeholder payTo (proof the finalize is doing real work).
+    expect((JSON.parse(built) as { x402: { payTo: string } }).x402.payTo).toContain("placeholder");
+
+    const finalized = JSON.parse(
+      finalizeAgentCard(built, { resourceId: RESOURCE_ID, url: "https://echo.resources.example.com" }),
+    ) as Record<string, unknown>;
+
+    expect((finalized.x402 as { payTo: string }).payTo).toBe(RESOURCE_ID);
+    expect(finalized.url).toBe("https://echo.resources.example.com");
+    // The finalized card stays validateAgentCard-valid and preserves the rest of the x402 block.
+    expect(validateAgentCard(finalized).valid).toBe(true);
+    const x402 = finalized.x402 as Record<string, unknown>;
+    expect(x402.scheme).toBe("utter-escrow");
+    expect(x402.asset).toBe(USDC);
+    expect(x402.escrow).toBe(PAYMENT_ESCROW);
+    expect(x402.pricing).toEqual(spec.pricing);
+  });
+
+  it("leaves url unchanged when none is provided (only payTo is stamped)", () => {
+    const built = JSON.stringify(buildAgentCard(spec));
+    const before = (JSON.parse(built) as { url: string }).url;
+    const finalized = JSON.parse(finalizeAgentCard(built, { resourceId: RESOURCE_ID })) as {
+      url: string;
+      x402: { payTo: string };
+    };
+    expect(finalized.x402.payTo).toBe(RESOURCE_ID);
+    expect(finalized.url).toBe(before);
   });
 });
 

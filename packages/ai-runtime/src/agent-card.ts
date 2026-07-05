@@ -84,6 +84,32 @@ export function buildAgentCard(spec: ResourceSpec): Record<string, unknown> {
 }
 
 /**
+ * Finalize the deploy-time placeholder fields buildAgentCard emits (Phase 3/5). The
+ * canonical on-chain resourceId is only known once the studio derives it, so this stamps
+ * the REAL escrow target onto the card:
+ *   - x402.payTo = resourceId. This is LOAD-BEARING: the marketplace publish pipeline's
+ *     payTo-binding gate REFUSES to list a card whose x402.payTo does not equal the
+ *     resourceId (a payment-redirect guard), and a buyer reads the escrow payTo from here.
+ *     buildAgentCard emits `placeholder-<slug>`, which never matches -> without this the
+ *     resource deploys but is never listed.
+ *   - url = the resource's real base URL (when provided), replacing the example placeholder.
+ *
+ * Takes + returns the card as a JSON STRING (the bundle carries agent-card.json as a
+ * string). It preserves every other field and stays validateAgentCard-valid (payTo/url are
+ * free-form strings). A malformed input throws (the gated bundle's card is already valid).
+ */
+export function finalizeAgentCard(
+  cardJson: string,
+  opts: { resourceId: string; url?: string },
+): string {
+  const card = JSON.parse(cardJson) as Record<string, unknown>;
+  const x402 = (card.x402 as Record<string, unknown> | undefined) ?? {};
+  card.x402 = { ...x402, payTo: opts.resourceId };
+  if (opts.url && opts.url.length > 0) card.url = opts.url;
+  return JSON.stringify(card);
+}
+
+/**
  * The pinned A2A v0.3.0 flat-card schema. Requires the A2A fields + the Utter x402
  * block. Deploy-time fields (url, payTo, agentId, health, bond) are OPTIONAL so a
  * pre-deploy card validates. `additionalProperties:false` at the top level REJECTS

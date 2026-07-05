@@ -17,6 +17,7 @@ import { InMemoryIndexStore, type IndexRecord } from "@utter/marketplace";
 import {
   ScaffoldGenerator,
   validateBundle,
+  finalizeAgentCard,
   type Bundle,
   type ResourceSpec,
   type ValidationResult,
@@ -149,6 +150,7 @@ async function makeLiveAdapter(
     buildChannel: new BuildEventChannel(),
     generate: scaffoldGenerate,
     validate,
+    finalizeCard: finalizeAgentCard,
     // The real deploy seam (undefined by default so the existing cases keep the
     // LOCAL_REAL_BUILD_EVENTS local-sim path). When injected, createResource streams it.
     deployBundle,
@@ -339,6 +341,7 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
       // Never resolves: if createResource awaited this, the test would time out.
       generate: () => new Promise<Bundle>(() => {}),
       validate: validateBundle,
+      finalizeCard: finalizeAgentCard,
       runPlayground: runPlaygroundHarness,
       getRevenue: async () => ({ ...STUB_REVENUE, receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })) }),
       buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
@@ -485,6 +488,7 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
         throw new Error("model unavailable");
       },
       validate: validateBundle,
+      finalizeCard: finalizeAgentCard,
       runPlayground: runPlaygroundHarness,
       getRevenue: async () => ({ ...STUB_REVENUE, receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })) }),
       buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,
@@ -554,7 +558,9 @@ describe("LiveAdapter create flow with the real deployer seam (injected deployBu
 
   it("streams Generate -> deployer events (Mint/Deploy/Verify) -> Publish -> Live", async () => {
     // Record the single argument the seam is called with, and yield three deployer events.
-    let captured: { bundle: unknown; slug: string; resourceLabel: string; pricing: unknown } | undefined;
+    let captured:
+      | { bundle: Record<string, string>; slug: string; resourceLabel: string; pricing: unknown }
+      | undefined;
     const deployBundle: LiveDeps["deployBundle"] = (params) => {
       captured = params;
       return (async function* (): AsyncGenerator<BuildEvent> {
@@ -585,6 +591,12 @@ describe("LiveAdapter create flow with the real deployer seam (injected deployBu
     // The deployer is POSTed the keystone resourceLabel and the conservative pricing.
     expect(captured?.resourceLabel).toBe(`utter:resource:${EXPECTED_SLUG}`);
     expect(captured?.slug).toBe(EXPECTED_SLUG);
+    // The bundle handed to the deployer carries the FINALIZED card (payTo = resourceId), so the
+    // sidecar serves a card whose escrow target binds to this resource (not the placeholder).
+    const deployedCardJson = captured!.bundle["agent-card.json"];
+    expect(deployedCardJson).toBeTypeOf("string");
+    const deployedCard = JSON.parse(deployedCardJson!) as { x402?: { payTo?: unknown } };
+    expect(deployedCard.x402?.payTo).toBe(resourceId);
     expect(captured?.pricing).toEqual({
       model: "metered",
       base: makeComposeSpec().basePrice.toString(),
@@ -702,6 +714,10 @@ describe("LiveAdapter create flow with the marketplace publish seam (injected pu
     // The card is the PARSED object (not the raw JSON string), so it is a plain object.
     expect(captured?.card).toBeTypeOf("object");
     expect(captured?.card).not.toBeNull();
+    // The card's x402.payTo is FINALIZED to the resourceId (not the placeholder-<slug>), so the
+    // marketplace's payTo-binding gate lists it instead of refusing it as a payment redirect.
+    const publishedX402 = (captured?.card as { x402?: { payTo?: unknown } }).x402;
+    expect(publishedX402?.payTo).toBe(resourceId);
 
     // The Publish stage reflects the marketplace listing, followed by Live.
     const publish = collected.find((e) => e.stage === "Publish");
@@ -825,6 +841,7 @@ describe("LiveAdapter listMarketplace with the discovery read seam (injected lis
       buildChannel: new BuildEventChannel(),
       generate: scaffoldGenerate,
       validate: validateBundle,
+      finalizeCard: finalizeAgentCard,
       runPlayground: runPlaygroundHarness,
       getRevenue: async () => ({ ...STUB_REVENUE, receipts: STUB_REVENUE.receipts.map((r) => ({ ...r })) }),
       buildCardUrl: (slug) => `https://${slug}.resources.example.com/.well-known/agent-card.json`,

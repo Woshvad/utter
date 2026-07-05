@@ -21,6 +21,7 @@ import { InMemoryIndexStore } from "@utter/marketplace";
 import {
   selectGenerator,
   validateBundle,
+  finalizeAgentCard,
   type Bundle,
   type ResourceSpec,
 } from "@utter/ai-runtime";
@@ -59,6 +60,7 @@ function makeRealLiveAdapter(): LiveAdapter {
     buildChannel: new BuildEventChannel(),
     generate: realGenerate,
     validate: validateBundle,
+    finalizeCard: finalizeAgentCard,
     runPlayground: runPlaygroundHarness,
     // This test exercises createResource only; getRevenue is never called here. Provide a
     // throwing seam so the LiveDeps shape type-checks without standing up a facilitator.
