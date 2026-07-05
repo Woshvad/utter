@@ -54,4 +54,23 @@ describe("deriveSlug - reserved-name defense-in-depth (H2)", () => {
       expect(RESERVED).not.toContain(slug);
     }
   });
+
+  it("caps a long descriptive prompt so the deployer pairnet name stays under 60 chars", () => {
+    // The deployer builds `utter_pairnet_<slug>` (14-char prefix) and rejects it past 60 chars,
+    // so the slug must be <= 46. This is the real failure a prompt like the one below hit at
+    // deploy: a long slug blew the pairnet-name cap. Assert the derived slug is bounded AND the
+    // full pairnet name the deployer derives fits, for a range of long prompts.
+    const longPrompts = [
+      "extract structured fields from an invoice markdown document and return them as json",
+      "score the sentiment of a tweet from negative one to positive one and explain the reasoning",
+      "convert any currency amount to united states dollars at the current live foreign exchange rate",
+    ];
+    for (const p of longPrompts) {
+      const slug = deriveSlug(p);
+      expect(slug.length).toBeLessThanOrEqual(46);
+      expect(`utter_pairnet_${slug}`.length).toBeLessThanOrEqual(60);
+      // Still a valid, non-empty, charset-clean slug (no trailing hyphen from the slice).
+      expect(slug).toMatch(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/);
+    }
+  });
 });
