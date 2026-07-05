@@ -115,19 +115,32 @@ const RESERVED_DERIVED_SLUGS: ReadonlySet<string> = new Set([
   "health",
 ]);
 
+/**
+ * The max derived-slug length. The deployer builds a per-resource Docker network named
+ * `utter_pairnet_<slug>` and REJECTS any name past 60 chars (services/deployer orchestrate.ts
+ * MAX_PAIRNET_NAME_LENGTH — the pairnet is the per-resource isolation boundary, so its name
+ * must stay a faithful, unique function of the slug and cannot be silently truncated
+ * downstream). The `utter_pairnet_` prefix is 14 chars, so the slug must be <= 46 or a
+ * descriptive prompt fails deploy at the pairnet step (the failure a real "extract structured
+ * fields from an invoice markdown…" prompt hit). Cap the slug at the SOURCE so a long prompt
+ * always deploys; the deployer's 60-char guard stays as the defense-in-depth backstop.
+ */
+const MAX_SLUG_LENGTH = 46;
+
 /** Derive a bounded discovery slug from the prompt: lowercase, alnum-hyphen, trimmed,
- *  collapsed, length-capped. A derived slug can NEVER be empty or a reserved operator
- *  name: an empty result falls back to a stable local slug, and a reserved result is
- *  deterministically transformed by an "api-" prefix so it stays valid (still matches
- *  the deployer's [a-z0-9-] charset) and deterministic (no randomness that would break
- *  tests or the canonical resourceId derivation). The deployer's validateSlug remains
- *  the authoritative reject; this is defense-in-depth. */
+ *  collapsed, length-capped to MAX_SLUG_LENGTH. A derived slug can NEVER be empty or a reserved
+ *  operator name: an empty result falls back to a stable local slug, and a reserved result is
+ *  deterministically transformed by an "api-" prefix so it stays valid (still matches the
+ *  deployer's [a-z0-9-] charset) and deterministic (no randomness that would break tests or the
+ *  canonical resourceId derivation). The reserved words are all short, so the "api-" prefix never
+ *  approaches the cap. The deployer's validateSlug + pairnet-length guard remain the authoritative
+ *  reject; this is defense-in-depth. */
 export function deriveSlug(prompt: string): string {
   const slug = prompt
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 48)
+    .slice(0, MAX_SLUG_LENGTH)
     .replace(/-+$/g, "");
   if (slug.length === 0) return "local-resource";
   if (RESERVED_DERIVED_SLUGS.has(slug)) return `api-${slug}`;
