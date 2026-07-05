@@ -108,3 +108,9 @@ export {
   DEMO_RESOURCE_ID,
 } from "./demo.js";
 export type { DemoWiring } from "./demo.js";
+
+// --- Demo-pay: fund the buyer escrow once + fire N REAL paid calls to a deployed resource ---
+// The operator CLI's testable core (bin/pay.ts). It COMPOSES ensureDeposit + liveTestEndpoint
+// (both byte-unchanged): default DRY-RUN (reads + plan, no writes), `apply` deposits + pays.
+export { runDemoPay, parseDemoPayArgs } from "./demo-pay.js";
+export type { DemoPayArgs, DemoPayOptions, DemoPayResult, HttpFetch } from "./demo-pay.js";
