@@ -87,21 +87,26 @@ function TopBar(): React.ReactElement {
       </div>
       <nav
         aria-label="marketing"
-        className="flex items-center gap-[8px] font-mono text-[13px]"
+        className="flex items-center gap-[6px] font-mono text-[13px] lg:gap-[8px]"
       >
-        <Link to="/discover" className="px-[14px] py-[10px] text-ink-muted lowercase">
+        {/* discover is reachable from the hero's "browse marketplace" CTA; hide it on
+            mobile so the wordmark + connect + utter fit a phone row without wrapping. */}
+        <Link
+          to="/discover"
+          className="hidden whitespace-nowrap px-[14px] py-[10px] text-ink-muted lowercase sm:block"
+        >
           discover
         </Link>
         <Link
           to="/auth"
-          className="border border-hairline px-[16px] py-[10px] text-ink lowercase"
+          className="whitespace-nowrap border border-hairline px-[12px] py-[10px] text-ink lowercase lg:px-[16px]"
         >
           connect wallet
         </Link>
         {/* +utter: white text on red (the comp fix - it was near-black/text-canvas). */}
         <Link
           to="/create"
-          className="px-[18px] py-[10px] font-semibold text-white lowercase"
+          className="whitespace-nowrap px-[14px] py-[10px] font-semibold text-white lowercase lg:px-[18px]"
           style={{ background: "var(--red)" }}
         >
           + utter
@@ -116,7 +121,7 @@ export default function LandingRoute(): React.ReactElement {
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
-      <div className="mx-auto max-w-[1320px] px-[32px]">
+      <div className="mx-auto max-w-[1320px] px-[16px] lg:px-[32px]">
         <TopBar />
         <Hero />
       </div>

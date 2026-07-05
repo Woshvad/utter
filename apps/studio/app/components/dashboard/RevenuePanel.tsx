@@ -124,7 +124,7 @@ export function RevenuePanel({
   return (
     <section data-testid="revenue-panel">
       {/* four stat cells in the seamless 1px hairline grid (the signature motif) */}
-      <div className="mb-[16px] grid grid-cols-4 gap-px border border-hairline bg-hairline">
+      <div className="mb-[16px] grid grid-cols-2 gap-px border border-hairline bg-hairline lg:grid-cols-4">
         <StatCell label="TOTAL EARNINGS" testid="stat-total-earnings">
           <UsdcAmount baseUnits={earnings} decimals={decimals} className="text-yellow" />
         </StatCell>
@@ -141,7 +141,7 @@ export function RevenuePanel({
 
       {/* two chart cards: revenue=yellow, calls=blue (the color discipline). Both plot
           REAL per-resource data from the loader's rows. */}
-      <div className="mb-[16px] grid grid-cols-2 gap-[16px]">
+      <div className="mb-[16px] grid grid-cols-1 gap-[16px] lg:grid-cols-2">
         <ChartCard
           title="revenue · usdc / resource"
           color="yellow"

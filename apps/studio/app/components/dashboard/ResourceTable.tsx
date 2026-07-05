@@ -73,7 +73,10 @@ export function ResourceTable({
 }: ResourceTableProps): React.ReactElement {
   return (
     <section data-testid="resource-table">
-      <div className="border border-hairline bg-raised">
+      {/* The 5-column table keeps its shape and scrolls horizontally on a phone rather than
+          crushing every column; min-w guarantees the columns stay legible. */}
+      <div className="overflow-x-auto">
+      <div className="min-w-[560px] border border-hairline bg-raised">
         {/* header: title + the yellow withdraw-earnings action (comp 666-669) */}
         <div className="flex items-center justify-between border-b border-hairline p-[16px_18px]">
           <span className="font-mono text-[12px] tracking-[0.06em] text-ink-faint">
@@ -135,6 +138,7 @@ export function ResourceTable({
             </a>
           ))
         )}
+      </div>
       </div>
 
       {/* KEEP FUNCTION: ArcScan receipts + alerts in a collapsed disclosure below the

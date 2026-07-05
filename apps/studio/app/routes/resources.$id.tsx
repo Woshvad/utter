@@ -407,9 +407,9 @@ export default function ResourceDetailRoute(): React.ReactElement {
           : `${calls}`;
 
   return (
-    <div className="flex max-w-[1320px]" data-testid="resource-detail">
+    <div className="flex max-w-[1320px] flex-col lg:flex-row" data-testid="resource-detail">
       {/* left content column */}
-      <div className="min-w-0 flex-1 px-[32px] pb-[64px] pt-[24px]">
+      <div className="min-w-0 flex-1 px-[16px] pb-[64px] pt-[24px] lg:px-[32px]">
         {/* back link */}
         <Link
           to="/discover"
@@ -439,7 +439,7 @@ export default function ResourceDetailRoute(): React.ReactElement {
         />
 
         {/* title block: h1 + creator chip + 3-up stats */}
-        <div className="flex items-start gap-[16px] border-b border-hairline py-[24px]">
+        <div className="flex flex-col gap-[16px] border-b border-hairline py-[24px] lg:flex-row lg:items-start">
           <div className="flex-1">
             <h1
               data-testid="detail-title"
@@ -495,7 +495,7 @@ export default function ResourceDetailRoute(): React.ReactElement {
       </div>
 
       {/* right rail: mcp connect + related */}
-      <aside className="w-[340px] flex-none border-l border-hairline bg-canvas p-[24px]">
+      <aside className="w-full flex-none border-t border-hairline bg-canvas p-[24px] lg:w-[340px] lg:border-l lg:border-t-0">
         <div className="mb-[24px]">
           <McpConnectBlock resourceId={detail.resourceId} cardUrl={detail.cardUrl} />
         </div>

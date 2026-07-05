@@ -33,6 +33,8 @@ export interface TopBarProps {
   onUtter?: () => void;
   /** Search query change handler. */
   onSearch?: (q: string) => void;
+  /** Opens the mobile nav drawer (rendered only below lg; absent -> no hamburger). */
+  onMenu?: () => void;
 }
 
 export function TopBar({
@@ -41,6 +43,7 @@ export function TopBar({
   account,
   onUtter,
   onSearch,
+  onMenu,
 }: TopBarProps): React.ReactElement {
   const hasEscrow = escrowBaseUnits !== undefined && escrowDecimals !== undefined;
   const profileAddress = account ?? FIXTURE_CREATOR;
@@ -52,7 +55,23 @@ export function TopBar({
   const [query, setQuery] = React.useState("");
 
   return (
-    <header className="sticky top-0 z-20 flex h-[64px] flex-none items-center gap-[16px] border-b border-hairline bg-canvas px-[24px]">
+    <header className="sticky top-0 z-20 flex h-[64px] flex-none items-center gap-[10px] border-b border-hairline bg-canvas px-[16px] lg:gap-[16px] lg:px-[24px]">
+      {/* mobile-only hamburger: opens the nav drawer (hidden at lg where the rail shows) */}
+      {onMenu ? (
+        <button
+          type="button"
+          onClick={onMenu}
+          aria-label="open menu"
+          className="-ml-[4px] flex h-[40px] w-[40px] flex-none items-center justify-center outline-none focus-visible:ring-2 focus-visible:ring-blue lg:hidden"
+        >
+          <span aria-hidden="true" className="flex flex-col gap-[4px]">
+            <span className="block h-[2px] w-[18px] bg-ink" />
+            <span className="block h-[2px] w-[18px] bg-ink" />
+            <span className="block h-[2px] w-[18px] bg-ink" />
+          </span>
+        </button>
+      ) : null}
+
       {/* hard-edged 480px search box with a leading hollow-square glyph */}
       <form
         role="search"
@@ -78,14 +97,16 @@ export function TopBar({
         />
       </form>
 
-      {/* spacer pins the right cluster to the edge (comp line 225) */}
-      <div className="flex-1" />
+      {/* spacer pins the right cluster to the edge (comp line 225); on mobile the search
+          box fills the row instead, so the spacer only pushes at lg. */}
+      <div className="hidden flex-1 lg:block" />
 
-      {/* escrow pill: 9px yellow square + yellow mono figure, no word labels -> /wallet */}
+      {/* escrow pill: 9px yellow square + yellow mono figure, no word labels -> /wallet.
+          Hidden on mobile (the figure lives in the drawer footer) to save the row. */}
       {hasEscrow ? (
         <a
           href="/wallet"
-          className="flex items-center gap-[10px] border border-hairline px-[14px] py-[9px] cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue"
+          className="hidden items-center gap-[10px] border border-hairline px-[14px] py-[9px] cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue lg:flex"
         >
           <span aria-hidden="true" className="flex-none" style={{ width: 9, height: 9, background: "var(--yellow)" }} />
           <span className="font-mono text-[13px] text-yellow">
@@ -98,7 +119,7 @@ export function TopBar({
       <button
         type="button"
         onClick={onUtter}
-        className="flex items-center gap-[8px] bg-red px-[18px] py-[10px] text-[14px] font-display font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-blue lowercase"
+        className="flex flex-none items-center gap-[8px] bg-red px-[14px] py-[10px] text-[14px] font-display font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-blue lowercase lg:px-[18px]"
         style={{ color: "#fff" }}
       >
         <span aria-hidden="true" className="text-[16px] leading-none">

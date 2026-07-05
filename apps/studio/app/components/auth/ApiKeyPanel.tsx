@@ -68,7 +68,7 @@ export function ApiKeyPanel({
           <div className="flex items-center justify-between gap-sm">
             <code
               data-testid="api-key-raw"
-              className="overflow-x-auto whitespace-nowrap font-mono text-caption-mono text-ink"
+              className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-caption-mono text-ink"
             >
               {mintedRaw}
             </code>

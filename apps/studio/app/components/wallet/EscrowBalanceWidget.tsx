@@ -36,7 +36,7 @@ export function EscrowBalanceWidget({
   return (
     <section
       data-testid="escrow-balance-widget"
-      className="relative overflow-hidden border border-hairline bg-raised p-[28px]"
+      className="relative overflow-hidden border border-hairline bg-raised p-[16px] lg:p-[28px]"
     >
       {/* faint yellow corner square - the Bauhaus money accent (comp 587) */}
       <div
@@ -51,14 +51,14 @@ export function EscrowBalanceWidget({
       {/* big mono USDC (52px, yellow emphasis - money) */}
       <div data-testid="escrow-balance-amount" className="leading-none">
         {loading || !hasBalance ? (
-          <span className="font-mono tabular-nums text-[52px] font-bold tracking-[-0.02em] text-ink-faint leading-none">
+          <span className="font-mono tabular-nums text-[36px] font-bold tracking-[-0.02em] text-ink-faint leading-none lg:text-[52px]">
             $—
           </span>
         ) : (
           <UsdcAmount
             baseUnits={baseUnits}
             decimals={decimals}
-            className="text-[52px] font-bold tracking-[-0.02em] text-yellow leading-none"
+            className="text-[36px] font-bold tracking-[-0.02em] text-yellow leading-none lg:text-[52px]"
           />
         )}
       </div>

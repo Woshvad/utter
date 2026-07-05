@@ -201,9 +201,9 @@ export default function DiscoverRoute(): React.ReactElement {
   const countLabel = `${cards.length} ${cards.length === 1 ? "api" : "apis"}`;
 
   return (
-    <div className="max-w-[1320px] px-[32px] pt-[28px] pb-[64px]">
+    <div className="max-w-[1320px] px-[16px] pt-[28px] pb-[64px] lg:px-[32px]">
       {/* header: "discover" + the inline "{n} apis" count (comp 367-370) */}
-      <header className="mb-[20px] flex items-baseline gap-[16px]">
+      <header className="mb-[20px] flex flex-wrap items-baseline gap-[8px] lg:gap-[16px]">
         <h1 className="m-0 text-[26px] font-semibold tracking-[-0.02em] lowercase text-ink">
           discover
         </h1>
@@ -226,8 +226,8 @@ export default function DiscoverRoute(): React.ReactElement {
           "filters" summary sits at the right end of the bar) so the resting layout
           matches the comp single column exactly. */}
       <details data-testid="filters-disclosure" className="mb-[24px]">
-        <div className="flex items-center gap-[6px] border-b border-hairline pb-[2px]">
-          <span className="mr-[6px] font-mono text-[12px] text-ink-faint lowercase">sort</span>
+        <div className="flex items-center gap-[6px] overflow-x-auto border-b border-hairline pb-[2px]">
+          <span className="mr-[6px] flex-none font-mono text-[12px] text-ink-faint lowercase">sort</span>
           <SortControl active={sort} hrefFor={(s) => withParam(params, "sort", s)} />
           <summary className="ml-auto cursor-pointer list-none px-[13px] py-[8px] font-mono text-[12px] text-ink-faint lowercase hover:text-ink [&::-webkit-details-marker]:hidden">
             filters

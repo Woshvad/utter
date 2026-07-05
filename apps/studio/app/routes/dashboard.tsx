@@ -233,7 +233,7 @@ export default function DashboardRoute(): React.ReactElement {
   const { address } = useAccount();
 
   return (
-    <div className="mx-auto max-w-[1280px] px-[32px] pb-[64px] pt-[28px]">
+    <div className="mx-auto max-w-[1280px] px-[16px] pb-[64px] pt-[28px] lg:px-[32px]">
       <h1
         data-testid="dashboard-title"
         className="mb-[24px] text-[26px] font-semibold tracking-[-0.02em] text-ink lowercase"

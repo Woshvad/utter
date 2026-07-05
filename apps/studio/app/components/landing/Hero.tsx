@@ -16,7 +16,7 @@ import { Link } from "react-router";
  *  so it is skipped by assistive tech. */
 function HeroComposition(): React.ReactElement {
   return (
-    <div aria-hidden="true" className="relative h-[380px]">
+    <div aria-hidden="true" className="relative hidden h-[380px] lg:block">
       <div
         className="absolute right-0 top-0"
         style={{ width: 240, height: 240, background: "var(--blue)" }}
@@ -74,7 +74,7 @@ function ProofBlock({
 export function Hero(): React.ReactElement {
   return (
     <section data-testid="landing-hero" className="flex flex-col">
-      <div className="grid grid-cols-[1.1fr_0.9fr] items-center gap-[48px] pt-[72px] pb-[64px]">
+      <div className="grid grid-cols-1 items-center gap-[32px] pb-[40px] pt-[40px] lg:grid-cols-[1.1fr_0.9fr] lg:gap-[48px] lg:pt-[72px] lg:pb-[64px]">
         <div className="flex flex-col">
           {/* eyebrow: 8px yellow square + uppercase mono kicker with real -> arrows */}
           <div className="mb-[24px] flex items-center gap-[8px] font-mono text-[12px] tracking-[0.08em] text-yellow">
@@ -86,7 +86,7 @@ export function Hero(): React.ReactElement {
             SENTENCE → PAID API → ONCHAIN
           </div>
 
-          <h1 className="mb-[24px] text-[64px] font-display font-bold leading-[0.98] tracking-[-0.04em] text-ink lowercase">
+          <h1 className="mb-[24px] text-[40px] font-display font-bold leading-[0.98] tracking-[-0.04em] text-ink lowercase lg:text-[64px]">
             you utter a sentence;
             <br />
             you get a paid api.
@@ -97,7 +97,7 @@ export function Hero(): React.ReactElement {
             lists it. agents discover it and pay per call in usdc. you earn the majority.
           </p>
 
-          <div className="flex items-center gap-[12px]">
+          <div className="flex flex-wrap items-center gap-[12px]">
             <Link
               to="/create"
               className="inline-flex items-center gap-[10px] px-[26px] py-[16px] text-[15px] font-display font-semibold text-white"
@@ -128,7 +128,7 @@ export function Hero(): React.ReactElement {
       </div>
 
       {/* proof strip: seamless 1px hairline grid (comp 106-122) */}
-      <div className="mb-[8px] grid grid-cols-3 gap-px border border-hairline bg-hairline">
+      <div className="mb-[8px] grid grid-cols-1 gap-px border border-hairline bg-hairline sm:grid-cols-3">
         <ProofBlock
           glyph={
             <span
