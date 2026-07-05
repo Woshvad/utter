@@ -50,8 +50,13 @@ import type { FetchLike } from "./idempotency";
  * free-compute route by living under a free prefix (review #3). A deployer narrows
  * this further per resource via the FREE_PATHS env (still exact entries).
  */
+/** The A2A discovery card path. This is the one free path the trusted sidecar serves ITSELF
+ *  (when a card is configured) rather than proxying to the untrusted handler, which has no
+ *  card route. Agents and the marketplace publish probe fetch this for discovery. */
+export const AGENT_CARD_PATH = "/.well-known/agent-card.json";
+
 export const DEFAULT_FREE_PATHS = [
-  "/.well-known/agent-card.json",
+  AGENT_CARD_PATH,
   "/health",
   "/healthz",
 ] as const;
@@ -111,6 +116,14 @@ export interface SidecarConfig {
   errorPolicy?: ErrorPolicy;
   /** EXACT paths that bypass the gate; default {@link DEFAULT_FREE_PATHS}. */
   freePaths?: string[];
+  /**
+   * The resource's A2A agent card as a JSON STRING. When set, the sidecar serves it DIRECTLY
+   * at {@link AGENT_CARD_PATH} (GET) instead of proxying that free path to the untrusted
+   * handler, which has no card route (so proxying it 404s and discovery + the marketplace
+   * publish probe fail). It is public platform metadata (the finalized agent-card.json from the
+   * gated bundle), never a secret. Absent (echo/dev) -> the card path proxies as before.
+   */
+  agentCard?: string;
   /** The port the entrypoint server listens on (default 8080). */
   port: number;
 }
@@ -309,6 +322,15 @@ export function createSidecarGateApp(cfg: SidecarConfig, deps: SidecarDeps = {})
   // calls next() -> the catch-all proxy below.
   app.use("*", async (c, next) => {
     if (isFreePath(c.req.path, freePaths)) {
+      // Serve the resource's OWN A2A agent card directly from the trusted sidecar when one is
+      // configured: the untrusted handler has no card route, so proxying the free card path to
+      // it 404s and agents + the marketplace publish probe cannot discover the resource. Only a
+      // GET of the EXACT card path is served here (still a free, never-paywalled path); every
+      // other free path (e.g. /health) still bypasses to the proxy below, unchanged. Absent
+      // agentCard (echo/dev) -> the card path proxies exactly as before.
+      if (cfg.agentCard && c.req.method === "GET" && c.req.path === AGENT_CARD_PATH) {
+        return c.body(cfg.agentCard, 200, { "content-type": "application/json" });
+      }
       return next();
     }
     return gate(c, next);
@@ -394,6 +416,23 @@ export function loadSidecarConfig(env: NodeJS.ProcessEnv = process.env): Sidecar
   const facilitatorToken =
     tokenRaw && tokenRaw.trim().length > 0 ? tokenRaw.trim() : undefined;
 
+  // Optional A2A agent card (JSON string) the sidecar serves at AGENT_CARD_PATH. Validate it
+  // parses as JSON so a malformed card fails fast at boot rather than serving garbage the
+  // discovery probe would reject; the raw string is kept + served verbatim (byte-preserving).
+  // Absent -> the card path proxies to the handler as before.
+  const agentCardRaw = env.AGENT_CARD_JSON;
+  let agentCard: string | undefined;
+  if (agentCardRaw && agentCardRaw.trim().length > 0) {
+    try {
+      JSON.parse(agentCardRaw);
+      agentCard = agentCardRaw;
+    } catch {
+      throw new Error(
+        "AGENT_CARD_JSON is not valid JSON (the served agent card must be a JSON object)",
+      );
+    }
+  }
+
   // Optional CSV of EXACT free paths (a per-resource override); default the minimal
   // discovery/health set. Each entry is matched exactly, never by prefix (#3).
   const freePathsRaw = env.FREE_PATHS;
@@ -436,6 +475,7 @@ export function loadSidecarConfig(env: NodeJS.ProcessEnv = process.env): Sidecar
     facilitatorToken,
     classifier,
     freePaths,
+    agentCard,
     port,
   };
 }
