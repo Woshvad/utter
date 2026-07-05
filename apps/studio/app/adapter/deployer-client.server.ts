@@ -122,8 +122,17 @@ export async function* streamDeploy(
     let detail = "";
     try {
       const text = await res.text();
-      const parsed = JSON.parse(text) as { error?: unknown };
-      if (parsed && typeof parsed.error === "string") detail = parsed.error;
+      const parsed = JSON.parse(text) as { error?: unknown; violations?: unknown };
+      if (parsed && typeof parsed.error === "string") {
+        detail = parsed.error;
+        // Append the pre-build gate's violated rule names so "bundle rejected" shows WHICH
+        // rules tripped instead of an opaque string. Rule names are NON-secret (the deployer
+        // maps only v.rule; the gate redacts any secret preview) so this leaks nothing.
+        if (Array.isArray(parsed.violations)) {
+          const rules = parsed.violations.filter((v): v is string => typeof v === "string");
+          if (rules.length > 0) detail += `: ${rules.join(", ")}`;
+        }
+      }
     } catch {
       // A non-JSON body is fine: fall back to naming just the status.
     }
