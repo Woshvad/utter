@@ -8,10 +8,12 @@
     "./mcp": "./src/mcp/server.ts"
   },
   "bin": {
-    "utter-buyer-mcp": "./src/bin/mcp.ts"
+    "utter-buyer-mcp": "./src/bin/mcp.ts",
+    "utter-buyer-pay": "./src/bin/pay.ts"
   },
   "scripts": {
     "mcp": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/bin/mcp.ts",
+    "pay": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/bin/pay.ts",
     "test": "vitest run"
   },
   "dependencies": {
