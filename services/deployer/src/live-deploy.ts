@@ -202,6 +202,39 @@ export interface DeployResourceSpec {
   freePaths: string[];
   /** The ALREADY-GATED generated bundle dir for the handler image (absent -> echo handler). */
   handlerBundleDir?: string;
+  /**
+   * The handler's DECLARED success input (the same input G4 replays to get 200), used as
+   * the paid smoke-test body so a handler that validates its input passes the deploy
+   * check the same way it passed G4. Absent -> the generic echo body `{ text: "live" }`.
+   * TRUSTED-shaped: it is a declared-safe value from the already-gated bundle's
+   * test-cases.json (G1/G2 scanned), never an arbitrary untrusted string.
+   */
+  successInput?: unknown;
+}
+
+/**
+ * Select the handler's DECLARED success INPUT from a bundle's test-cases.json - the same
+ * input G4 (packages/ai-runtime validate.ts gateServeBehindX402) replays to get 200. The
+ * deploy paid smoke test uses it so a handler with input validation (e.g. a required
+ * `repeat` positive integer) passes the live paid call the same way it passed G4, instead
+ * of 400-ing on the generic `{ text: "live" }` echo body. Mirrors G4 exactly: find the
+ * first case with expectedClass "success", return its `input` (or `{}` when the case
+ * declares no input). Returns undefined for no bundle / no success case / a parse error,
+ * so the caller falls back to the echo body. Exported for a unit test.
+ */
+export function selectDeclaredSuccessInput(testCasesJson: string | undefined): unknown {
+  if (!testCasesJson) return undefined;
+  try {
+    const parsed = JSON.parse(testCasesJson) as {
+      cases?: Array<{ expectedClass?: string; input?: unknown }>;
+    };
+    if (!Array.isArray(parsed.cases)) return undefined;
+    const success = parsed.cases.find((c) => c.expectedClass === "success");
+    if (!success) return undefined;
+    return success.input ?? {};
+  } catch {
+    return undefined;
+  }
 }
 
 /** Read a required env var or throw an operator-friendly error (never logs the value). */
@@ -520,10 +553,15 @@ export async function deployResource(
   console.log(`[live-deploy] deploying echo at ${url} (Traefik route written to ${routePath})`);
   emit({ phase: "route", status: "ok", message: "Traefik route written for the resource host" });
 
+  // Replay the handler's DECLARED success input (what G4 validated to 200) as the paid
+  // smoke-test body, so a generated handler that validates its input passes the live paid
+  // call. Echo (no bundle -> no successInput) keeps the generic `{ text: "live" }` body.
+  // The unpaid 402 check below uses its own body: the escrow gate returns 402 BEFORE the
+  // handler runs, so any body triggers it - only the paid call reaches the handler.
   const reqInit = {
     method: "POST",
     headers: { "content-type": "application/json" } as Record<string, string>,
-    body: JSON.stringify({ text: "live" }),
+    body: JSON.stringify(spec.successInput ?? { text: "live" }),
   };
 
   // (2) Unpaid call over HTTPS -> expect 402 with the accepts quote. Poll until the
@@ -825,7 +863,9 @@ export async function deployGatedBundle(
 
   // (4) Run the deploy core with the work dir as the handlerBundleDir. Call through the
   // module namespace so the adversarial test can spy + assert ZERO calls. Forward opts so
-  // progress events flow through.
+  // progress events flow through. Thread the declared success input from the gated bundle's
+  // test-cases.json so the paid smoke test replays the input G4 validated (not the generic
+  // echo body) - fixes the 400 on handlers that validate their input.
   return self.deployResource(
     docker,
     {
@@ -836,6 +876,7 @@ export async function deployGatedBundle(
       classifierSchema: params.classifierSchema,
       freePaths: params.freePaths,
       handlerBundleDir: workDir,
+      successInput: selectDeclaredSuccessInput(params.bundle["test-cases.json"]),
     },
     fetchImpl,
     opts,
