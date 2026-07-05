@@ -19,6 +19,7 @@ import { InMemoryIndexStore, type IndexRecord, type IndexStore } from "@utter/ma
 import {
   selectGenerator,
   validateBundle,
+  finalizeAgentCard,
   type Bundle,
   type ResourceSpec,
   type ValidationResult,
@@ -57,6 +58,14 @@ export interface LiveDeps {
   generate: (spec: ResourceSpec) => Promise<Bundle>;
   /** Four-gate validate a generated bundle before publish. Bound to validateBundle. */
   validate: (bundle: Bundle, spec: ResourceSpec) => Promise<ValidationResult>;
+  /**
+   * Finalize the generated agent-card's deploy-time placeholders (buildAgentCard emits a
+   * `placeholder-<slug>` payTo). Stamps x402.payTo = the resourceId (+ the real url) so the
+   * served card AND the published card carry the correct escrow target - the marketplace's
+   * payTo-binding gate refuses to list a card whose payTo != resourceId. Bound to
+   * finalizeAgentCard; takes + returns the card as a JSON string.
+   */
+  finalizeCard: (cardJson: string, opts: { resourceId: string; url?: string }) => string;
   /** The reserve-before-run playground harness, bound verbatim. */
   runPlayground: (resourceId: string, req: unknown) => Promise<PlaygroundHarnessResult>;
   /**
@@ -396,6 +405,9 @@ export function buildLiveDeps(env: NodeJS.ProcessEnv = process.env): LiveDeps {
     // absent (the autonomous default), so generate stays offline with no model call.
     generate: (spec) => selectGenerator(env).generate(spec),
     validate: (bundle, spec) => validateBundle(bundle, spec),
+    // Finalize the card's deploy-time payTo (+ url) to the canonical resourceId so the served
+    // + published card bind to the real escrow target (the marketplace payTo gate requires it).
+    finalizeCard: (cardJson, opts) => finalizeAgentCard(cardJson, opts),
     // The resolved playground harness: the in-process mock (runPlaygroundHarness) by
     // default; the real liveTestEndpoint buyer pay flow when PLAYGROUND_HARNESS=live. The
     // card-URL resolver prefers the live marketplace list when bound (subtask A), else the

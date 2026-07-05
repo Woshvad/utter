@@ -9,7 +9,7 @@ export type { Bundle, ResourceSpec, BundleKey } from "./types.js";
 export { BUNDLE_KEYS } from "./types.js";
 export type { Generator, ClaudeGeneratorConfig } from "./generator.js";
 export { selectGenerator, ScaffoldGenerator, ClaudeGenerator } from "./generator.js";
-export { buildAgentCard, validateAgentCard, A2A_PROTOCOL_VERSION } from "./agent-card.js";
+export { buildAgentCard, finalizeAgentCard, validateAgentCard, A2A_PROTOCOL_VERSION } from "./agent-card.js";
 export type { AgentCardValidationResult } from "./agent-card.js";
 
 // The four-gate in-loop validator (GEN-01/02/04): every generated Bundle passes

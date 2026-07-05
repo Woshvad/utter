@@ -357,8 +357,22 @@ export class LiveAdapter implements StudioDataAdapter {
           return;
         }
 
-        // The gate passed: publish the IndexRecord into the SHARED singleton store (publish
-        // ONLY after the gate passes), then mark Generate done (one ok event).
+        // The gate passed. FINALIZE the card's deploy-time placeholders NOW, before the deploy
+        // (the sidecar serves this exact card) and the publish (the marketplace's payTo-binding
+        // gate refuses a card whose x402.payTo != resourceId). buildAgentCard emits a
+        // `placeholder-<slug>` payTo "finalized at deploy"; stamp the canonical resourceId (+ the
+        // real base url) here. Without this a generated resource deploys + goes live but is NEVER
+        // listed (payment-redirect refused). Mutating the in-memory bundle covers BOTH consumers:
+        // deployBundle sends this bundle to the deployer (-> the sidecar's served card) and the
+        // publish below reads bundle["agent-card.json"].
+        const cardJson = bundle["agent-card.json"];
+        if (typeof cardJson === "string") {
+          const resourceUrl = record.cardUrl.replace(/\/\.well-known\/agent-card\.json$/, "");
+          bundle["agent-card.json"] = deps.finalizeCard(cardJson, { resourceId, url: resourceUrl });
+        }
+
+        // publish the IndexRecord into the SHARED singleton store (publish ONLY after the gate
+        // passes), then mark Generate done (one ok event).
         await deps.indexStore.upsert(record);
         channel.emit(resourceId, { stage: "Generate", status: "ok", log: "bundle generated and four-gate validated" });
 
