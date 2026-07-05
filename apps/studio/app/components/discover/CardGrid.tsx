@@ -25,8 +25,9 @@ export interface CardGridProps {
   thumbHeight?: number;
 }
 
-/** The auto-fill grid (comp 395). */
-const GRID_CLASS = "grid grid-cols-[repeat(auto-fill,minmax(290px,1fr))] gap-[16px]";
+/** The auto-fill grid (comp 395). The min() clamps the track to the container so a
+ *  narrow phone (< 290px content) never overflows horizontally. */
+const GRID_CLASS = "grid grid-cols-[repeat(auto-fill,minmax(min(100%,290px),1fr))] gap-[16px]";
 
 function Skeletons({ count }: { count: number }): React.ReactElement {
   return (

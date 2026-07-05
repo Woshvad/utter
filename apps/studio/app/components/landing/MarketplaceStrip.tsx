@@ -28,10 +28,10 @@ export function MarketplaceStrip({
   return (
     <section
       data-testid="landing-marketplace"
-      className="mx-auto max-w-[1320px] px-[32px] pt-[56px] pb-[80px]"
+      className="mx-auto max-w-[1320px] px-[16px] pt-[56px] pb-[80px] lg:px-[32px]"
     >
-      <div className="mb-[24px] flex items-baseline justify-between">
-        <h2 className="text-[28px] font-display font-semibold tracking-[-0.02em] text-ink lowercase">
+      <div className="mb-[24px] flex items-baseline justify-between gap-[12px]">
+        <h2 className="text-[22px] font-display font-semibold tracking-[-0.02em] text-ink lowercase lg:text-[28px]">
           top on the marketplace
         </h2>
         <Link to="/discover" className="font-mono text-[13px] text-blue lowercase">
@@ -42,7 +42,7 @@ export function MarketplaceStrip({
       {cards.length === 0 ? (
         <p className="text-body text-ink-muted lowercase">nothing listed yet.</p>
       ) : (
-        <div className="grid grid-cols-4 gap-[16px]">
+        <div className="grid grid-cols-2 gap-[16px] lg:grid-cols-4">
           {cards.map((card) => (
             <ResourceCard
               key={card.resourceId}

@@ -17,6 +17,8 @@ export interface SidebarNavItemProps {
   status?: StatusState;
   /** The geometric glyph for a primary nav row (colored red when active). */
   glyph?: NavGlyphKind;
+  /** Fired on click (the mobile drawer passes this to dismiss itself on navigation). */
+  onNavigate?: () => void;
 }
 
 /** Render the per-item nav glyph in the given color (comp lines 178-197). */
@@ -74,11 +76,13 @@ export function SidebarNavItem({
   active,
   status,
   glyph,
+  onNavigate,
 }: SidebarNavItemProps): React.ReactElement {
   const glyphColor = active ? "var(--red)" : "var(--ink-faint)";
   return (
     <a
       href={href}
+      onClick={onNavigate}
       data-testid="sidebar-nav-item"
       data-active={active ? "true" : "false"}
       aria-current={active ? "page" : undefined}

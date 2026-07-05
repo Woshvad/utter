@@ -119,9 +119,9 @@ export function ChannelHeader({
       </div>
 
       {/* inner content wrapper - the 32px gutter that aligns with the apis grid below. */}
-      <div className="px-[32px]">
-        {/* identity row: the avatar overlaps the banner (mt -36). */}
-        <div className="mb-[24px] mt-[-36px] flex items-end gap-[20px]">
+      <div className="px-[16px] lg:px-[32px]">
+        {/* identity row: the avatar overlaps the banner (mt -36). Stacks on mobile. */}
+        <div className="mb-[24px] mt-[-36px] flex flex-col items-start gap-[16px] sm:flex-row sm:items-end sm:gap-[20px]">
           <CreatorAvatar address={address} size={88} />
           <div className="flex-1 pb-[6px]">
             <div className="flex items-center gap-[12px]">
@@ -142,7 +142,7 @@ export function ChannelHeader({
             onClick={toggleFollow}
             aria-pressed={following}
             className={[
-              "ml-auto px-[22px] py-[11px] font-mono text-[14px] font-semibold text-white",
+              "px-[22px] py-[11px] font-mono text-[14px] font-semibold text-white sm:ml-auto",
               // Following uses the blue identity role; not-following keeps the red CTA.
               following ? "bg-blue" : "bg-red",
             ].join(" ")}
@@ -151,8 +151,8 @@ export function ChannelHeader({
           </button>
         </div>
 
-        {/* seamless 1px 4-up stats grid (comp 707-717). */}
-        <div className="mb-[28px] grid grid-cols-4 gap-px border border-hairline bg-hairline">
+        {/* seamless 1px 4-up stats grid (comp 707-717). 2-up on mobile. */}
+        <div className="mb-[28px] grid grid-cols-2 gap-px border border-hairline bg-hairline lg:grid-cols-4">
           <StatCell label="APIS">
             <div className="font-mono text-[22px] font-bold text-ink tabular-nums">{apiCount}</div>
           </StatCell>

@@ -31,7 +31,7 @@ export function PricePill({
       data-testid="price-pill"
       data-model={model}
       className={[
-        "inline-flex items-center gap-2xs",
+        "inline-flex items-center gap-2xs whitespace-nowrap",
         "border border-hairline",
         "px-[8px] py-[4px]",
         "font-mono text-[12px] text-yellow",

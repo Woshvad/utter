@@ -75,7 +75,7 @@ function CodeCard({ label, code }: { label: string; code: string }): React.React
 
 export default function McpConnectRoute(): React.ReactElement {
   return (
-    <div className="max-w-[1100px] px-[32px] pt-[28px] pb-[64px]">
+    <div className="max-w-[1100px] px-[16px] pt-[28px] pb-[64px] lg:px-[32px]">
       {/* header: blue-outline square + h1 (comp 745-748) */}
       <div className="mb-[8px] flex items-center gap-[12px]">
         <div className="h-[14px] w-[14px] border-2 border-blue" aria-hidden="true" />
@@ -89,7 +89,7 @@ export default function McpConnectRoute(): React.ReactElement {
       </p>
 
       {/* top grid: two copy-paste code cards (comp 751-781) */}
-      <div className="mb-[16px] grid grid-cols-2 gap-[16px]">
+      <div className="mb-[16px] grid grid-cols-1 gap-[16px] lg:grid-cols-2">
         <CodeCard label="mcp config" code={MCP_CONFIG_SNIPPET} />
         <CodeCard label="buyer sdk" code={BUYER_SDK_SNIPPET} />
       </div>

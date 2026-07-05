@@ -148,16 +148,16 @@ export default function WalletRoute(): React.ReactElement {
   const txRecords = txs.records ?? [];
 
   return (
-    <div className="mx-auto max-w-[1100px] px-[32px] pb-[64px] pt-[28px]">
+    <div className="mx-auto max-w-[1100px] px-[16px] pb-[64px] pt-[28px] lg:px-[32px]">
       <h1
         data-testid="wallet-title"
-        className="mb-[24px] text-[26px] font-semibold tracking-[-0.02em] text-ink lowercase"
+        className="mb-[24px] text-[20px] font-semibold tracking-[-0.02em] text-ink lowercase lg:text-[26px]"
       >
         wallet &amp; escrow
       </h1>
 
       {/* top grid: escrow balance card (1.3fr) + deposit card (1fr) */}
-      <div className="mb-[16px] grid grid-cols-[1.3fr_1fr] gap-[16px]">
+      <div className="mb-[16px] grid grid-cols-1 gap-[16px] lg:grid-cols-[1.3fr_1fr]">
         <EscrowBalanceWidget
           address={mounted ? address : undefined}
           baseUnits={balance.raw}

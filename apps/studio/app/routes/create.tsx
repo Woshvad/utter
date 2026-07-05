@@ -212,9 +212,9 @@ export default function CreateRoute(): React.ReactElement {
   const idle = !built;
 
   return (
-    <div className="flex min-h-[calc(100vh-64px)]">
+    <div className="flex min-h-[calc(100vh-64px)] flex-col lg:flex-row">
       {/* left column - composer / build stream */}
-      <div className="flex min-w-0 flex-1 flex-col items-center px-[32px] pb-[80px] pt-[56px]">
+      <div className="flex min-w-0 flex-1 flex-col items-center px-[16px] pb-[80px] pt-[56px] lg:px-[32px]">
         <div className="w-full max-w-[680px]">
           {idle ? (
             <div className="mb-[36px] text-center">
@@ -240,7 +240,7 @@ export default function CreateRoute(): React.ReactElement {
                   }}
                 />
               </div>
-              <h1 className="mb-[10px] text-[36px] font-semibold tracking-[-0.03em] text-ink">
+              <h1 className="mb-[10px] text-[28px] font-semibold tracking-[-0.03em] text-ink lg:text-[36px]">
                 utter a sentence.
               </h1>
               <p className="m-0 text-[16px] text-ink-muted">
@@ -273,7 +273,7 @@ export default function CreateRoute(): React.ReactElement {
           generated server-side during the build, so we link to the resource page (where the
           real spec is served) rather than showing a fabricated sample snippet. */}
       {built ? (
-        <aside className="w-[360px] flex-none border-l border-hairline bg-canvas p-[24px]">
+        <aside className="w-full flex-none border-t border-hairline bg-canvas p-[24px] lg:w-[360px] lg:border-l lg:border-t-0">
           <div className="mb-[14px] font-mono text-[11px] tracking-[0.06em] text-ink-faint">
             AGENT CARD
           </div>

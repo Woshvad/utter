@@ -337,7 +337,7 @@ export function BuildStream({
               </span>
             </div>
 
-            <div className="flex gap-[12px] p-[18px_28px]">
+            <div className="flex flex-wrap gap-[12px] p-[18px_28px]">
               <a
                 href={playgroundHref}
                 data-testid="build-test-it"

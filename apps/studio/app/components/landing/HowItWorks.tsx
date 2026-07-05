@@ -27,17 +27,17 @@ export function HowItWorks(): React.ReactElement {
       data-testid="landing-howitworks"
       className="bg-paper-bg text-paper-ink"
     >
-      <div className="mx-auto max-w-[1320px] px-[32px] py-[64px]">
+      <div className="mx-auto max-w-[1320px] px-[16px] py-[64px] lg:px-[32px]">
         <div className="mb-[28px] font-mono text-[12px] uppercase tracking-[0.08em] text-red">
           how it works
         </div>
-        {/* seamless 1px grid on a BLACK seam (comp 129) */}
-        <div className="grid grid-cols-5 gap-px border border-paper-ink bg-paper-ink">
+        {/* seamless 1px grid on a BLACK seam (comp 129); stacks 1 -> 2 -> 5 up. */}
+        <div className="grid grid-cols-1 gap-px border border-paper-ink bg-paper-ink sm:grid-cols-2 lg:grid-cols-5">
           {STEPS.map((step) => (
             <div
               key={step.n}
               data-testid="how-step"
-              className="bg-paper-bg px-[20px] py-[28px] min-h-[180px]"
+              className="bg-paper-bg px-[20px] py-[28px] lg:min-h-[180px]"
             >
               <div
                 className="mb-[18px] flex items-center justify-center font-mono font-bold"

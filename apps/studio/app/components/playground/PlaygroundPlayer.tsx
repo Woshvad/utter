@@ -200,10 +200,10 @@ export function PlaygroundPlayer({
         </span>
       </div>
 
-      {/* body: request | response split */}
-      <div className="grid grid-cols-2">
+      {/* body: request | response split (stacks on mobile) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2">
         {/* request pane */}
-        <div className="border-r border-hairline">
+        <div className="border-b border-hairline lg:border-b-0 lg:border-r">
           <RequestBuilder
             schema={schema}
             method={method}

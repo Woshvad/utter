@@ -138,7 +138,7 @@ export function SiweModal({ nonce, busy = false, onSign }: SiweModalProps): Reac
       </div>
 
       {/* the auth card (no scrim) */}
-      <div className="relative w-[420px] max-w-[92vw] border border-hairline bg-raised p-[40px]">
+      <div className="relative w-[420px] max-w-[92vw] border border-hairline bg-raised p-[24px] lg:p-[40px]">
         <div className="mb-[28px] flex items-center gap-[10px]">
           <span
             aria-hidden="true"
