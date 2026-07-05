@@ -370,6 +370,24 @@ describe("LiveAdapter create flow (local-real, injected deps)", () => {
     expect(detail.pricing.base).toBeTruthy();
   });
 
+  it("records the SIWE creator so getResourceDetail returns it (dashboard ownership scope)", async () => {
+    const adapter = await makeLiveAdapter();
+    const CREATOR = "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
+    const { resourceId } = await adapter.createResource(makeComposeSpec(), { creator: CREATOR });
+    await drainBuild(adapter, resourceId);
+    // The dashboard keeps a card only when sameAddress(detail.creator, the authed creator).
+    const detail = await adapter.getResourceDetail(resourceId);
+    expect(detail.creator.toLowerCase()).toBe(CREATOR.toLowerCase());
+  });
+
+  it("falls back to the local-dev placeholder creator when none is passed (matches no real wallet)", async () => {
+    const adapter = await makeLiveAdapter();
+    const { resourceId } = await adapter.createResource(makeComposeSpec());
+    await drainBuild(adapter, resourceId);
+    const detail = await adapter.getResourceDetail(resourceId);
+    expect(detail.creator).toBe("0x1111111111111111111111111111111111111111");
+  });
+
   it("subscribeBuildEvents(newId) streams the success sequence with NO duplicate Generate/Publish/Live", async () => {
     const adapter = await makeLiveAdapter();
     // createResource emits the stages fire-and-forget, so await its quick return first; the

@@ -149,7 +149,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<CreateAct
   // failure, so nothing partial is created. A throw (an unbuildable prompt in live mode)
   // surfaces an inline prompt field error rather than the something-broke screen.
   try {
-    const { resourceId, eventsUrl } = await adapter.createResource(validation.spec);
+    // Thread the SIWE creator so the resource records its owner; the dashboard scopes its
+    // owned-resources view to this address (else it renders "no resources yet" for everyone).
+    const { resourceId, eventsUrl } = await adapter.createResource(validation.spec, { creator });
     // Return the REAL values the live moment renders: the creator's entered price + bond
     // (base units, via the same runtime decimals) and the prompt-derived name + the prompt
     // itself as the honest card description. No fabricated price/bond/name downstream.

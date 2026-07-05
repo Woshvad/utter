@@ -172,7 +172,11 @@ function recordToDetail(r: IndexRecord): ResourceDetail {
   const sandbox: SandboxStatus = r.active ? "live" : "down";
   return {
     resourceId: r.resourceId as Hex,
-    creator: LOCAL_DEV_CREATOR,
+    // The real owner: the SIWE creator recorded at createResource. The dashboard scopes
+    // ownership on this (sameAddress(detail.creator, the authed creator)), so a hardcoded
+    // placeholder made every creator's dashboard read empty. Seeded/legacy records without
+    // a creator fall back to the clearly-local placeholder (they match no real wallet).
+    creator: (r.creator ?? LOCAL_DEV_CREATOR) as Hex,
     agentId: r.agentId,
     slug: r.slug,
     category: r.category,
@@ -212,7 +216,10 @@ export class LiveAdapter implements StudioDataAdapter {
     return this.deps;
   }
 
-  async createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
+  async createResource(
+    spec: ComposeSpec,
+    opts?: { creator?: string },
+  ): Promise<{ resourceId: string; eventsUrl: string }> {
     const deps = this.requireDeps();
 
     // 0. Take a build slot BEFORE anything is created. Each build is a claude-code
@@ -256,6 +263,10 @@ export class LiveAdapter implements StudioDataAdapter {
     // money/identity value is authored beyond the read-through projection.
     const record: IndexRecord = {
       resourceId,
+      // The owner/creator = the SIWE wallet that created this resource. Scopes the
+      // dashboard's owned-resources filter (else the hardcoded placeholder hid every
+      // creator's own resources). Undefined when the caller does not pass it (e.g. tests).
+      creator: opts?.creator as Hex | undefined,
       agentId: "0",
       slug,
       category: "data",
