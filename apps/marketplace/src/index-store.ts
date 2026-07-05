@@ -47,6 +47,10 @@ export interface ProjectedHealth {
 export interface IndexRecord {
   /** The on-chain resourceId (bytes32). */
   resourceId: Hex;
+  /** The owner/creator address (the SIWE wallet that created the resource). Optional and
+   *  additive: seeded/legacy records omit it. It is the ownership key the studio dashboard
+   *  scopes on (sameAddress(detail.creator, the authed creator)). */
+  creator?: Hex;
   /** The ERC-8004 agentId (decimal string), projected from the mint. */
   agentId: string;
   /** The discovery slug. */

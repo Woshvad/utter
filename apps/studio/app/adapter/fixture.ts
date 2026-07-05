@@ -47,10 +47,14 @@ function delay(ms: number): Promise<void> {
 export class FixtureAdapter implements StudioDataAdapter {
   readonly backend = "fixture" as const;
 
-  async createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }> {
+  async createResource(
+    spec: ComposeSpec,
+    opts?: { creator?: string },
+  ): Promise<{ resourceId: string; eventsUrl: string }> {
     // Deterministic: the fixture always composes the canonical fixture resource.
-    // The spec is accepted (validated upstream by the action) but not persisted.
+    // The spec + creator are accepted (validated upstream) but not persisted.
     void spec;
+    void opts;
     return {
       resourceId: FIXTURE_RESOURCE_ID,
       eventsUrl: `/resources/${FIXTURE_RESOURCE_ID}/events`,

@@ -238,8 +238,13 @@ export interface PlaygroundResult {
 export interface StudioDataAdapter {
   /** Which backend this adapter is. */
   readonly backend: AdapterBackend;
-  /** Compose a resource (STU-01); returns the new id + its SSE events URL. */
-  createResource(spec: ComposeSpec): Promise<{ resourceId: string; eventsUrl: string }>;
+  /** Compose a resource (STU-01); returns the new id + its SSE events URL. `opts.creator`
+   *  is the SIWE wallet that created it - recorded as the owner so the dashboard can scope
+   *  its owned-resources view to this creator. */
+  createResource(
+    spec: ComposeSpec,
+    opts?: { creator?: string },
+  ): Promise<{ resourceId: string; eventsUrl: string }>;
   /** Stream the build pipeline stages (STU-02) for a resource. The optional signal
    *  lets the SSE route terminate a parked live-channel reader on disconnect or
    *  lifetime expiry (S7); implementations without a parked wait may ignore it. */
