@@ -225,6 +225,13 @@ describe("parseDemoPayArgs", () => {
     expect(() => parseDemoPayArgs([])).toThrow(/--url .* is required/);
   });
 
+  it("tolerates a forwarded `--` separator (pnpm run <script> -- <args>)", () => {
+    const args = parseDemoPayArgs(["--", "--url", "https://x.example", "--calls", "3", "--apply"]);
+    expect(args.cardUrl).toBe("https://x.example");
+    expect(args.calls).toBe(3);
+    expect(args.apply).toBe(true);
+  });
+
   it("rejects a non-positive --calls, a bad --resource-id, and unknown flags", () => {
     expect(() => parseDemoPayArgs(["--url", "u", "--calls", "0"])).toThrow(/positive integer/);
     expect(() => parseDemoPayArgs(["--url", "u", "--resource-id", "0xdead"])).toThrow(/bytes32/);
