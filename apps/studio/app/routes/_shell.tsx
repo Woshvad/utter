@@ -15,7 +15,6 @@ import { selectAdapter } from "../adapter/select.js";
 import type { Hex } from "../adapter/types.js";
 import { AppShell, type NavEntry, type ResourceEntry } from "../components/shell/AppShell.js";
 import { getAuthAddress } from "../auth/session.server.js";
-import { FIXTURE_CREATOR } from "../fixtures/index.js";
 
 // The five primary nav rows (comp lines 178-197), in order. "mcp connect" lands in
 // increment 9; its /mcp target may 404 until that route file exists - acceptable.
@@ -29,35 +28,52 @@ const NAV: ReadonlyArray<{ label: string; href: string }> = [
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const adapter = selectAdapter(process.env);
-  // Display address: the SIWE session address when present, else the fixture creator.
-  // This NEVER gates - public in-shell routes (playground, profile) render the shell too.
-  const account = (await getAuthAddress(request)) ?? FIXTURE_CREATOR;
+  // The SIWE-authenticated address, or null when nobody is signed in. The shell NEVER
+  // gates - public in-shell routes (playground, profile) render it too - but signed-out
+  // it presents a NEUTRAL state (a "sign in" avatar, no escrow, no owned resources)
+  // rather than a fixture identity.
+  const authAddress = await getAuthAddress(request);
 
-  // Escrow figure for the sidebar footer + topbar pill. Best-effort: a live-backend
-  // read can throw RequiresLiveServicesError, in which case the shell shows "-".
+  // Escrow figure for the sidebar footer + topbar pill. Read ONLY for a REAL signed-in
+  // address: an anonymous visitor must never see a balance. Falling back to the fixture
+  // address here would read THAT address's public on-chain escrow and render it as if it
+  // were the visitor's own balance (misleading). No session -> no figure (the shell shows
+  // "-" and the topbar pill is hidden). Best-effort: a live-backend read can throw, in
+  // which case the shell also shows "-".
   let escrow: { raw: string; decimals: number } | null = null;
-  try {
-    const bal = await adapter.getEscrowBalance(account as Hex);
-    escrow = { raw: bal.raw.toString(), decimals: bal.decimals };
-  } catch {
-    escrow = null;
+  if (authAddress) {
+    try {
+      const bal = await adapter.getEscrowBalance(authAddress as Hex);
+      escrow = { raw: bal.raw.toString(), decimals: bal.decimals };
+    } catch {
+      escrow = null;
+    }
   }
 
-  // "Your resources" list. Read through listMarketplace (no filter); map to the
-  // shell's ResourceEntry shape (no bigint crosses the boundary).
+  // "Your resources": ONLY the signed-in creator's OWN resources, scoped by each card's
+  // owner projection (creator). A signed-out visitor sees none - the marketplace top-list
+  // is not "yours". One list read (no N+1 detail reads); a card without a creator
+  // projection never matches, so nothing another creator owns can appear here.
   let resources: ResourceEntry[] = [];
-  try {
-    const cards = await adapter.listMarketplace({} as FilterCriteria);
-    resources = cards.slice(0, 6).map((c) => ({
-      label: c.slug,
-      href: `/resources/${c.resourceId}`,
-      status: c.active ? ("live" as const) : ("paused" as const),
-    }));
-  } catch {
-    resources = [];
+  if (authAddress) {
+    const owner = authAddress.toLowerCase();
+    try {
+      const cards = await adapter.listMarketplace({} as FilterCriteria);
+      resources = cards
+        .filter((c) => typeof c.creator === "string" && c.creator.toLowerCase() === owner)
+        .slice(0, 6)
+        .map((c) => ({
+          label: c.slug,
+          href: `/resources/${c.resourceId}`,
+          status: c.active ? ("live" as const) : ("paused" as const),
+        }));
+    } catch {
+      resources = [];
+    }
   }
 
-  return { account, escrow, resources };
+  // account is the SIWE address, or null when signed out (drives the neutral shell state).
+  return { account: authAddress, escrow, resources };
 }
 
 export default function ShellLayout(): React.ReactElement {
@@ -79,7 +95,7 @@ export default function ShellLayout(): React.ReactElement {
       topBar={{
         escrowBaseUnits,
         escrowDecimals: escrow?.decimals,
-        account,
+        account: account ?? undefined,
         onUtter: () => navigate("/create"),
         onSearch: (q) => {
           // Free-text discover search: the loader reads the `q` param (see discover.tsx).

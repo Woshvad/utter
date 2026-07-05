@@ -159,6 +159,9 @@ const LOCAL_DEV_CREATOR = "0x1111111111111111111111111111111111111111" as Hex;
 function recordToCard(r: IndexRecord): ResourceCardData {
   return {
     resourceId: r.resourceId as Hex,
+    // The owner projection (optional/additive): carried through so the shell can scope
+    // "your resources" to the signed-in creator. Absent on a legacy row -> undefined.
+    ...(r.creator ? { creator: r.creator as Hex } : {}),
     agentId: r.agentId,
     slug: r.slug,
     category: r.category,

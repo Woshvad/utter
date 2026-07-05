@@ -133,11 +133,15 @@ describe("TopBar avatar initial", () => {
     expect(screen.getByTestId("account-avatar").textContent).toBe("A");
   });
 
-  it("uses a neutral glyph when no account is connected", () => {
+  it("shows a neutral sign-in affordance (not a fixture identity) when no account is connected", () => {
     render(<TopBar />);
-    const avatar = screen.getByTestId("account-avatar");
-    // no hardcoded letter; a neutral, non-alphabetic glyph
-    expect(avatar.textContent).not.toMatch(/[a-z]/i);
+    // No signed-in avatar; a neutral "sign in" link to /auth instead of a fixture initial.
+    expect(screen.queryByTestId("account-avatar")).toBeNull();
+    const signIn = screen.getByTestId("sign-in");
+    expect(signIn).toHaveAttribute("href", "/auth");
+    expect(signIn).toHaveAttribute("aria-label", "sign in");
+    // No hardcoded letter leaks in as an initial.
+    expect(signIn.textContent ?? "").not.toMatch(/[a-z]/i);
   });
 });
 
