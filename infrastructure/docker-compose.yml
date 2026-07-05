@@ -227,19 +227,25 @@ services:
   # ingress (Traefik routes to it over the shared ingress net via
   # dynamic/marketplace.yml, so external agents can fetch deployed-resource cards +
   # /resources discovery), controlplane (where the studio reaches it at
-  # marketplace:8789 to POST a deployed resource), and backendnet (its durable
-  # Postgres backend for the resources/cards/moderation tables). It is Postgres-only
-  # and does NOT read REDIS_URL, so it is NEVER on redisnet; it is also never on
-  # edge, proxynet, or upstreamnet, so it cannot weaken the resource-plane or
-  # money-path isolation, and it publishes no host port (Traefik fronts the public
-  # surface; the studio reaches it on the internal controlplane net). Durability is
-  # OPT-IN: DATABASE_URL is empty and NODE_ENV unset by default, so the in-memory
-  # stores stay the default; the postgres service is reachable on backendnet but
-  # only used once DATABASE_URL + production are set. Its publish endpoint is
-  # Bearer-gated (fail-closed) so public Traefik exposure is safe; GET /resources
-  # and the card route are intentionally public for agent discovery. All
-  # secret-bearing env defaults to empty here; real values are supplied via
-  # --env-file .env.local.
+  # marketplace:8789 to POST a deployed resource), backendnet (its durable Postgres
+  # backend for the resources/cards/moderation tables), and upstreamnet (its ONLY
+  # internet-egress net). upstreamnet is REQUIRED once the publish pipeline's live
+  # gates are armed: the LiveHttpsProber (SCORER_LIVE_HTTPS_HOST) fetches the deployed
+  # resource's public HTTPS card, and the ERC-8004 mint (resolveIdentity) makes Arc RPC
+  # calls — both need outbound egress. Without it every publish silently fails the
+  # probe/mint and NO resource is ever listed (that was the empty-discover bug). This
+  # mirrors the facilitator, which is also a trusted first-party service on upstreamnet
+  # for its Arc RPC. It is Postgres-only (does NOT read REDIS_URL) so it is NEVER on
+  # redisnet, and never on edge or proxynet, so it cannot weaken the resource-plane or
+  # money-path isolation (untrusted handlers live on proxynet only and gain nothing
+  # here). It publishes no host port (Traefik fronts the public surface; the studio
+  # reaches it on the internal controlplane net). Durability is OPT-IN: DATABASE_URL is
+  # empty and NODE_ENV unset by default, so the in-memory stores stay the default; the
+  # postgres service is reachable on backendnet but only used once DATABASE_URL +
+  # production are set. Its publish endpoint is Bearer-gated (fail-closed) so public
+  # Traefik exposure is safe; GET /resources and the card route are intentionally public
+  # for agent discovery. All secret-bearing env defaults to empty here; real values are
+  # supplied via --env-file .env.local.
   marketplace:
     build:
       context: ..
@@ -249,7 +255,9 @@ services:
     # stop grace, leaving zero headroom before SIGKILL. 15s gives the request drain
     # room to finish on a plain `docker stop` (compose enforces it; no -t 15 needed).
     stop_grace_period: 15s
-    networks: [ingress, controlplane, backendnet]
+    # upstreamnet gives the armed publish gates (LiveHttpsProber HTTPS fetch + ERC-8004
+    # Arc RPC mint) their required internet egress; the other three nets are internal.
+    networks: [ingress, controlplane, backendnet, upstreamnet]
     depends_on:
       postgres:
         condition: service_healthy
