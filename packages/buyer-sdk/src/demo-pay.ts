@@ -93,6 +93,10 @@ export function parseDemoPayArgs(argv: readonly string[]): DemoPayArgs {
       case "--apply":
         apply = true;
         break;
+      case "--":
+        // The conventional args separator. `pnpm <script> -- <args>` forwards the literal
+        // `--` through to the script, so tolerate it (it is a separator, not a flag).
+        break;
       default:
         if (a && a.startsWith("--")) {
           throw new Error(`demo-pay: unknown flag ${a}`);
