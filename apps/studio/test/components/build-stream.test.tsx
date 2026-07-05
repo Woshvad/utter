@@ -98,4 +98,38 @@ describe("BuildStream streamed error render", () => {
     });
     expect(screen.queryByTestId("build-interrupted")).not.toBeInTheDocument();
   });
+
+  it("shows an overall progress bar that advances per stage (half-credit for the in-flight stage)", () => {
+    const es = new FakeEventSource();
+    render(
+      <BuildStream eventsUrl="/resources/0xabc/events" eventSourceFactory={() => es} />,
+    );
+    act(() => {
+      es.stageListener?.({ data: JSON.stringify({ stage: "Generate", status: "ok", log: "" }) });
+      es.stageListener?.({ data: JSON.stringify({ stage: "Deploy", status: "running", log: "" }) });
+    });
+    // 1 done + 0.5 in-flight, of 6 stages = 25%; the fill pulses (blue) while running.
+    const fill = screen.getByTestId("build-progress-fill");
+    expect(fill.getAttribute("data-pct")).toBe("25");
+    expect(fill.className).toContain("bg-blue");
+    expect(fill.className).toContain("animate-utter-pulse");
+    const label = screen.getByTestId("build-progress-label").textContent ?? "";
+    expect(label).toContain("step 2 of 6");
+    expect(label).toContain("deploy");
+  });
+
+  it("turns the progress bar red and reports where it halted on a stage failure", () => {
+    const es = new FakeEventSource();
+    render(
+      <BuildStream eventsUrl="/resources/0xabc/events" eventSourceFactory={() => es} />,
+    );
+    act(() => {
+      es.stageListener?.({ data: JSON.stringify({ stage: "Generate", status: "ok", log: "" }) });
+      es.stageListener?.({ data: JSON.stringify({ stage: "Deploy", status: "error", log: "boom" }) });
+    });
+    const fill = screen.getByTestId("build-progress-fill");
+    expect(fill.className).toContain("bg-red");
+    expect(fill.className).not.toContain("animate-utter-pulse");
+    expect(screen.getByTestId("build-progress-label").textContent).toContain("stopped at deploy");
+  });
 });

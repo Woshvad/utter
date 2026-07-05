@@ -161,6 +161,26 @@ export function BuildStream({
   const name = liveName ?? "your-endpoint";
   const playgroundHref = resourceId ? `/resources/${resourceId}` : "/discover";
 
+  // Overall build progress: completed stages, plus HALF-credit for the one in-flight
+  // stage so the bar visibly advances mid-stage (a long generate/deploy call is never
+  // "static"). The fill pulses while a stage runs and turns red if a stage failed.
+  const total = BUILD_STAGES.length;
+  const doneCount = BUILD_STAGES.filter((st) => stages[st]?.status === "done").length;
+  const failedStage = BUILD_STAGES.find((st) => stages[st]?.status === "failed");
+  const runningStage = BUILD_STAGES.find(
+    (st) => stages[st]?.status === "active" || stages[st]?.status === "verifying",
+  );
+  const running = !failedStage && runningStage !== undefined;
+  const progressPct = Math.min(
+    100,
+    Math.round(((doneCount + (running ? 0.5 : 0)) / total) * 100),
+  );
+  const progressLabel = failedStage
+    ? `stopped at ${failedStage.toLowerCase()}`
+    : running && runningStage
+      ? `step ${doneCount + 1} of ${total} · ${runningStage.toLowerCase()}…`
+      : `${doneCount} of ${total} complete`;
+
   return (
     <div data-testid="build-stream" className="mt-[24px]">
       {/* SR live-region: announces each stage as it streams (a11y STU-02). */}
@@ -182,6 +202,30 @@ export function BuildStream({
             >
               reset
             </a>
+          </div>
+
+          {/* Overall progress bar: advances one step per completed stage (with half-credit
+              + a pulse for the in-flight stage) so a long-running stage never looks frozen.
+              Turns red and reports where it halted on a failure. */}
+          <div data-testid="build-progress" className="mb-[14px]">
+            <div className="mb-[6px] flex items-center justify-between font-mono text-[11px] tracking-[0.06em] text-ink-faint lowercase">
+              <span data-testid="build-progress-label">{progressLabel}</span>
+              <span className="tabular-nums">{progressPct}%</span>
+            </div>
+            <div className="h-[6px] w-full overflow-hidden border border-hairline bg-canvas">
+              <div
+                data-testid="build-progress-fill"
+                data-pct={progressPct}
+                className={
+                  failedStage
+                    ? "h-full bg-red"
+                    : running
+                      ? "h-full bg-blue animate-utter-pulse"
+                      : "h-full bg-blue"
+                }
+                style={{ width: `${progressPct}%`, transition: "width 400ms ease" }}
+              />
+            </div>
           </div>
 
           {/* Interruption banner: the stream dropped before the build finished

@@ -88,3 +88,34 @@ describe("bundleGeneratedHandler structural gate (defense in depth)", () => {
     }
   });
 });
+
+// The deploy paid smoke test must POST the handler's DECLARED success input (the same input
+// G4 replays to get 200), not the generic echo body - else a handler that validates its
+// input (e.g. a required positive-integer `repeat`) 400s on the live paid call after passing
+// G4. selectDeclaredSuccessInput mirrors G4's selection (validate.ts gateServeBehindX402).
+describe("selectDeclaredSuccessInput (paid smoke-test body = declared success input)", () => {
+  it("returns the success case input, mirroring G4, for a generated test-cases.json", () => {
+    const json = JSON.stringify({
+      description: "d",
+      cases: [
+        { label: "bad", input: { repeat: 0 }, response: { error: "x" }, expectedClass: "declared_error" },
+        { label: "ok", input: { repeat: 3, text: "hi" }, response: { out: "hihihi" }, expectedClass: "success" },
+      ],
+    });
+    expect(liveDeploy.selectDeclaredSuccessInput(json)).toEqual({ repeat: 3, text: "hi" });
+  });
+
+  it("returns {} when the success case declares no input (matches G4's `input ?? {}`)", () => {
+    const json = JSON.stringify({ cases: [{ response: {}, expectedClass: "success" }] });
+    expect(liveDeploy.selectDeclaredSuccessInput(json)).toEqual({});
+  });
+
+  it("returns undefined (echo fallback) for no bundle / no success case / bad shape / bad json", () => {
+    expect(liveDeploy.selectDeclaredSuccessInput(undefined)).toBeUndefined();
+    expect(
+      liveDeploy.selectDeclaredSuccessInput(JSON.stringify({ cases: [{ expectedClass: "malfunction" }] })),
+    ).toBeUndefined();
+    expect(liveDeploy.selectDeclaredSuccessInput(JSON.stringify({ notcases: [] }))).toBeUndefined();
+    expect(liveDeploy.selectDeclaredSuccessInput("not json{")).toBeUndefined();
+  });
+});
