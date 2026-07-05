@@ -16,7 +16,12 @@ import { buildAgentCard, validateAgentCard } from "@utter/ai-runtime";
 import { RESOURCE_REGISTRY, STAKING_VAULT, registryAbi, stakingVaultAbi } from "@utter/chain";
 import { MIN_BOND_BASE_UNITS, PublishRejected } from "@utter/staking";
 import type { RegistryAdmin, Erc8004Client, RegisterResult } from "@utter/erc8004";
-import { resolveIdentity, resolveBondGate, type IdentityLiveParts } from "../src/live-deps.js";
+import {
+  resolveIdentity,
+  resolveBondGate,
+  resolveOwnerReader,
+  type IdentityLiveParts,
+} from "../src/live-deps.js";
 
 const RESOURCE_ID: Hex = `0x${"ab".repeat(32)}`;
 const CARD_URL = "https://my-resource.resources.example/.well-known/agent-card.json";
@@ -196,5 +201,50 @@ describe("resolveBondGate (env-gated bond gate seam)", () => {
     await expect(bondGate.check(RESOURCE_ID, "general")).rejects.toMatchObject({
       reason: "bond_not_posted",
     });
+  });
+});
+
+describe("resolveOwnerReader (H3 on-chain ownership binder seam)", () => {
+  const OWNER: Address = "0x3333333333333333333333333333333333333333";
+
+  it("DEFAULT (no env, no override) returns undefined (no reader + no network on testnet/tests)", () => {
+    expect(resolveOwnerReader({} as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it("with an injected client reads getResource and returns the on-chain owner (split index 0)", async () => {
+    const readContract = vi.fn(async (_args: unknown) => [OWNER, EXISTING_TREASURY, EXISTING_BPS, true] as const);
+    const reader = resolveOwnerReader({} as NodeJS.ProcessEnv, {
+      publicClient: { readContract } as never,
+    });
+    expect(reader).toBeDefined();
+    const owner = await reader!(RESOURCE_ID);
+    expect(owner!.toLowerCase()).toBe(OWNER.toLowerCase());
+    expect(readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: RESOURCE_REGISTRY,
+        abi: registryAbi,
+        functionName: "getResource",
+        args: [RESOURCE_ID],
+      }),
+    );
+  });
+
+  it("returns null when getResource reverts (unregistered id) - best-effort, never throws", async () => {
+    const readContract = vi.fn(async () => {
+      throw new Error("UnknownResource");
+    });
+    const reader = resolveOwnerReader({} as NodeJS.ProcessEnv, {
+      publicClient: { readContract } as never,
+    });
+    await expect(reader!(RESOURCE_ID)).resolves.toBeNull();
+  });
+
+  it("returns null when the on-chain owner is the zero address (treated as no owner)", async () => {
+    const ZERO: Address = "0x0000000000000000000000000000000000000000";
+    const readContract = vi.fn(async () => [ZERO, EXISTING_TREASURY, EXISTING_BPS, true] as const);
+    const reader = resolveOwnerReader({} as NodeJS.ProcessEnv, {
+      publicClient: { readContract } as never,
+    });
+    await expect(reader!(RESOURCE_ID)).resolves.toBeNull();
   });
 });

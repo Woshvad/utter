@@ -42,6 +42,11 @@ export interface DeployBundleParams {
   pricing: Pricing;
   maxTimeoutSeconds?: number;
   freePaths?: string[];
+  /** The on-chain split recipient (the creator's 70% payee) - the studio's SIWE creator.
+   *  Spread into the POST body only when defined; the deployer validates it as an address
+   *  and registers it as the resource `creator`, so earnings accrue to the creator, not the
+   *  deployer admin key. Money-path SELECTION only; the escrow split math is unchanged. */
+  creator?: string;
 }
 
 /** Map a deployer phase to a studio BuildStage. register is the on-chain identity step
@@ -78,6 +83,9 @@ export async function* streamDeploy(
       ? { maxTimeoutSeconds: params.maxTimeoutSeconds }
       : {}),
     ...(params.freePaths !== undefined ? { freePaths: params.freePaths } : {}),
+    // The on-chain split recipient (the 70% payee), sent only when defined. The deployer
+    // validates it as an address and registers it as the resource creator.
+    ...(params.creator !== undefined ? { creator: params.creator } : {}),
   };
 
   let res: Response;

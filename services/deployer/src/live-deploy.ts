@@ -210,6 +210,17 @@ export interface DeployResourceSpec {
    * test-cases.json (G1/G2 scanned), never an arbitrary untrusted string.
    */
   successInput?: unknown;
+  /**
+   * The resource creator = the ON-CHAIN SPLIT RECIPIENT (the creator's 70% payee the
+   * registry records). The studio threads its SIWE-authenticated creator here so each
+   * resource's earnings accrue to ITS creator, not the deployer admin/relayer key. It
+   * selects only WHICH address the registry stores as `creator`; the escrow gate and the
+   * PaymentEscrow split math are byte-unchanged (PaymentEscrow.debit reads this creator
+   * from the registry and credits it). Absent -> the RESOURCE_CREATOR env, then the admin
+   * address (the testnet single-operator role collapse). Address-shaped and TRUSTED (the
+   * route validates it before it reaches here).
+   */
+  creator?: Address;
 }
 
 /**
@@ -435,13 +446,18 @@ export async function deployResource(
   // RESOURCE_ID the quote advertises as payTo must be registered + active, or
   // PaymentEscrow.debit reverts ResourceInactive (design §5.1/§5.3). The admin
   // wallet is built here from the operator key and injected into the helper, which
-  // never reads a key itself. creator defaults to the admin address unless
-  // RESOURCE_CREATOR overrides it (the creator/admin/treasury roles may collapse on
-  // testnet). The step is idempotent: a redeploy of the same label is a no-op.
+  // never reads a key itself. The `creator` is the ON-CHAIN SPLIT RECIPIENT (the 70%
+  // payee): it comes from spec.creator FIRST (the studio's SIWE-authenticated creator,
+  // so each resource's earnings accrue to ITS creator), then the RESOURCE_CREATOR env,
+  // then the admin address (the testnet single-operator role collapse). This only
+  // selects WHICH address the registry records; the escrow gate + split math are
+  // byte-unchanged. The step is idempotent: a redeploy of the same label is a no-op.
   emit({ phase: "register", status: "running", message: "registering the resource on-chain" });
   const adminAccount = privateKeyToAccount(adminKey);
   const adminWallet = createArcWalletClient(adminAccount, rpcUrl);
-  const creator = (process.env.RESOURCE_CREATOR?.trim() || adminAccount.address) as Address;
+  const creator = (spec.creator?.trim() ||
+    process.env.RESOURCE_CREATOR?.trim() ||
+    adminAccount.address) as Address;
   // The helper takes a deliberately narrow structural admin/reader surface (abi:
   // unknown) so it stays chain-agnostic and spy-testable; the real viem clients
   // satisfy it at runtime. Adapt them at this single boundary (the same cast the
@@ -819,6 +835,13 @@ export interface DeployGatedBundleParams {
   freePaths: string[];
   /** The JSON response schema the sidecar classifies against (the one bundle-sourced field). */
   classifierSchema: string;
+  /**
+   * The on-chain split recipient (the creator's 70% payee). Threaded from the studio's
+   * SIWE creator through the POST /deploy body + defaultDeploy; absent -> the deployer's
+   * RESOURCE_CREATOR/admin fallback. Selects only WHICH address the registry records as
+   * `creator`; the escrow split math is unchanged.
+   */
+  creator?: Address;
 }
 
 /**
@@ -877,6 +900,9 @@ export async function deployGatedBundle(
       freePaths: params.freePaths,
       handlerBundleDir: workDir,
       successInput: selectDeclaredSuccessInput(params.bundle["test-cases.json"]),
+      // The on-chain split recipient (the 70% payee): the studio's SIWE creator, threaded
+      // through so earnings accrue to the creator, not the admin key. Undefined -> fallback.
+      creator: params.creator,
     },
     fetchImpl,
     opts,

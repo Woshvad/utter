@@ -87,6 +87,14 @@ export interface DeployRequest {
   maxTimeoutSeconds?: number;
   /** The free routes the sidecar bypasses the gate on (default the A2A card). TRUSTED. */
   freePaths?: string[];
+  /**
+   * The resource creator = the on-chain split recipient (the creator's 70% payee). The
+   * studio sends its SIWE-authenticated creator so earnings accrue to the creator, not the
+   * deployer admin key. Validated as a 20-byte hex address; absent -> the deployer's
+   * RESOURCE_CREATOR/admin fallback. Selects only WHICH address the registry records; the
+   * escrow gate + split math are unchanged.
+   */
+  creator?: string;
 }
 
 /** The route deps for the deployer control plane. */
@@ -158,6 +166,9 @@ function defaultDeploy(
       maxTimeoutSeconds: req.maxTimeoutSeconds ?? 30,
       freePaths: req.freePaths ?? ["/.well-known/agent-card.json"],
       classifierSchema,
+      // The on-chain split recipient (the 70% payee). The route already validated it as an
+      // address; undefined -> the deployer's RESOURCE_CREATOR/admin fallback in deployResource.
+      creator: req.creator as `0x${string}` | undefined,
     },
     fetch,
     { onProgress },
@@ -180,6 +191,14 @@ function bearerMatches(authHeader: string | undefined, secret: string): boolean 
   // Length-mismatch short-circuit: timingSafeEqual throws on unequal-length Buffers.
   if (tokenBuf.length !== secretBuf.length) return false;
   return timingSafeEqual(tokenBuf, secretBuf);
+}
+
+/** True iff value is a 0x-prefixed 20-byte (40 hex char) address string. Used to validate
+ *  the optional creator (the on-chain split recipient) from the untrusted body BEFORE it
+ *  reaches the register write, so a malformed value is a clean pre-stream 400 rather than a
+ *  deploy-time viem/register throw. Mirrors the marketplace server's isBytes32Hex shape. */
+function isAddressHex(value: unknown): value is string {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
 /** How long the capacity census (listRunning) may take before the deploy is refused. */
@@ -390,6 +409,13 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
     ) {
       return c.json({ error: "invalid pricing" }, 400);
     }
+    // creator (optional): the on-chain split recipient (the 70% payee). Validate it as a
+    // 20-byte hex address so a malformed value is a clean pre-stream 400, never a deploy-time
+    // register throw. It selects only WHICH address the registry records; the escrow split
+    // math is unchanged. Absent -> the deployer's RESOURCE_CREATOR/admin fallback.
+    if (b.creator !== undefined && !isAddressHex(b.creator)) {
+      return c.json({ error: "invalid creator" }, 400);
+    }
 
     // (c) PRE-STREAM GATE. A rejected bundle returns 400 and NEVER starts a stream or
     // calls deploy. (Defense in depth: deployGatedBundle re-gates before any write/build.)
@@ -414,6 +440,8 @@ export function createDeployerApp(deps: DeployerAppDeps): Hono {
       pricing,
       maxTimeoutSeconds: b.maxTimeoutSeconds,
       freePaths: b.freePaths,
+      // Validated above (address-shaped or undefined): the on-chain split recipient.
+      creator: b.creator,
     };
 
     // The on-chain resource id, derived with the SAME label-or-slug rule defaultDeploy

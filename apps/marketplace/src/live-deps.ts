@@ -219,3 +219,66 @@ export function resolveBondGate(
     bondReader: async () => 0n,
   };
 }
+
+/** The zero address (an unset creator slot). getResource returns it for a resource that is
+ *  registered-but-owner-cleared; treated as "no on-chain owner" so the pipeline falls back. */
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/** Optional overrides for resolveOwnerReader (the offline test seam). */
+export interface ResolveOwnerReaderOverrides {
+  /** Inject a read-path client so the on-chain owner bind is provable without a real chain. */
+  publicClient?: { readContract: (args: never) => Promise<unknown> };
+}
+
+/**
+ * Resolve the publish pipeline's H3 ownership binder: a best-effort reader of the IMMUTABLE
+ * on-chain ResourceRegistry owner (the money recipient). The publish pipeline uses it to bind
+ * the durable index `creator` (the dashboard ownership key) to the on-chain owner rather than
+ * the caller-supplied publish projection, so a slug-colliding second publisher cannot hijack
+ * another creator's listing / leak their revenue.
+ *
+ * ARMED on the SAME condition as the live ERC-8004 mint (the ERC8004_* registries AND
+ * REGISTRY_ADMIN_PRIVATE_KEY set): that is when the deployment registers resources on-chain,
+ * so getResource has a real owner to read. getResource is a READ (no key, no broadcast) - the
+ * key gate is only a proxy for "this deployment has on-chain resources". UNARMED (testnet
+ * default + tests) -> undefined, so the pipeline uses refuse-overwrite + claimed-creator only
+ * and stays byte-identical + does no network read.
+ *
+ * The reader is BEST-EFFORT: getResource REVERTS for an unregistered id (UnknownResource) and
+ * the read may fail on a flaky RPC; either way it returns null (never throws), so a publish is
+ * never blocked on the ownership read - the pipeline then falls back to refuse-overwrite.
+ */
+export function resolveOwnerReader(
+  env: NodeJS.ProcessEnv,
+  overrides?: ResolveOwnerReaderOverrides,
+): ((resourceId: Hex) => Promise<Hex | null>) | undefined {
+  const armed =
+    !!env.ERC8004_IDENTITY_REGISTRY &&
+    !!env.ERC8004_REPUTATION_REGISTRY &&
+    !!env.ERC8004_VALIDATION_REGISTRY &&
+    !!env.REGISTRY_ADMIN_PRIVATE_KEY;
+  // The injected client (offline test) takes precedence; else build the Arc read client only
+  // when armed. Unarmed + no injected client -> undefined (no reader, no network).
+  const publicClient =
+    overrides?.publicClient ?? (armed ? createArcPublicClient(env.ARC_RPC_URL) : undefined);
+  if (!publicClient) return undefined;
+
+  return async (resourceId: Hex): Promise<Hex | null> => {
+    try {
+      const res = (await (publicClient as { readContract: (args: never) => Promise<unknown> }).readContract({
+        address: RESOURCE_REGISTRY,
+        abi: registryAbi,
+        functionName: "getResource",
+        args: [resourceId],
+      } as never)) as readonly [Address, Address, number, boolean];
+      const owner = res[0];
+      // A zero/absent owner is treated as "no on-chain owner" so the pipeline falls back.
+      if (typeof owner !== "string" || owner.toLowerCase() === ZERO_ADDRESS) return null;
+      return owner as Hex;
+    } catch {
+      // Unregistered id (getResource reverts) or a transient read error: best-effort null so
+      // the publish never fails on the ownership read; the pipeline falls back to refuse-overwrite.
+      return null;
+    }
+  };
+}

@@ -365,6 +365,12 @@ export class LiveAdapter implements StudioDataAdapter {
               slug,
               resourceLabel: labelForSlug(slug),
               pricing: deployerPricing,
+              // The on-chain split recipient (the 70% payee) = the SIWE creator that created
+              // this resource, so its earnings accrue to THEM, not the deployer admin key.
+              // Undefined for an anonymous/test create -> the deployer falls back to
+              // RESOURCE_CREATOR/admin. H3-safe: opts.creator is the authenticated session
+              // address (requireCreator), never user-supplied form input.
+              creator: opts?.creator,
             })) {
               channel.emit(resourceId, ev);
             }
@@ -400,6 +406,11 @@ export class LiveAdapter implements StudioDataAdapter {
                 card,
                 cardUrl: record.cardUrl,
                 slug,
+                // Persist the owner into the DURABLE marketplace index so the dashboard's
+                // owned-resources view survives a studio restart (the in-memory index is
+                // reseeded empty on restart). Same authenticated address recorded on the
+                // local IndexRecord above; undefined for an anonymous/test create.
+                creator: opts?.creator,
               });
               channel.emit(resourceId, { stage: "Publish", status: "ok", log: "listed for discovery (marketplace)" });
             } catch (err) {
@@ -461,6 +472,33 @@ export class LiveAdapter implements StudioDataAdapter {
 
   async getResourceDetail(resourceId: string): Promise<ResourceDetail> {
     const deps = this.requireDeps();
+    // Read THROUGH the DURABLE marketplace SERVICE first when the discovery seam is bound
+    // (MARKETPLACE_URL set). The marketplace (Postgres-backed) is the source of truth that
+    // SURVIVES a studio restart; the in-memory indexStore is reseeded empty on restart, so a
+    // resource created before a restart would otherwise 404 here (and its owner would be lost,
+    // emptying the dashboard). recordToDetail carries the record's creator through, so the
+    // dashboard's ownership scope (sameAddress(detail.creator, the authed creator)) is durable.
+    if (deps.listResources) {
+      // A marketplace OUTAGE must not turn an owned resource into a 404 (which would also block
+      // requireResourceOwner-gated actions). listResources() is FAIL-LOUD (throws on an
+      // unreachable marketplace); catch it here and fall through to the in-memory index so an
+      // in-memory hit still resolves during an outage while durability is preserved on the
+      // happy path. A genuine not-found still surfaces via the final throw below.
+      let records: IndexRecord[] | undefined;
+      try {
+        records = await deps.listResources();
+      } catch {
+        records = undefined;
+      }
+      const hit = records?.find(
+        (r) => r.resourceId.toLowerCase() === resourceId.toLowerCase(),
+      );
+      if (hit) return recordToDetail(hit);
+      // Fall through to the local index: a JUST-created resource is in the in-memory store
+      // immediately (createResource upserts it up front) but may not yet be listed in the
+      // durable marketplace (publish is async + gate-guarded, or a listing failure is
+      // non-fatal), so the local index is the fresh-create fallback within this process.
+    }
     const rec = await deps.indexStore.get(resourceId as Hex);
     if (!rec) {
       // Not-found-shaped: resources.$id.tsx maps ANY throw to a 404 (the read-through

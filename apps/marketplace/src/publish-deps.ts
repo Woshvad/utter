@@ -17,7 +17,7 @@ import { KeywordModerator } from "./moderation/classifier.js";
 import { ARC_CHAIN_ID } from "@utter/chain";
 import { validateAgentCard } from "@utter/ai-runtime";
 import { selectProber } from "@utter/ai-scorer";
-import { resolveBondGate, resolveIdentity } from "./live-deps.js";
+import { resolveBondGate, resolveIdentity, resolveOwnerReader } from "./live-deps.js";
 import type { CardStore } from "./card-store.js";
 import type { IndexStore, Hex } from "./index-store.js";
 import type { ModerationStore } from "./moderation/review-queue.js";
@@ -103,5 +103,9 @@ export function createPublishPipelineDeps(
     identity: resolveIdentity(env),
     indexStore: stores.indexStore,
     cardStore: stores.cardStore,
+    // The H3 ownership binder: bind the durable index creator to the immutable on-chain owner
+    // when the deployment registers resources on-chain (armed on the same condition as the live
+    // mint). Undefined on testnet/tests -> refuse-overwrite + claimed-creator only.
+    resolveOwner: resolveOwnerReader(env),
   };
 }
