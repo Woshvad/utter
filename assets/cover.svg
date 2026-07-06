@@ -1,0 +1,12 @@
+<svg width="1500" height="500" viewBox="0 0 1500 500" role="img" xmlns="http://www.w3.org/2000/svg" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif">
+<title>Utter</title>
+<desc>Utter brand cover: the lowercase utter wordmark with a red dot and ink triangle mark on a dark canvas, the tagline you utter a sentence you get a paid api, framed by two faint arcs and a single red accent dot.</desc>
+<rect width="1500" height="500" fill="#0c0c0d"/>
+<circle cx="0" cy="250" r="300" fill="none" stroke="#2a2a2e" stroke-width="1.5"/>
+<circle cx="1500" cy="250" r="300" fill="none" stroke="#2a2a2e" stroke-width="1.5"/>
+<circle cx="1200" cy="250" r="9" fill="#e0241b"/>
+<circle cx="513" cy="207" r="26" fill="#e0241b"/>
+<polygon points="544,189 544,225 575,207" fill="#eceae3"/>
+<text x="813" y="252" text-anchor="middle" font-size="150" font-weight="700" letter-spacing="-4" fill="#eceae3">utter</text>
+<text x="750" y="320" text-anchor="middle" font-size="28" letter-spacing="0.4" fill="#9c988e">you utter a sentence; you get a <tspan fill="#e0241b" font-weight="700">paid api</tspan>.</text>
+</svg>
