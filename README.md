@@ -7,7 +7,8 @@ Utter turns one plain English sentence into a live API that AI agents discover a
 x402 gave agents a way to pay. Utter is the factory for what they buy. It is the supply side of the agent economy.
 
 - **Live app:** https://app.utter.technology
-- **Demo video:** _add your video link here_
+- **Demo video:** [watch the demo](https://vimeo.com/share/9e35ae17-192f-4b04-bd6c-12c3907aa2ce?share=copy&fl=sv&fe=ci)
+- **X / Twitter:** [@utter_tech](https://x.com/utter_tech)
 - **Chain:** Arc Testnet (chainId `5042002`), settlement in USDC
 - **Explorer:** https://testnet.arcscan.app
 
