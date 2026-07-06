@@ -84,7 +84,7 @@ function recordingRunLive() {
       cap: CAP,
       debitAmount: CAP,
       idemKey: `0x${"11".repeat(32)}`,
-      receipt: { amount: CAP.toString() },
+      receipt: { amount: CAP.toString(), tx: `0x${"cd".repeat(32)}` },
       cardInputs: {} as never,
       recovered: null,
     } as unknown as TestEndpointResult;
@@ -156,6 +156,27 @@ describe("runDemoPay", () => {
     expect(result.paidCount).toBe(3);
     expect(result.totalDebited).toBe(CAP * 3n);
     expect(result.runs).toHaveLength(3);
+  });
+
+  it("APPLY: surfaces the on-chain settlement tx + an explorer link per paid call", async () => {
+    const logs: string[] = [];
+    const result = await runDemoPay({
+      cardUrl: "https://x.example",
+      calls: 2,
+      apply: true,
+      walletClient,
+      publicClient: publicClientWithBalance(0n),
+      fetcher: cardFetcher(card()),
+      deposit: recordingDeposit().fn,
+      runLive: recordingRunLive().fn,
+      env: { ARC_EXPLORER: "https://testnet.arcscan.app" } as NodeJS.ProcessEnv,
+      log: (m) => logs.push(m),
+    });
+    // The settlement tx hashes are collected and each is linked to the explorer.
+    expect(result.settlementTxs).toEqual([`0x${"cd".repeat(32)}`, `0x${"cd".repeat(32)}`]);
+    const joined = logs.join("\n");
+    expect(joined).toMatch(new RegExp(`tx=0x${"cd".repeat(32)}`));
+    expect(joined).toMatch(new RegExp(`testnet\\.arcscan\\.app/tx/0x${"cd".repeat(32)}`));
   });
 
   it("fails closed on a non-numeric card cap (no deposit, no pay)", async () => {
