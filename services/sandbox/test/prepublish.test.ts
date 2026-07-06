@@ -125,9 +125,12 @@ describe("prepublish - declarative-JSON entropy exemption (agent-card payTo addr
     2,
   );
 
-  it("the entropy pass alone false-positives on a 0x address; entropy:false clears it", () => {
+  it("does NOT false-positive on a 0x address/bytes32 shape in the entropy pass (on-chain constant exemption)", () => {
+    // The agent-card payTo + asset are public 0x<40hex> addresses. The entropy pass now
+    // recognizes the on-chain address/bytes32 shape and skips it, so the bundle is clean
+    // with entropy ON (not only with the declarative-JSON entropy:false path).
     const bundle = { "agent-card.json": agentCard };
-    expect(scanSecrets(bundle).some((v) => v.rule === "high-entropy-string")).toBe(true);
+    expect(scanSecrets(bundle)).toEqual([]);
     expect(scanSecrets(bundle, { entropy: false })).toEqual([]);
   });
 
@@ -166,14 +169,49 @@ describe("prepublish - declarative-JSON entropy exemption (agent-card payTo addr
     ).toBe(true);
   });
 
-  it("STILL flags a 0x<64hex> private key in declarative JSON (named hex-private-key rule)", () => {
-    const pk = "0x" + "a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
+  it("does NOT flag a bare 0x<64hex> (bytes32 / payTo / resourceId / tx hash) in declarative JSON", () => {
+    // A bare 32-byte hex is byte-identical to a public on-chain value; flagging it blocked
+    // legitimate deploys. It must pass the gate now (the whole point of the fix).
+    const bytes32 = "0x" + "a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
     const result = runPrePublishStaticChecks({
       "handler.ts": benignSource,
-      "openapi.json": `{ "x": "${pk}" }`,
+      "openapi.json": `{ "resourceId": "${bytes32}" }`,
     });
-    expect(result.pass).toBe(false);
-    expect(result.violations.some((v) => v.rule === "hex-private-key" && v.file === "openapi.json")).toBe(true);
+    expect(result.pass).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it("does NOT flag a bare 0x<64hex> sample value in handler.ts code (entropy exemption)", () => {
+    const bytes32 = "0x" + "9a3c1f2e4b5d6c7a8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90123456789ab";
+    const result = runPrePublishStaticChecks({
+      "handler.ts": benignSource + `\nconst SAMPLE_HASH = "${bytes32}";`,
+    });
+    expect(result.pass).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it("STILL flags a 0x<64hex> in a KEY-CONTEXT (assignment or key->account factory)", () => {
+    const key = "0x" + "a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
+
+    const assigned = runPrePublishStaticChecks({
+      "handler.ts": benignSource + `\nconst privateKey = "${key}";`,
+    });
+    expect(assigned.pass).toBe(false);
+    expect(assigned.violations.some((v) => v.rule === "hex-private-key")).toBe(true);
+
+    const factory = runPrePublishStaticChecks({
+      "handler.ts": benignSource + `\nconst account = privateKeyToAccount("${key}");`,
+    });
+    expect(factory.pass).toBe(false);
+    expect(factory.violations.some((v) => v.rule === "hex-private-key")).toBe(true);
+
+    // JSON key-context is caught too (entropy off there, but the named rule still fires).
+    const json = runPrePublishStaticChecks({
+      "handler.ts": benignSource,
+      "config.json": `{ "privateKey": "${key}" }`,
+    });
+    expect(json.pass).toBe(false);
+    expect(json.violations.some((v) => v.rule === "hex-private-key")).toBe(true);
   });
 });
 

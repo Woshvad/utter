@@ -38,8 +38,31 @@ const SECRET_RULES: { rule: string; pattern: RegExp }[] = [
   // a bundle should not slip a scan that has no named rule for it (IN-03).
   { rule: "openai-style-key", pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/ },
   { rule: "generic-api-key-assignment", pattern: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9+/_\-]{16,}["']/i },
-  { rule: "hex-private-key", pattern: /\b0x[a-fA-F0-9]{64}\b/ },
+  // A hardcoded EVM private key. A BARE 0x<64hex> is byte-for-byte identical to a bytes32
+  // payTo / resourceId / tx hash / block hash - pervasive PUBLIC on-chain values that a
+  // generated handler for an on-chain platform emits constantly. Flagging every bare
+  // 0x<64hex> false-positives and blocks legitimate deploys, so we fire ONLY in a
+  // KEY-CONTEXT: a private/secret/signer-key assignment, or a key->account factory
+  // (privateKeyToAccount / new [ethers.]Wallet). That still catches the realistic
+  // hardcoded-key forms while letting a bare hash/id through. The runtime env-injection
+  // vector is independently guarded by service-env.ts (SECRET_VALUE_RULES, publicConstantSafe),
+  // and the sandbox default-denies egress, so a bare hex that slips here cannot be exfiltrated.
+  {
+    rule: "hex-private-key",
+    pattern:
+      /(?:(?:private|priv|secret|signer|signing|deployer)[_-]?key["']?\s*[:=]\s*["']?|(?:privateKeyToAccount|new\s+(?:ethers\.)?Wallet)\s*\(\s*["'])0x[a-fA-F0-9]{64}\b/i,
+  },
 ];
+
+/**
+ * The public on-chain constant shapes: a 20-byte address or a 32-byte value (0x + 40/64
+ * hex). These are PUBLIC (addresses, resourceIds, tx/block hashes, payTo) yet byte-identical
+ * to a private key by shape, so the generic Shannon-entropy heuristic false-positives on
+ * every one and would block legitimate on-chain bundles. The entropy pass skips them; a
+ * deliberately hardcoded private key in a KEY-CONTEXT is still caught by the hex-private-key
+ * named rule above.
+ */
+const ONCHAIN_CONSTANT_HEX = /^0x[a-fA-F0-9]{40}$|^0x[a-fA-F0-9]{64}$/;
 
 /** Shannon entropy (bits/char) of a string. */
 export function shannonEntropy(s: string): number {
@@ -115,6 +138,10 @@ export function scanSecrets(bundle: Bundle, opts: ScanSecretsOptions = {}): Secr
       if (!entropyEnabled) return;
       for (const token of entropyCandidates(line)) {
         if (token.length < ENTROPY_MIN_LEN) continue;
+        // Skip public on-chain address/bytes32 shapes (ONCHAIN_CONSTANT_HEX): they are
+        // public constants, not secrets, and would otherwise false-positive here (a sample
+        // hash / resourceId / address in handler.ts would fail an otherwise-clean bundle).
+        if (ONCHAIN_CONSTANT_HEX.test(token)) continue;
         if (shannonEntropy(token) >= ENTROPY_THRESHOLD) {
           // Avoid double-reporting a token a named rule already caught on this line.
           const already = violations.some(
