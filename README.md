@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/cover.svg" alt="Utter — you utter a sentence, you get a paid api" width="100%">
+</p>
+
 # Utter
 
 **You utter a sentence. You get a paid API.**
