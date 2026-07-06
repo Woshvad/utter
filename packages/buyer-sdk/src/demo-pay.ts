@@ -170,6 +170,8 @@ export interface DemoPayResult {
   totalDebited: bigint;
   /** How many calls returned 200 + a receipt. */
   paidCount: number;
+  /** The on-chain settlement tx hashes (one per paid call that returned a receipt tx). */
+  settlementTxs: string[];
 }
 
 /** Derive the full agent-card URL (append the A2A card path only if absent). */
@@ -181,6 +183,20 @@ function toCardUrl(cardUrl: string): string {
 function toEndpointUrl(cardUrl: string): string {
   const base = cardUrl.endsWith(CARD_PATH) ? cardUrl.slice(0, -CARD_PATH.length) : cardUrl;
   return `${base.replace(/\/+$/, "")}/call`;
+}
+
+/**
+ * Pull the on-chain settlement tx hash from a settle receipt. The deployed gate returns
+ * `{ tx, amount, payer, idemKey, scheme }` (base64 in X-PAYMENT-RESPONSE); `tx` is the
+ * settlement transaction hash. Surfacing it makes the "an agent paid, here is the on-chain
+ * proof" demo self-contained (the terminal prints a link straight to the explorer).
+ */
+function txHashOf(receipt: unknown): string | null {
+  if (receipt && typeof receipt === "object") {
+    const t = (receipt as { tx?: unknown }).tx;
+    if (typeof t === "string" && /^0x[0-9a-fA-F]{64}$/.test(t)) return t;
+  }
+  return null;
 }
 
 /**
@@ -285,6 +301,7 @@ export async function runDemoPay(opts: DemoPayOptions): Promise<DemoPayResult> {
       runs: [],
       totalDebited: 0n,
       paidCount: 0,
+      settlementTxs: [],
     };
   }
 
@@ -305,7 +322,16 @@ export async function runDemoPay(opts: DemoPayOptions): Promise<DemoPayResult> {
   // (5) PAY - fire N real paid calls through the deployed gate. Inject the SAME wallet +
   // client + fetcher so no new key read happens (liveTestEndpoint only reads the env key
   // when a wallet/client is NOT injected; here both are).
+  // The block explorer for the on-chain settlement links printed per paid call (ARC_EXPLORER
+  // in .env.local, else the Arc testnet default). Trailing slash trimmed so `${explorer}/tx/`
+  // never doubles.
+  const explorer = (env?.ARC_EXPLORER?.trim() || "https://testnet.arcscan.app").replace(
+    /\/+$/,
+    "",
+  );
+
   const runs: TestEndpointResult[] = [];
+  const settlementTxs: string[] = [];
   let totalDebited = 0n;
   let paidCount = 0;
   for (let i = 0; i < calls; i++) {
@@ -322,10 +348,14 @@ export async function runDemoPay(opts: DemoPayOptions): Promise<DemoPayResult> {
     runs.push(run);
     totalDebited += run.debitAmount;
     if (run.paid) paidCount += 1;
+    const tx = txHashOf(run.receipt);
+    if (tx) settlementTxs.push(tx);
     log(
       `[demo-pay] call ${i + 1}/${calls}: status=${run.status} paid=${run.paid} ` +
-        `debit=${run.debitAmount.toString()} idem=${run.idemKey}`,
+        `debit=${run.debitAmount.toString()} idem=${run.idemKey}${tx ? ` tx=${tx}` : ""}`,
     );
+    // The on-chain proof link (the demo's credibility shot: paste/click straight to ArcScan).
+    if (tx) log(`  on-chain settle: ${explorer}/tx/${tx}`);
   }
 
   log(
@@ -346,5 +376,6 @@ export async function runDemoPay(opts: DemoPayOptions): Promise<DemoPayResult> {
     runs,
     totalDebited,
     paidCount,
+    settlementTxs,
   };
 }
