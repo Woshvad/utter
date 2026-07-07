@@ -1,0 +1,75 @@
+# Apex + catch-all redirect to the studio host (HOST-APEX). Operator-managed
+# STATIC dynamic config, hot-loaded by the file provider (traefik.yml
+# providers.file, watch: true) - no Traefik restart needed.
+#
+# WHY: a client that hit any utter.technology host OTHER than a configured router
+# (the bare apex utter.technology, www, or a typo'd single-label subdomain) was
+# served Traefik's self-signed TRAEFIK DEFAULT CERT, which browsers reject with a
+# scary "not secure" warning. This router gives every such host a VALID Let's
+# Encrypt cert (a utter.technology + *.utter.technology cert via the existing `le`
+# DNS-01 resolver) and 301-redirects it to https://app.utter.technology, keeping
+# the path.
+#
+# SAFETY (cannot break the live site):
+#   - priority 1 (the lowest) so it NEVER shadows the specific studio
+#     (app.utter.technology) or per-resource (<slug>.resources.utter.technology)
+#     routers - those have far higher default priority and match first.
+#   - the single-label HostRegexp matches only `<label>.utter.technology`, never
+#     the 3-label resource hosts, so resource routing is untouched.
+#   - for the exact app SNI, Traefik prefers the specific app cert over this
+#     wildcard, so app.utter.technology is byte-unchanged.
+#   - a bad rule/cert here fails that router only; Traefik keeps every other
+#     router serving. And until the DNS records below exist, apex/www do not
+#     resolve, so this router simply receives no traffic.
+#
+# OPERATOR PREREQUISITE (DNS at Namecheap): add A records for the apex and www to
+# the host public IP (204.168.142.51) so traffic reaches Traefik:
+#   @    A   204.168.142.51
+#   www  A   204.168.142.51
+# The wildcard cert is issued via DNS-01 (a TXT record the namecheap provider
+# creates automatically), independent of these A records.
+http:
+  routers:
+    # HTTPS: terminate TLS with a valid apex + wildcard cert, then redirect to app.
+    apex-secure:
+      rule: 'Host(`utter.technology`) || HostRegexp(`^[a-z0-9-]+\.utter\.technology$`)'
+      priority: 1
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: le
+        domains:
+          - main: "utter.technology"
+            sans:
+              - "*.utter.technology"
+      middlewares:
+        - apex-to-app
+      service: apex-sink
+
+    # Plain HTTP for the same hosts also redirects to the canonical https app host.
+    apex-web:
+      rule: 'Host(`utter.technology`) || HostRegexp(`^[a-z0-9-]+\.utter\.technology$`)'
+      priority: 1
+      entryPoints:
+        - web
+      middlewares:
+        - apex-to-app
+      service: apex-sink
+
+  middlewares:
+    # Redirect any host + path to the canonical studio host, preserving the path.
+    # Matches http and https so both entrypoints funnel to https://app.
+    apex-to-app:
+      redirectRegex:
+        regex: "^https?://[^/]+/(.*)"
+        replacement: "https://app.utter.technology/${1}"
+        permanent: true
+
+  services:
+    # Never actually reached (the redirect middleware short-circuits before the
+    # service), but a router requires a service. A distinct name avoids clashing
+    # with the `studio` service defined in studio.yml.
+    apex-sink:
+      loadBalancer:
+        servers:
+          - url: "http://studio:3000"
