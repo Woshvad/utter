@@ -1,0 +1,184 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Utter",
+  "description": "You utter a sentence. You get a paid API that AI agents pay for per call in USDC on Arc.",
+  "colors": {
+    "primary": "#e0241b",
+    "light": "#f0564d",
+    "dark": "#c01d15"
+  },
+  "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://utter.technology"
+  },
+  "background": {
+    "color": {
+      "light": "#ffffff",
+      "dark": "#0c0c0d"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Start here",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "index",
+              "start/how-it-works",
+              "start/is-utter-for-me"
+            ]
+          },
+          {
+            "group": "Quickstart",
+            "pages": [
+              "start/quickstart-create",
+              "start/quickstart-pay"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Create a paid API",
+        "groups": [
+          {
+            "group": "The studio",
+            "pages": [
+              "create/overview",
+              "create/studio-and-build",
+              "create/pricing-and-bonds",
+              "create/iterate"
+            ]
+          },
+          {
+            "group": "Earnings",
+            "pages": [
+              "create/earnings-and-withdraw",
+              "create/reputation-and-strikes"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Pay for APIs",
+        "groups": [
+          {
+            "group": "For agents",
+            "pages": [
+              "pay/overview",
+              "pay/discover",
+              "pay/buyer-sdk",
+              "pay/mcp",
+              "pay/deposits-and-caps"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Concepts",
+        "groups": [
+          {
+            "group": "The money path",
+            "pages": [
+              "concepts/escrow-response-gate",
+              "concepts/x402-scheme",
+              "concepts/metering-and-classification",
+              "concepts/exactly-once"
+            ]
+          },
+          {
+            "group": "Identity and trust",
+            "pages": [
+              "concepts/wallet-and-siwe",
+              "concepts/erc8004-identity",
+              "concepts/agent-card"
+            ]
+          },
+          {
+            "group": "Isolation",
+            "pages": [
+              "concepts/sandbox",
+              "concepts/egress-and-static-gate"
+            ]
+          },
+          {
+            "group": "The chain",
+            "pages": [
+              "concepts/arc"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "HTTP APIs",
+            "pages": [
+              "reference/call-endpoint",
+              "reference/marketplace-api",
+              "reference/facilitator-api"
+            ]
+          },
+          {
+            "group": "On-chain",
+            "pages": [
+              "reference/contracts",
+              "reference/addresses"
+            ]
+          },
+          {
+            "group": "SDK and config",
+            "pages": [
+              "reference/buyer-sdk",
+              "reference/agent-card-schema",
+              "reference/environment"
+            ]
+          },
+          {
+            "group": "Appendix",
+            "pages": [
+              "reference/glossary"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Operator",
+        "groups": [
+          {
+            "group": "Run the platform",
+            "pages": [
+              "operator/architecture",
+              "operator/deploy-pipeline",
+              "operator/provisioning",
+              "operator/self-hosting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Marketplace",
+        "href": "https://app.utter.technology/discover"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Open the app",
+      "href": "https://app.utter.technology"
+    }
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/utter_tech"
+    }
+  }
+}

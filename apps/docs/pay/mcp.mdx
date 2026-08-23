@@ -1,0 +1,99 @@
+---
+title: "The MCP server"
+description: "Expose discovered Utter endpoints as tools an agent calls from Claude Desktop or Cursor, with a safe in-process demo mode by default."
+---
+
+The buyer SDK ships an MCP server that turns discovered endpoints into tools your agent can call. It runs over stdio, is named `utter-buyer`, and by default runs a fully in-process demo with no real money. The buyer key lives inside the client and is never a tool argument or a return value.
+
+## Register it
+
+Add the server to your MCP host's config. The command is `utter-buyer-mcp` (the bin from `@utter/buyer-sdk`), over stdio.
+
+<CodeGroup>
+```json Claude Desktop
+{
+  "mcpServers": {
+    "utter-buyer": {
+      "command": "utter-buyer-mcp"
+    }
+  }
+}
+```
+
+```json Cursor
+{
+  "mcpServers": {
+    "utter-buyer": {
+      "command": "utter-buyer-mcp"
+    }
+  }
+}
+```
+</CodeGroup>
+
+With no environment set, this starts the demo server. To go live, add the env described below.
+
+<Warning>
+  The server writes nothing to stdout. Stdout is the JSON-RPC channel; any stray write would corrupt it. All diagnostics go to stderr. If you wrap the command, keep stdout clean.
+</Warning>
+
+## Demo vs live
+
+The mode is selected by the `BUYER_SDK_TRANSPORT` env var.
+
+<Tabs>
+  <Tab title="Demo (default)">
+    Unset, or anything other than `live`. The server runs a self-contained wiring: an in-process mock chain, an ephemeral throwaway wallet, and a built-in echo card. It runs the real discover, reserve, handler, settle loop with no real money, no network, and no deployed resource. The demo never reads a buyer key. This is the safe default for trying the tools.
+  </Tab>
+  <Tab title="Live">
+    `BUYER_SDK_TRANSPORT=live`. Operator-gated. The server reads `BUYER_PRIVATE_KEY` once into the wallet (held in the client closure, never logged) and reads the live marketplace index from `MARKETPLACE_INDEX_URL`. The live path broadcasts irreversible on-chain debits, so it fail-louds until a funded key and a deployed resource are provisioned.
+  </Tab>
+</Tabs>
+
+<ParamField path="BUYER_SDK_TRANSPORT" type="string">
+  `live` for the operator-gated live path. Unset or any other value runs the in-process demo.
+</ParamField>
+
+<ParamField path="BUYER_PRIVATE_KEY" type="string">
+  The buyer EOA key, read once on the live path only. Never logged, never a tool argument.
+</ParamField>
+
+<ParamField path="MARKETPLACE_INDEX_URL" type="string">
+  The marketplace base for live discovery. Required on the live path; the server fail-louds without it.
+</ParamField>
+
+## The two tools
+
+The server registers a discovery tool plus one call tool per discovered endpoint.
+
+<AccordionGroup>
+  <Accordion title="utter_discover_endpoints">
+    Input `{ query?: string }`. Lists or searches paid endpoints, projecting only price, reputation, and bond to the model. It never surfaces a key. Pass `query` to filter by slug, category, or resource id.
+  </Accordion>
+  <Accordion title="utter_call_[resourceId]">
+    One tool per endpoint, named with the full 32-byte resource id, lowercased, without `0x`. Its input schema is derived from the resource's `openapi.json` request schema. Calling it validates the args, reserves budget, pays through the escrow loop, and returns the response text.
+  </Accordion>
+</AccordionGroup>
+
+## How an agent uses them
+
+<Steps>
+  <Step title="Discover">
+    The agent calls `utter_discover_endpoints`, optionally with a query, and reads back each endpoint's name, price, reputation, and bond.
+  </Step>
+  <Step title="Call">
+    It picks an endpoint and calls its `utter_call_<resourceId>` tool with arguments matching the derived schema. The server validates the args before paying, reserves the per-call cap, pays through the gate, and returns the response text.
+  </Step>
+</Steps>
+
+<Note>
+  The buyer key is held in the client closure. It is never a tool argument, never a tool return, and never a log line. The model sees price, reputation, bond, and the response, nothing more.
+</Note>
+
+Budget caps bound what any tool will spend. See [Deposits and spend caps](/pay/deposits-and-caps).
+
+## Next
+
+<Card title="Buyer SDK reference" icon="book" href="/reference/buyer-sdk">
+  The full env var list, tool derivation rules, and behavior details.
+</Card>

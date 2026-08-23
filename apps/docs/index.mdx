@@ -1,0 +1,55 @@
+---
+title: "Utter"
+description: "You utter a sentence. You get a paid API that AI agents pay for per call in USDC."
+mode: "wide"
+---
+
+Utter turns one plain English sentence into a live API that AI agents discover and pay for per call in USDC, built natively on **Arc**, Circle's stablecoin L1. You describe an endpoint, Utter writes the code, runs it in an isolated sandbox, verifies it works, gives it an on-chain identity, and lists it in a marketplace with an agent card. From there, other agents find it and pay for it on their own, with no API keys and no humans in the loop. You keep the majority of every call.
+
+x402 gave agents a way to pay. Utter is the factory for what they buy. It is the supply side of the agent economy.
+
+<CardGroup cols={2}>
+  <Card title="Create a paid API" icon="wand-magic-sparkles" href="/start/quickstart-create">
+    Type a sentence in the studio and get a live, priced endpoint in about two minutes.
+  </Card>
+  <Card title="Pay for an API" icon="robot" href="/start/quickstart-pay">
+    Point an agent at an endpoint. It deposits USDC once, then pays per call with no keys.
+  </Card>
+  <Card title="How it works" icon="diagram-project" href="/start/how-it-works">
+    The full loop from a sentence to a paid endpoint with safe on-chain settlement.
+  </Card>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    The core primitive: agents pay only after the response passes validation.
+  </Card>
+</CardGroup>
+
+## The idea in one paragraph
+
+AI agents can now hold and move money, but there is almost nothing built for them to buy, and putting a small paid API into the world still means servers, billing, API keys, and ops. So the long tail of useful tools never gets monetized. Even when a service exists, an agent cannot really use it on its own, because it needs a signup, a key, and it has to pay before it knows if the answer is any good. Utter closes that gap: describe an endpoint in one sentence and get a live API that agents pay for per call, with payment taken only **after** the response passes validation, so an agent never pays for a bad answer.
+
+## Two audiences, one loop
+
+<Columns cols={2}>
+  <Card title="Creators" icon="pen-nib" href="/create/overview">
+    Vibe-coders and builders who want a priced URL fast. You utter a sentence, watch it build, set a price, and earn the majority of every call. Zero servers, zero billing setup.
+  </Card>
+  <Card title="Agent operators" icon="terminal" href="/pay/overview">
+    Agents deposit USDC once and then discover and pay per call with no API keys and no humans. Use the reference buyer SDK or the MCP server from Claude Desktop or Cursor.
+  </Card>
+</Columns>
+
+## Try it now
+
+Every deployed endpoint refuses an unpaid call with an HTTP 402. See the payment gate on a live endpoint:
+
+```bash
+curl -i -X POST https://return-the-current-utc-time-as-json.resources.utter.technology/call \
+  -H "content-type: application/json" -d '{}'
+# -> HTTP/1.1 402 Payment Required  (scheme utter-escrow, asset USDC, an escrow cap)
+```
+
+Its agent card is public at `/.well-known/agent-card.json`. When an agent signs a USDC payment, the facilitator reserves the cap, the handler runs, the response is validated, and only then does the payment settle.
+
+<Info>
+  Utter runs on **Arc Testnet** (chain id `5042002`). Settlement is in USDC. Live app: [app.utter.technology](https://app.utter.technology). Explorer: [testnet.arcscan.app](https://testnet.arcscan.app).
+</Info>

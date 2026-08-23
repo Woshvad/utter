@@ -1,0 +1,75 @@
+---
+title: "Discovering endpoints"
+description: "Read the public marketplace index, then read the agent card. The card is the single source of everything an agent needs to pay."
+---
+
+Discovery is two reads: a public index that lists what exists, and a per-endpoint agent card that carries everything needed to pay for it. An agent needs no account and no key to do either.
+
+## The marketplace index
+
+The marketplace serves a public JSON list at `GET /resources`. Reads are public, no bearer token. Each row is a projection of one endpoint: its resource id, slug, category, pricing, reputation, uptime, health, bond, and its agent card URL.
+
+```bash
+curl -s https://app.utter.technology/resources | jq '.[0]'
+```
+
+Filter the list with query parameters to narrow what your agent considers:
+
+<ParamField query="category" type="string">
+  Only endpoints in this category.
+</ParamField>
+
+<ParamField query="active" type="boolean">
+  Only endpoints that are currently active.
+</ParamField>
+
+<ParamField query="minBond" type="string">
+  Only endpoints whose posted bond is at least this amount (base units).
+</ParamField>
+
+<ParamField query="maxBasePrice" type="string">
+  Only endpoints whose base price per call is at most this amount (base units).
+</ParamField>
+
+Other filters exist. The full shape and every parameter are in the [Marketplace API reference](/reference/marketplace-api).
+
+<Warning>
+  The index is display data only. It is untrusted. Never sign a payment against a value read from an index row. The agent card, served by the endpoint itself, is the only source the pay path trusts.
+</Warning>
+
+## The agent card is the source of pay data
+
+Every deployed endpoint serves an A2A agent card at `<baseUrl>/.well-known/agent-card.json`. This card, not the index, is where an agent reads everything it needs to pay:
+
+- the pricing (base charge, per-KB charge, the model)
+- the escrow contract to pay into
+- the `payTo` id, which is the resource id
+- the cap (`maxAmountRequired`), the on-chain hard bound for a call
+- reputation and bond
+
+```bash
+curl -s https://return-the-current-utc-time-as-json.resources.utter.technology/.well-known/agent-card.json | jq
+```
+
+The pay path re-reads and re-pins the escrow contract, asset, `payTo`, and cap from the served card before it signs anything. A wrong or hostile index row cannot author a bad payment, because the card is read fresh and the signed cap is bounded independently of it. See the buyer cap ceiling in [Deposits and spend caps](/pay/deposits-and-caps).
+
+<Note>
+  Everything an agent needs to pay comes only from the card. The index is how it finds the card; the card is how it pays.
+</Note>
+
+The complete card schema is in [The agent card](/concepts/agent-card).
+
+## Humans browse the same index
+
+The studio's discover screen renders the same `GET /resources` index for people. Browse it at [app.utter.technology/discover](https://app.utter.technology/discover) to see live endpoints, their prices, and their reputation before pointing an agent at one.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The agent card" icon="id-card" href="/concepts/agent-card">
+    The full card schema and every field the pay path reads from it.
+  </Card>
+  <Card title="Marketplace API reference" icon="server" href="/reference/marketplace-api">
+    The complete `GET /resources` shape and all filters.
+  </Card>
+</CardGroup>

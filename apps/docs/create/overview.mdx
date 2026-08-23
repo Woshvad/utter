@@ -1,0 +1,57 @@
+---
+title: "Creating a paid API"
+description: "Describe an endpoint in one sentence and get a live URL that agents pay for per call, in about two minutes."
+---
+
+You describe an endpoint in one plain English sentence and Utter gives you a live, priced API that AI agents discover and pay for per call in USDC. You write no code, run no servers, and set up no billing. You keep the majority of every call.
+
+The whole loop happens in the studio. You type a sentence, watch it build through six stages, and get a live URL, an agent card, and a marketplace listing. From there, other agents find your endpoint and pay for it on their own.
+
+<Info>
+  Sign-in is by wallet using SIWE (Sign-In With Ethereum, EIP-4361). There is no password and no account to create. Open the studio at [app.utter.technology](https://app.utter.technology).
+</Info>
+
+## What you get
+
+<Steps>
+  <Step title="A sentence becomes working code">
+    Claude writes a complete, self-contained endpoint from your prompt: a request handler, the API schema, an agent card, and test cases. A four-gate validator proves it works before anything goes live.
+  </Step>
+  <Step title="A live, priced URL">
+    Your endpoint runs in an isolated sandbox behind a payment gate. Every unpaid call gets an HTTP 402. Every paid call runs, gets validated, and settles on-chain.
+  </Step>
+  <Step title="An on-chain identity and a listing">
+    The endpoint gets an on-chain ERC-8004 identity and a listing in the marketplace with an A2A agent card, so agents can discover and call it with no API keys.
+  </Step>
+  <Step title="The majority of every call">
+    Each paid call is split 70/30 between you and the platform, inline in the on-chain debit. Your share accrues as a balance you withdraw whenever you want.
+  </Step>
+</Steps>
+
+## The two-minute promise
+
+The fast path from a sentence to a live endpoint takes about two minutes. Payment is debited only after the response passes validation, so an agent can call your brand new endpoint and trust that a bad answer costs nothing. That single rule, the [escrow response gate](/concepts/escrow-response-gate), is what makes the whole loop safe.
+
+<Card title="Quickstart: create a paid API" icon="wand-magic-sparkles" href="/start/quickstart-create">
+  The step-by-step fast path from a sentence to a live, priced endpoint.
+</Card>
+
+## Learn the studio
+
+<CardGroup cols={2}>
+  <Card title="The studio and the build stream" icon="wand-magic-sparkles" href="/create/studio-and-build">
+    The compose screen, the utter button, the six build stages, and the live moment.
+  </Card>
+  <Card title="Pricing and bonds" icon="tags" href="/create/pricing-and-bonds">
+    Flat vs metered pricing, the buyer-signed cap, the 70/30 split, and the creator bond.
+  </Card>
+  <Card title="Iterate on an endpoint" icon="rotate" href="/create/iterate">
+    Refine your prompt and re-utter. A change is a fresh generation that passes the gates again.
+  </Card>
+  <Card title="Earnings and withdraw" icon="wallet" href="/create/earnings-and-withdraw">
+    The dashboard, where your share comes from, and how to withdraw your balance.
+  </Card>
+  <Card title="Reputation and strikes" icon="shield-check" href="/create/reputation-and-strikes">
+    The scorer, the three-way classification, and why a bad buyer input never strikes you.
+  </Card>
+</CardGroup>

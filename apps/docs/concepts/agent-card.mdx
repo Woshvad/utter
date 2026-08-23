@@ -1,0 +1,96 @@
+---
+title: "The agent card (A2A)"
+description: "The A2A agent card is the machine-readable contract an agent reads to discover, verify, and pay an endpoint."
+---
+
+The agent card is how one agent tells another everything it needs to use an endpoint: what it does, how to call it, what it costs, who it is on-chain, and how healthy it is. It is an A2A (agent-to-agent) card, protocol version `0.3.0`, in the flat card shape. Every deployed resource serves one for free at `<baseUrl>/.well-known/agent-card.json`. An agent that reads the card has everything it needs to pay; it never needs an out-of-band key, doc, or signup.
+
+## Where it lives
+
+```bash
+curl https://return-the-current-utc-time-as-json.resources.utter.technology/.well-known/agent-card.json
+```
+
+The card is served free, no payment required. Only the actual `/call` is gated.
+
+## The shape
+
+The card is the flat A2A shape with an Utter-specific `x402` block that carries the payment terms.
+
+```json
+{
+  "protocolVersion": "0.3.0",
+  "name": "Return the current UTC time as JSON",
+  "description": "...",
+  "url": "https://....resources.utter.technology/call",
+  "version": "1.0.0",
+  "capabilities": {},
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [],
+  "x402": {
+    "scheme": "utter-escrow",
+    "network": "eip155:5042002",
+    "chainId": 5042002,
+    "asset": "0x3600000000000000000000000000000000000000",
+    "escrow": "<PaymentEscrow>",
+    "pricing": { "model": "metered", "base": "...", "perKB": "...", "max": "<cap>" },
+    "payTo": "<resourceId>"
+  },
+  "cache": { "...": "..." },
+  "identity": { "standard": "erc-8004", "chainId": 5042002, "agentId": "42" },
+  "health": { "verified": true, "score": 0.98 },
+  "bond": { "posted": true }
+}
+```
+
+<Note>
+  Everything an agent needs to pay comes only from the card: the [scheme](/concepts/x402-scheme), the network, the USDC asset, the escrow contract, the pricing, and the `payTo`. There is no second source of truth to reconcile.
+</Note>
+
+## The fields that carry trust
+
+<AccordionGroup>
+  <Accordion title="x402">
+    The payment terms. `scheme` is `utter-escrow`, `network` is `eip155:5042002`, `asset` is USDC, `escrow` is the `PaymentEscrow` contract, `pricing` carries `model`, `base`, `perKB`, and `max`, and `payTo` is the resource id the debit is attributed to. This is what the buyer signs against.
+  </Accordion>
+  <Accordion title="identity">
+    The on-chain [ERC-8004 identity](/concepts/erc8004-identity): `standard` `erc-8004`, the `chainId`, and the `agentId` as a decimal string. This `agentId` must equal the one recorded on-chain in the `ResourceRegistry`.
+  </Accordion>
+  <Accordion title="health and bond">
+    `health` carries `verified` and a `score` (the reputation health score). `bond` carries `posted`, whether the creator has staked a bond behind the endpoint.
+  </Accordion>
+</AccordionGroup>
+
+## Deploy-time finalization
+
+The generated card ships with placeholders that only become real once the resource has a live URL and an on-chain identity. At deploy the deployer finalizes:
+
+- `url`, the live `/call` URL,
+- `x402.payTo`, the resource id,
+- `identity.agentId`, the minted `agentId`.
+
+<Warning>
+  `payTo` must equal the resource id. If it does not, the marketplace refuses to list the resource, because a mismatched `payTo` would send debits to the wrong attribution. This is a hard check, not a warning.
+</Warning>
+
+## A strict schema
+
+The card is validated against a strict schema with `additionalProperties: false` at the top level, so it rejects any other A2A card shape. Only the flat shape Utter emits passes. This is deliberate: a buyer can trust that a card that validates carries exactly the fields it expects and nothing smuggled alongside them. The full field-by-field table is in the [agent-card schema reference](/reference/agent-card-schema).
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Agent-card schema" icon="table-list" href="/reference/agent-card-schema">
+    Every field, its type, and whether it is required.
+  </Card>
+  <Card title="On-chain identity" icon="fingerprint" href="/concepts/erc8004-identity">
+    Where the agentId in the card comes from.
+  </Card>
+  <Card title="The utter-escrow scheme" icon="money-bill-transfer" href="/concepts/x402-scheme">
+    How the x402 block turns into a signed payment.
+  </Card>
+  <Card title="Discover endpoints" icon="magnifying-glass" href="/pay/discover">
+    How agents find cards through the marketplace.
+  </Card>
+</CardGroup>

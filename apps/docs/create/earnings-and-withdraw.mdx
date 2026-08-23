@@ -1,0 +1,58 @@
+---
+title: "Earnings and withdraw"
+description: "Where your 70% of every call accrues, how the dashboard reads it from on-chain legs, and how to withdraw."
+---
+
+You earn 70% of every paid call. Your share accrues as an internal balance and you withdraw it whenever you want. Nothing about your earnings is recomputed off-chain: the numbers come straight from the on-chain settlement legs.
+
+## The dashboard
+
+The [dashboard](https://app.utter.technology/dashboard) shows the health of everything you have shipped:
+
+| Metric | What it shows |
+| --- | --- |
+| Earnings | Your accrued creator share across all endpoints. |
+| Total calls | How many paid calls your endpoints have served. |
+| Live APIs | How many of your endpoints are currently active. |
+| Strikes | Strike-worthy failures against your endpoints. See [reputation and strikes](/create/reputation-and-strikes). |
+
+Every figure is aggregated from the on-chain settlement legs, never recomputed from a separate ledger. What you see is what settled on-chain.
+
+## Where your share comes from
+
+The 70/30 split is applied **inline**, inside the same on-chain debit that charges the buyer. When a call succeeds, `PaymentEscrow` debits the buyer and credits your internal balance and the treasury's in one transaction, and emits an event carrying both legs. There is no separate payout job that could drift, fail, or be skipped.
+
+<Info>
+  Because the split happens inside the debit, your earnings and the platform's are two legs of one event. The dashboard reads those legs directly, so your balance is always consistent with what actually settled. See [exactly-once settlement](/concepts/exactly-once).
+</Info>
+
+## How to withdraw
+
+Your creator share sits as an internal balance in `PaymentEscrow`. You withdraw it from the [/wallet](https://app.utter.technology/wallet) screen, which also shows your escrow balance and transaction history.
+
+<Steps>
+  <Step title="Open the wallet screen">
+    Go to [/wallet](https://app.utter.technology/wallet). Your withdrawable creator balance is shown alongside your escrow balance.
+  </Step>
+  <Step title="Withdraw">
+    Start the withdraw. It calls `PaymentEscrow.withdraw` and sends your accrued balance to your wallet.
+  </Step>
+  <Step title="Confirm">
+    A confirm step guards the withdrawal before it is signed. Confirm to send the transaction.
+  </Step>
+</Steps>
+
+All amounts render at runtime `decimals()`, so the balance you see and the amount you withdraw are always in the right units for USDC.
+
+## Payout history
+
+Your wallet screen keeps a transaction history, and payouts link out to [ArcScan](https://testnet.arcscan.app) so you can verify any settlement or withdrawal on-chain. The explorer is the source of truth: the dashboard just reads it back for you.
+
+<CardGroup cols={2}>
+  <Card title="Exactly-once settlement" icon="check-double" href="/concepts/exactly-once">
+    Why a retry never double-charges and how the inline split keeps your balance consistent.
+  </Card>
+  <Card title="Contracts reference" icon="file-contract" href="/reference/contracts">
+    PaymentEscrow, the debit legs, and the withdraw path on-chain.
+  </Card>
+</CardGroup>

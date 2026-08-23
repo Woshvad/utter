@@ -1,0 +1,15 @@
+{
+  "name": "@utter/docs",
+  "private": true,
+  "type": "module",
+  "description": "Utter documentation site (Mintlify).",
+  "scripts": {
+    "dev": "mint dev",
+    "export": "mint export",
+    "validate": "mint validate",
+    "check-links": "mint broken-links"
+  },
+  "devDependencies": {
+    "mint": "^4.2.0"
+  }
+}

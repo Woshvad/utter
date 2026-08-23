@@ -1,0 +1,79 @@
+---
+title: "The deploy pipeline"
+description: "The ordered steps a generated bundle runs through, from an authenticated request to a live paid endpoint."
+---
+
+When a bundle deploys, the deployer runs a fixed, ordered pipeline. Every step is fail-closed: auth, the static gate, and capacity admission each stop the deploy before anything is built if they do not pass. The steps below are what happens on `POST /deploy` (or the CLI path), which streams progress over SSE.
+
+## The steps
+
+<Steps>
+  <Step title="Auth">
+    An unset or blank `DEPLOYER_AUTH_SECRET` returns `503`: deploy is disabled, never open. A wrong Bearer token returns `401` via a constant-time compare.
+  </Step>
+  <Step title="Body validation">
+    `handler.ts` must be non-empty, the slug is validated, the pricing fields must be strings, and the optional `creator` must be a 20-byte hex address.
+  </Step>
+  <Step title="Pre-build static gate">
+    The [static gate](/concepts/egress-and-static-gate) scans the generated code. A violation returns `400` and nothing is built.
+  </Step>
+  <Step title="Capacity admission">
+    The unit is containers, two per deploy (handler plus sidecar). Over capacity returns `503` with a `Retry-After`.
+  </Step>
+  <Step title="Open the stream">
+    A `deploying` record is written and the SSE stream opens so the caller can watch the rest.
+  </Step>
+  <Step title="Fund the smoke test">
+    A small buyer escrow deposit is ensured for the verify smoke test. The cap is `10^decimals / 100` (0.01 USDC), with `decimals` read at runtime.
+  </Step>
+  <Step title="On-chain registration">
+    `ResourceRegistry.register` is called idempotently with `creatorBps = 10000 - PLATFORM_FEE_BPS` (default `3000`, so `7000`: the 70/30 split).
+  </Step>
+  <Step title="Build and run the pair">
+    Both images build (base images pinned by digest, install from lockfile only, non-root user, build-timeout and image-size caps), then the sidecar and handler run under `runsc` on a per-slug internal network. See [the sandbox](/concepts/sandbox).
+  </Step>
+  <Step title="Write the Traefik route">
+    The per-resource Traefik dynamic route is written atomically and hot-loaded. It points at the sidecar, never at the handler.
+  </Step>
+  <Step title="Verify the paywall">
+    The deployer polls an unpaid call to `402` over HTTPS, then sends a real signed payment and asserts `200` plus a receipt. See the [call endpoint reference](/reference/call-endpoint).
+  </Step>
+  <Step title="Verify the settle">
+    It finds the `Debited` event on-chain and asserts the debit is `<= cap` and the split is 70/30.
+  </Step>
+  <Step title="Egress containment probe (optional)">
+    Gated behind `UTTER_RUN_EGRESS_PROBE=1`. When off it is skipped and recorded as a skip, never as a pass.
+  </Step>
+  <Step title="Flip to running">
+    The record flips to `running` and a `done` event is emitted. The endpoint is live at `https://<slug>.resources.<DEPLOY_DOMAIN>`.
+  </Step>
+</Steps>
+
+## The trust boundary
+
+The deployer treats control-plane inputs and bundle contents very differently. The slug, `resourceId`, pricing, timeouts, and free paths are **trusted control-plane inputs** from the authenticated caller. They are never taken from the bundle.
+
+The only fields read from the bundle are `openapi.json` (the classifier schema), `agent-card.json`, and `test-cases.json`. Nothing that decides money or routing comes from the generated code.
+
+<Warning>
+  Pricing, timeouts, and routing are set by the authenticated caller, not by the bundle. If a bundle could set its own price or its own free paths, generated code would control the money path. It cannot.
+</Warning>
+
+## The reconcile loop
+
+A reconcile loop runs on the host alongside the deployer. It:
+
+- reaps orphan containers,
+- quarantines runaways and stale deploys,
+- garbage-collects per-slug networks.
+
+It deliberately **never auto-relaunches untrusted generated code**. If a handler dies, it stays down until a human or a fresh deploy brings it back. Restarting untrusted code on its own would be a way to defeat quarantine, so the loop does not do it.
+
+<CardGroup cols={2}>
+  <Card title="Provisioning a host" icon="server" href="/operator/provisioning">
+    What the host needs before this pipeline can run for real.
+  </Card>
+  <Card title="The call endpoint" icon="code" href="/reference/call-endpoint">
+    The 402 to 200 contract the verify step exercises.
+  </Card>
+</CardGroup>

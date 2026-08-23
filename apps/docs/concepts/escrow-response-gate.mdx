@@ -1,0 +1,80 @@
+---
+title: "The escrow response gate"
+description: "The core primitive: an agent pays only after the response passes validation."
+---
+
+The escrow response gate is the primitive the whole platform is built on. It is what lets an agent call a brand new endpoint it has never used and know that a bad answer costs nothing. Everything else, the studio, the marketplace, the sandbox, exists to make this one gate safe and repeatable.
+
+## Why a bare charge does not work
+
+The obvious way to charge an agent is to have it sign a payment for a fixed amount and transfer it. That is what the standard x402 `exact` scheme does with EIP-3009: it transfers exactly the signed value. But it cannot do two things Utter needs:
+
+1. **Meter.** The final price often depends on the response (its size, the compute it took). A bare transfer fixes the amount before the handler runs.
+2. **Gate on the result.** A bare transfer settles regardless of whether the answer was any good. The agent pays for a malfunction.
+
+So Utter uses an escrow scheme where funds are **locked, then debited after validation**, not transferred up front.
+
+## The flow
+
+```
+buyer deposits USDC  ->  /verify reserves the cap  ->  handler runs
+                     ->  response validated (ESCROW GATE)
+                     ->  /settle debits min(computed, cap) with the inline 70/30 split
+```
+
+Step by step, when an agent calls a gated endpoint:
+
+<Steps>
+  <Step title="402 with a quote">
+    A call without an `X-PAYMENT` header returns HTTP 402 and an `accepts` body describing the `utter-escrow` scheme: the asset (USDC), the escrow contract, the `payTo` (the resource id), the cap (`maxAmountRequired`), the pricing, and the EIP-712 domain to sign under. See the [call endpoint reference](/reference/call-endpoint).
+  </Step>
+  <Step title="Sign a capped authorization">
+    The agent signs a `DebitAuthorization` for a cap, under the `UtterEscrow` domain, and sends it back base64-encoded in the `X-PAYMENT` header. The signed cap is a ceiling, not the price.
+  </Step>
+  <Step title="Verify reserves the cap">
+    The gate calls the facilitator's `/verify`, which recovers the signer, checks the buyer has enough un-reserved deposit balance, checks the nonce is unused, and **reserves the cap**. Only now, with funds locked, does the handler run. This is the rule that removes the free-compute vector.
+  </Step>
+  <Step title="Handler runs under a timeout">
+    The untrusted handler runs in its [sandbox](/concepts/sandbox), bounded by the timeout the buyer signed for. The gate clones the response body so it never consumes the client's stream.
+  </Step>
+  <Step title="Classify the response (the gate)">
+    The gate [classifies](/concepts/metering-and-classification) the body as `success`, `declared_error`, or `malfunction`. This branch is the gate.
+  </Step>
+  <Step title="Settle, release, or fail closed">
+    On `success`, the gate computes `min(metered, cap)` and calls `/settle`, which debits the buyer and splits the amount inline. On a `declared_error` it releases with no charge (or charges a declared error price, never more than the cap). On a `malfunction` or a timeout it releases the reservation, records a strike, and returns an error. It never debits on anything but a success.
+  </Step>
+</Steps>
+
+## Three outcomes, three behaviors
+
+The gate distinguishes three things that a naive charge would conflate. This distinction is the wrongful-strike guard: a bad answer from the endpoint is the creator's fault, but a bad input from the buyer is not.
+
+<AccordionGroup>
+  <Accordion title="Success -> charge">
+    The response validates against the endpoint's declared success schema. The buyer is charged `min(computed, cap)`, split 70/30 between the creator and the platform, and a receipt is returned in the `X-PAYMENT-RESPONSE` header.
+  </Accordion>
+  <Accordion title="Declared error -> no strike">
+    The response validates against the endpoint's declared error schema. This is a well-formed "your input was bad" answer, not a malfunction. The reservation is released with no strike against the creator. Depending on the endpoint's error policy the call is free or charged a small declared-error price, never more than the cap.
+  </Accordion>
+  <Accordion title="Malfunction or timeout -> no charge, strike">
+    The response is neither a valid success nor a valid declared error, or the handler timed out or threw. The reservation is released, nothing is charged, and a strike is recorded against the creator. Five consecutive strike-worthy failures deactivate the endpoint. See [reputation and strikes](/create/reputation-and-strikes).
+  </Accordion>
+</AccordionGroup>
+
+## Exactly once
+
+A network retry must never double charge and never re-sign. Settlement is idempotent, keyed by the payment nonce (which is the idempotency key):
+
+- The facilitator caches `(idemKey -> result)` and short-circuits a repeated `/settle` to the cached receipt.
+- The escrow contract flips a single-use nonce on-chain, so a retry after a crash reverts instead of debiting twice, and the receipt is rebuilt from the on-chain event.
+- A buyer that lost the response calls `GET /results/:idemKey` to recover the receipt without paying again.
+
+The full mechanism is in [Exactly-once settlement](/concepts/exactly-once).
+
+## Why the split is inline
+
+The 70/30 creator/platform split happens **inside the same on-chain debit** that charges the buyer, not as a later payout job. The `PaymentEscrow.debit` call credits the creator's and the treasury's internal balances in one transaction and emits a `Debited` event carrying both legs. There is no separate settlement step that could drift, fail, or be skipped. The creator withdraws their accumulated balance whenever they want.
+
+<Info>
+  The gate never runs a handler against an unreserved authorization, and it never debits on anything but a validated success. If you remember one thing about Utter, remember that.
+</Info>

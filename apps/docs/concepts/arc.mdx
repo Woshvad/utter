@@ -1,0 +1,64 @@
+---
+title: "Arc: USDC as gas and settlement"
+description: "Why Utter is built on Arc, Circle's stablecoin L1, where USDC is both the gas token and the settlement asset."
+---
+
+Utter settles genuine sub-cent payments per call. That is only possible on a chain where the gas does not cost more than the call. Arc is Circle's stablecoin L1, and on Arc the same USDC is both the gas token and the settlement asset, so a fraction-of-a-cent payment clears without a volatile gas fee swamping it. Utter runs on Arc Testnet only.
+
+## Why Arc
+
+On a general-purpose chain, gas is paid in a separate, volatile token. A sub-cent API call would routinely cost more in gas than the call itself is worth, which kills per-call micropayments before they start. Arc removes that problem: gas is USDC. The fee and the payment are denominated in the same stable unit, so the economics of a per-call payment stay sane down to sub-cent amounts. That is the whole reason the [escrow money path](/concepts/escrow-response-gate) can charge what it charges.
+
+<Info>
+  Utter uses **Arc Testnet only**. Chain id `5042002`, network string `eip155:5042002`.
+</Info>
+
+## The two-lens USDC
+
+On Arc, one USDC contract wears two hats.
+
+| Lens | Interface | Decimals |
+| --- | --- | --- |
+| ERC-20 | Standard token interface for balances and transfers | 6 |
+| Native gas | The chain's native gas token | 18 |
+
+The address is the same for both: `0x3600000000000000000000000000000000000000`.
+
+<Warning>
+  The two lenses have **different decimals**: 6 for the ERC-20, 18 for the native gas token. Always read `decimals()` at runtime, never hardcode 6 or 18, and never mix a gas-lens amount with an ERC-20-lens amount. Mixing them is an 18-versus-6 decimals bug that silently mis-sizes a payment by a factor of `10^12`.
+</Warning>
+
+All amount math in the money path is bigint base-unit math that reads `decimals()`, so a payment computed against the ERC-20 lens is never accidentally interpreted as a gas-lens amount.
+
+## Endpoints
+
+```bash
+# RPC
+https://rpc.testnet.arc.network
+
+# Explorer
+https://testnet.arcscan.app
+```
+
+Every settlement produces an on-chain transaction you can open on the explorer. The [buyer SDK](/reference/buyer-sdk) prints the settlement tx and an explorer link per paid call, so you can watch the debit and the 70/30 split land on-chain.
+
+<Note>
+  The pinned contract addresses on Arc Testnet, including `PaymentEscrow`, the `ResourceRegistry`, and the ERC-8004 registries, are in [addresses](/reference/addresses). Do not hardcode addresses from this page; read them from the reference, which is the pinned source.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    The money path Arc's economics make possible.
+  </Card>
+  <Card title="Metering and classification" icon="calculator" href="/concepts/metering-and-classification">
+    The bigint base-unit math that reads decimals().
+  </Card>
+  <Card title="Addresses" icon="location-dot" href="/reference/addresses">
+    The pinned contract addresses on Arc Testnet.
+  </Card>
+  <Card title="Environment" icon="gear" href="/reference/environment">
+    The RPC and chain settings.
+  </Card>
+</CardGroup>

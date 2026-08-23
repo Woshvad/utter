@@ -1,0 +1,62 @@
+---
+title: "Quickstart: create a paid API"
+description: "Utter a sentence and get a live endpoint agents pay for, in about two minutes."
+---
+
+This is the fast path from a plain English sentence to a live, priced endpoint. It takes about two minutes and you never touch a server or a billing dashboard.
+
+<Info>
+  You need a wallet to sign in and a sentence describing what your endpoint should do. Everything else, the code, the sandbox, the on-chain identity, the marketplace listing, Utter builds for you.
+</Info>
+
+<Steps>
+  <Step title="Open the studio and sign in">
+    Go to [app.utter.technology](https://app.utter.technology) and sign in with your wallet. Utter uses SIWE (Sign-In With Ethereum, EIP-4361), so you prove ownership by signing a message. There is no password and no account to create.
+  </Step>
+  <Step title="Go to create and type a sentence">
+    Open [/create](https://app.utter.technology/create) and describe your endpoint in one plain English sentence, for example "return the current UTC time as JSON". Be specific about the input and the output you expect.
+  </Step>
+  <Step title="Choose pricing">
+    Pick **flat** (one price per call) or **metered** (price scales with the response). The default price is **$0.01** per call. You can tune this later. See [Pricing and bonds](/create/pricing-and-bonds).
+  </Step>
+  <Step title="Set a bond">
+    Set the creator bond that backs your endpoint's reputation. The default is **$5**. The bond is what a run of malfunctions puts at risk, so it keeps quality honest.
+  </Step>
+  <Step title="Submit with the utter button">
+    Press the red triangle **utter** button. The build stream opens and runs six stages in order:
+
+    | Stage | What happens |
+    | --- | --- |
+    | Generate | Claude writes the handler, the API schema, the agent card, and test cases. |
+    | Deploy | The bundle builds into a container and runs in an isolated sandbox. |
+    | Verify | A smoke test drives an unpaid call to a 402, signs a real payment, and asserts a paid call returns 200. |
+    | Mint | The endpoint gets an on-chain ERC-8004 identity and is registered on-chain. |
+    | Publish | It is listed in the marketplace with an A2A agent card. |
+    | Live | The endpoint is up and taking paid calls. |
+  </Step>
+  <Step title="Get your live URL, card, and listing">
+    When the stream reaches **Live** you have three things:
+
+    - A live URL of the form `https://<slug>.resources.utter.technology`
+    - An agent card at `<url>/.well-known/agent-card.json`
+    - A listing in the [marketplace](https://app.utter.technology/discover)
+  </Step>
+  <Step title="Test it in the playground">
+    Press **test it** to open the resource playground. Send a real request, watch the 402, and see a paid call return a 200 with a settlement receipt. This is exactly what a paying agent sees.
+  </Step>
+</Steps>
+
+<Tip>
+  Every deployed endpoint refuses an unpaid call with an HTTP 402. That is the payment gate doing its job. An agent signs a USDC payment, the facilitator reserves the cap, your handler runs, the response is validated, and only then does the payment settle.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Pricing and bonds" icon="tags" href="/create/pricing-and-bonds">
+    Flat vs metered pricing, how the bond backs reputation, and how to set both well.
+  </Card>
+  <Card title="Earnings and withdraw" icon="wallet" href="/create/earnings-and-withdraw">
+    Where your 70% of every call accrues and how to withdraw your balance.
+  </Card>
+</CardGroup>

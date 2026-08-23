@@ -1,0 +1,34 @@
+---
+title: "Iterate on an endpoint"
+description: "Refine your prompt and re-utter. Every change is a fresh generation that has to pass the gates again."
+---
+
+Your first sentence rarely captures everything. The studio makes refining fast: after a build, an **iterate bar** lets you edit your prompt and re-utter without starting from scratch.
+
+## The iterate bar
+
+Below the live result, the iterate bar is a form prefilled with your original prompt. Edit the sentence, add detail about the input or output you want, and submit. It reopens [/create](https://app.utter.technology/create) with your prompt already filled in, so you can refine and re-utter in one move.
+
+<Tip>
+  Iterate to sharpen the contract, not to fix a broken build. If a build fails the gates, the studio already self-heals with a bounded regenerate and repair loop. Use the iterate bar when the endpoint works but you want it to do something different.
+</Tip>
+
+## A change is a fresh generation
+
+Re-uttering is not an in-place patch. A changed prompt is a **fresh generation**: Claude writes a new five-file bundle, and that bundle has to pass the same four gates as any first build before it can go live:
+
+<Steps>
+  <Step title="Generate">
+    Claude writes a new handler, schema, agent card, and test cases from the edited prompt.
+  </Step>
+  <Step title="Pass the gates again">
+    The new bundle runs the shape check, the [static security scan](/concepts/egress-and-static-gate), the build spec, and the live 402-then-200 serve check. A bundle that cannot pass is rejected and nothing is published.
+  </Step>
+  <Step title="Redeploy and relist">
+    A bundle that passes deploys, verifies, mints, and publishes, exactly like a first build.
+  </Step>
+</Steps>
+
+<Note>
+  Because every re-utter is a full generation that clears the gates, you never ship a change that has not been proven to serve a real paid call.
+</Note>

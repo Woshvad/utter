@@ -1,0 +1,59 @@
+---
+title: "Is Utter for me?"
+description: "One question sorts you: do you want to sell an API or buy one? Pick a path."
+---
+
+Utter has two sides and one loop. Creators turn a sentence into a paid endpoint. Agents discover that endpoint and pay for it per call. The whole thing runs on Arc Testnet and settles in USDC. Start with one question.
+
+## Do you want to sell an API or buy one?
+
+<CardGroup cols={2}>
+  <Card title="I want to sell an API" icon="wand-magic-sparkles" href="/create/overview">
+    You have an idea for a small, useful endpoint and you want it live and priced without running servers or setting up billing. You are a creator.
+  </Card>
+  <Card title="I want to buy an API" icon="robot" href="/pay/overview">
+    You run an agent that needs data or compute and you want it to discover and pay for endpoints on its own, with no keys and no humans. You are an agent operator.
+  </Card>
+</CardGroup>
+
+## Creators: build and earn
+
+You describe an endpoint in one plain English sentence, watch it build, set a price, and get a live URL. Agents find it and pay per call in USDC, with payment taken only after the response passes validation. You keep the majority of every call, split 70/30 in your favor. Zero servers, zero billing setup.
+
+<CardGroup cols={2}>
+  <Card title="Creator overview" icon="pen-nib" href="/create/overview">
+    What you get, how pricing and bonds work, and how you earn.
+  </Card>
+  <Card title="Quickstart: create a paid API" icon="rocket" href="/start/quickstart-create">
+    Sign in, utter a sentence, and get a live endpoint in about two minutes.
+  </Card>
+</CardGroup>
+
+## Agent operators: discover and pay
+
+Your agent deposits USDC once, then discovers endpoints and pays per call. No API keys, no signups, no waiting on a human. Every call gets a 402, your agent signs a USDC payment, and it pays only for answers that pass validation. Use the reference buyer SDK from the command line or the MCP server from Claude Desktop or Cursor.
+
+<CardGroup cols={2}>
+  <Card title="Paying overview" icon="terminal" href="/pay/overview">
+    How an agent deposits, discovers, and pays per call.
+  </Card>
+  <Card title="Quickstart: pay for an API" icon="rocket" href="/start/quickstart-pay">
+    Try a paid call in minutes with the buyer SDK or MCP.
+  </Card>
+</CardGroup>
+
+## Platform operators: run the whole stack
+
+You want to host Utter yourself: the studio, the marketplace, the deployer, the facilitator money path, the sandbox runtime, and the on-chain contracts. Self-host the full stack and take a cut of every call routed through it.
+
+<CardGroup cols={1}>
+  <Card title="Architecture and self-hosting" icon="server" href="/operator/architecture">
+    The full component map and what it takes to run Utter end to end.
+  </Card>
+</CardGroup>
+
+## Still curious?
+
+<Note>
+  If you want the concepts before you pick a lane, read [How it works](/start/how-it-works) for the full loop from a sentence to a paid endpoint, then [The escrow response gate](/concepts/escrow-response-gate) for the primitive that makes an agent trust a brand new endpoint.
+</Note>

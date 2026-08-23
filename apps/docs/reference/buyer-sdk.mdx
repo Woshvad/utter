@@ -1,0 +1,93 @@
+---
+title: "Buyer SDK"
+description: "The @utter/buyer-sdk pay CLI, the MCP server, and the programmatic client agents use to pay per call."
+---
+
+`@utter/buyer-sdk` is the reference paying agent. It ships three surfaces: a `pay` CLI for firing real paid calls, an MCP server that exposes endpoints as agent tools, and a programmatic client. It signs `DebitAuthorization`s for the [escrow scheme](/reference/call-endpoint) and never exposes the buyer key to the model.
+
+## The pay CLI
+
+Fund the buyer escrow once and fire N real paid calls to a deployed resource.
+
+```bash
+pnpm --filter @utter/buyer-sdk pay -- --url <url> [--calls N] [--apply] [--body '<json>'] [--card-url <url>] [--resource-id 0x...]
+```
+
+Without `--apply` the CLI is a dry run: it reads the card and the buyer's escrow balance, prints the sizing plan, and makes zero chain writes and zero paid calls.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--url` | required | The resource base URL or its full agent-card URL. `--card-url` is an alias; one is required. |
+| `--card-url` | required | Alias for `--url`. |
+| `--calls` | `1` | How many real paid calls to fire. The one-time deposit is sized to `cap * N`. |
+| `--apply` | off | Actually deposit and pay. Omit for a dry run. |
+| `--body` | optional | JSON request body POSTed to the handler. |
+| `--resource-id` | optional | A bytes32 `payTo` to bind the discovered card against. |
+
+### CLI environment
+
+| Var | Required | Purpose |
+| --- | --- | --- |
+| `TEST_BUYER_PRIVATE_KEY` | yes | The funded buyer EOA key. Read once, never logged. |
+| `ARC_RPC_URL` | no | Arc RPC override. Falls back to the chain default. |
+| `ARC_EXPLORER` | no | Explorer base. Defaults to `https://testnet.arcscan.app`. |
+
+```bash Example
+pnpm --filter @utter/buyer-sdk pay -- \
+  --url https://return-the-current-utc-time-as-json.resources.utter.technology \
+  --calls 10 --apply
+```
+
+## The MCP server
+
+A stdio MCP server that exposes discovery and per-endpoint tools to an MCP client (Claude Desktop, Cursor).
+
+| Field | Value |
+| --- | --- |
+| Bin | `utter-buyer-mcp` |
+| Transport | stdio |
+| Server name | `utter-buyer` |
+
+### Modes
+
+`BUYER_SDK_TRANSPORT` selects the mode:
+
+| Value | Mode |
+| --- | --- |
+| unset or `demo` | In-process mock demo (no real money). |
+| `live` | Operator-gated live money path. Reads `BUYER_PRIVATE_KEY`. |
+
+### Tools
+
+| Tool | Input | Description |
+| --- | --- | --- |
+| `utter_discover_endpoints` | `{ query?: string }` | Discover endpoints from the marketplace index. |
+| `utter_call_<resourceId>` | derived from the resource OpenAPI | Call one endpoint and pay per call. One tool per discovered resource. |
+
+### MCP environment
+
+| Var | Purpose |
+| --- | --- |
+| `BUYER_PRIVATE_KEY` | The buyer wallet key the live server signs with. Never returned or logged. |
+| `BUYER_SDK_TRANSPORT` | Mode selector (see above). |
+| `BUYER_MAX_CAP_TOKENS` | The per-call cap ceiling in whole USDC tokens. The signed cap is `min(card cap, this ceiling)`. |
+| `MARKETPLACE_INDEX_URL` | The live marketplace index URL used for discovery. |
+
+Per-tool and per-day spend caps layer over the on-chain signed `maxAmount` hard cap.
+
+<Warning>
+  The MCP server never writes to stdout: stdout is the JSON-RPC channel. Diagnostics go to stderr, and the buyer key is never printed.
+</Warning>
+
+## Programmatic client
+
+`createBuyerClient` returns a client with these methods:
+
+| Method | Description |
+| --- | --- |
+| `discover` | Discover endpoints from the marketplace index. |
+| `ensureDeposit` | Ensure the buyer's escrow balance covers the planned calls. |
+| `pay` | Run the pay loop against an endpoint. |
+| `retrieveByIdemKey` | Recover a receipt and response via [`GET /results/:idemKey`](/reference/facilitator-api#get-results-idemkey). |
+
+The signed `maxAmount` is always clamped to `min(card cap, BUYER_MAX_CAP_TOKENS)`, so a hostile card cannot make the client sign above what the buyer authorized.

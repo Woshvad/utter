@@ -1,0 +1,83 @@
+---
+title: "The static gate and egress proxy"
+description: "Two controls keep generated code safe: a pre-build static scan that rejects bad bundles, and a deny-by-default data proxy that is the only way out."
+---
+
+Generated code is dangerous in two ways: it might carry a secret it should not, or reach somewhere it should not. Utter answers each with its own control. The static gate runs before anything is built and rejects a bundle that smuggles secrets or dangerous imports. The data proxy is the only egress a running handler has, deny-by-default, with the real credential held server-side. The two controls stack: one stops bad code from ever building, the other contains what a running handler can reach.
+
+## Control one: the pre-build static gate
+
+The static gate runs **before any build**. A violation rejects the bundle and nothing is built. It reads source, it never executes it.
+
+<AccordionGroup>
+  <Accordion title="Secret scanning">
+    Named-provider regexes catch AWS, GitHub, Slack, and OpenAI-style keys, private-key blocks, and generic `api_key` / `secret` / `token` assignments. Hex private keys are flagged only in key-context, to avoid false positives. A Shannon-entropy pass catches high-entropy strings that no named pattern matched. Findings are redacted in the report. JSON files are scanned with entropy off, so public on-chain constants (addresses, hashes) are not flagged as secrets.
+  </Accordion>
+  <Accordion title="Dangerous imports (AST walk)">
+    A TypeScript AST walk, reading source and never running it, flags imports of `child_process`, `net`, `dgram`, `cluster`, and `worker_threads`, including their `node:` forms. It also flags any string literal starting with `/proc` or `/sys`, and any enumeration of `process.env`.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  The static gate is a hard gate. A bundle that fails it is rejected and no build runs. This is the first step in the [deploy pipeline](/operator/deploy-pipeline), before the sandbox is even involved, so bad code never reaches a container.
+</Warning>
+
+## Control two: the data proxy
+
+A [sandboxed handler](/concepts/sandbox) runs on network `none`. Its only path off the box is the data proxy, and the proxy is deny-by-default. The handler never holds the real upstream key, only a short-lived scoped token.
+
+<Steps>
+  <Step title="Verify the token">
+    The proxy verifies the short-lived scoped token the container was handed for this request. No valid token, no egress.
+  </Step>
+  <Step title="Resolve the allowlist">
+    It resolves this resource's allowlist. An empty allowlist means deny. A host that is not on the list is refused.
+  </Step>
+  <Step title="SSRF filtering">
+    It blocks private ranges, link-local addresses, the `169.254.169.254` metadata IP, and numeric-obfuscated hosts, so the handler cannot pivot to internal infrastructure.
+  </Step>
+  <Step title="Enforce the quota">
+    It enforces a per-resource quota and fails closed when the quota is exhausted.
+  </Step>
+  <Step title="Inject the real credential server-side">
+    It resolves the real upstream credential server-side and injects it only on the proxy-to-upstream leg. The container never sees it.
+  </Step>
+  <Step title="Pin the IP, never follow redirects">
+    It pins the request to the validated IP and never follows redirects, so a resolved-then-swapped host or a redirect to an internal target cannot slip through.
+  </Step>
+</Steps>
+
+A generated handler reaches an upstream only through the proxy:
+
+```ts
+const res = await fetch(process.env.EGRESS_PROXY_URL + "/proxy", {
+  method: "POST",
+  headers: { "x-resource-token": token },
+  body: JSON.stringify({ url: "https://api.example.com/v1/thing", method: "GET" }),
+});
+```
+
+<Note>
+  The handler talks to `process.env.EGRESS_PROXY_URL + "/proxy"` with an `x-resource-token` header. It names the upstream it wants; the proxy decides whether it is allowed and attaches the real credential itself. The key never enters the container, so a compromised handler cannot exfiltrate it.
+</Note>
+
+## Why two controls
+
+The static gate stops a secret or a dangerous capability from ever being built into an image. The data proxy contains a handler that is already running: even code that passed the static scan can only reach allowlisted upstreams, never with a raw credential, never to an internal address. One is prevention at build time, the other is containment at run time. Neither alone is enough.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The gVisor sandbox" icon="box" href="/concepts/sandbox">
+    The isolation the handler runs in, with network none.
+  </Card>
+  <Card title="The deploy pipeline" icon="diagram-project" href="/operator/deploy-pipeline">
+    Where the static gate sits, before any build.
+  </Card>
+  <Card title="Provisioning" icon="server" href="/operator/provisioning">
+    Standing up the proxy and the isolation host.
+  </Card>
+  <Card title="Environment" icon="gear" href="/reference/environment">
+    The egress-proxy and token settings.
+  </Card>
+</CardGroup>

@@ -1,0 +1,91 @@
+---
+title: "The gVisor sandbox"
+description: "Untrusted generated code runs only under gVisor, with a hardened run-spec, hard caps, and a trusted sidecar in front that owns the money path."
+---
+
+Every handler Utter runs is code a language model generated from a sentence. It is untrusted by construction, so it runs only inside a real isolation boundary: gVisor. Plain Docker is not that boundary. The runtime refuses to run an untrusted bundle without gVisor rather than silently fall back to something weaker. On top of the kernel boundary, a hardened run-spec strips the container down to nothing it does not need, and a trusted sidecar in front keeps the untrusted handler away from the money path entirely.
+
+## gVisor, not plain Docker
+
+The handler runs under gVisor (`runsc`), a user-space kernel that intercepts syscalls, on an operator-provisioned host. Plain Docker (`runc`) shares the host kernel and is **not** a security boundary for untrusted code.
+
+<Warning>
+  If gVisor is not available, the runtime refuses to run an untrusted bundle. It does not degrade to `runc`. A missing isolation boundary is a hard failure, not a warning, because running generated code on the host kernel is exactly the thing the sandbox exists to prevent.
+</Warning>
+
+## The hardened run-spec
+
+Both backends enforce the same invariants on every untrusted container. None of them is optional.
+
+<AccordionGroup>
+  <Accordion title="No privilege, no host access">
+    Never privileged. Never host networking. No added capabilities, `capDrop ALL`, and `no-new-privileges`. The container cannot escalate.
+  </Accordion>
+  <Accordion title="No secrets in the environment">
+    The platform environment is empty. No secrets, no keys. The only thing injected is a short-lived, scoped data-proxy token, and only per request. See [the egress proxy](/concepts/egress-and-static-gate).
+  </Accordion>
+  <Accordion title="No network of its own">
+    Network `none`. The container has no egress path except the data proxy, which is attached host-side. It cannot open a socket to the internet on its own.
+  </Accordion>
+  <Accordion title="Read-only and noexec filesystem">
+    Read-only root filesystem. `tmpfs` mounted `noexec` and `nosuid`, so the handler cannot drop an executable and run it, or gain privilege through a setuid binary.
+  </Accordion>
+  <Accordion title="Hard resource limits">
+    Positive `pids`, `memory`, and `cpu` limits, plus a runner-enforced timeout and an optional disk quota. Live example caps: 256 pids, 256 MiB memory, 0.5 cpu. A handler cannot fork-bomb, exhaust memory, or run forever.
+  </Accordion>
+</AccordionGroup>
+
+## Size caps
+
+Request and response bodies are each capped at **1 MiB**.
+
+| Direction | Over the cap | Result |
+| --- | --- | --- |
+| Request | Oversize request | `413` before the handler runs |
+| Response | Oversize response | `502` |
+
+An oversize request is rejected before the handler is ever invoked, so a large payload cannot be used to run compute the buyer did not pay for. An oversize response fails closed with a `502`.
+
+## Two containers per endpoint
+
+A deployed endpoint is not one process. It is two, with a trust boundary between them.
+
+```
+public host --(Traefik)--> trusted sidecar / gate --> untrusted handler
+                            (owns the money path,       (per-slug internal
+                             holds the facilitator      network only, no
+                             token)                      facilitator URL, no token)
+```
+
+<Steps>
+  <Step title="The untrusted handler">
+    Runs the generated code. It has no facilitator URL and no token, and it can talk only on its per-slug internal network. It cannot reach the money path even if it wanted to.
+  </Step>
+  <Step title="The trusted sidecar / gate">
+    Sits in front. It owns the [escrow response gate](/concepts/escrow-response-gate): it reads the 402, verifies the payment, invokes the handler, classifies the response, and settles. It holds the facilitator token.
+  </Step>
+  <Step title="Traefik routes the public host">
+    Traefik routes the public host to the sidecar, never directly to the handler. Every call reaches the money path first.
+  </Step>
+</Steps>
+
+<Note>
+  Splitting the endpoint in two means the untrusted code never holds a credential that could move money, and never sees the facilitator. Even a fully compromised handler can only return a response, which the sidecar will then classify and, if it is bad, refuse to charge for.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The static gate and egress proxy" icon="filter" href="/concepts/egress-and-static-gate">
+    What runs before the build and how the handler reaches an upstream.
+  </Card>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    The money path the trusted sidecar owns.
+  </Card>
+  <Card title="Provisioning" icon="server" href="/operator/provisioning">
+    Standing up the gVisor host and the wildcard TLS domain.
+  </Card>
+  <Card title="The deploy pipeline" icon="diagram-project" href="/operator/deploy-pipeline">
+    Where the sandbox sits in build and deploy.
+  </Card>
+</CardGroup>

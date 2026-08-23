@@ -1,0 +1,77 @@
+---
+title: "Metering and response classification"
+description: "How the final price is computed against the response and how a response is graded success, declared error, or malfunction."
+---
+
+Two calculations decide what an agent pays. Metering turns the response into a price, capped by the amount the buyer signed. Classification grades the response into one of three outcomes, and that grade decides whether the price is charged at all. Both run after the handler returns and before anything settles, so the buyer is charged for what the response actually was, never for what it might have been.
+
+## Metering
+
+The metered amount is built from the response size and the handler runtime, in base units, then clamped to the cap:
+
+```
+metered = base
+        + perKB            * ceil(effectiveBytes / 1024)
+        + computeMultiplier * ceil(handlerMs     / 100)
+
+charged = min(metered, cap)
+```
+
+Two constants are fixed: **1024 bytes per size unit** and **100 ms per compute unit**. `effectiveBytes` is the response body size; when the endpoint sets a `maxResponseBytes`, it is `min(bodyBytes, maxResponseBytes)` so an oversize body cannot bill past the configured ceiling. All arithmetic is bigint base-unit math on USDC, and the cap the buyer signed is a hard ceiling: `min(metered, cap)` can never exceed it.
+
+<Note>
+  `base`, `perKB`, and `computeMultiplier` come from the endpoint's pricing, quoted in the 402 `pricing` block. The buyer sees the model and the cap before signing, so the price is bounded and predictable even though the exact figure depends on the response. See [pricing and bonds](/create/pricing-and-bonds).
+</Note>
+
+<AccordionGroup>
+  <Accordion title="Worked example">
+    Suppose `base = 100`, `perKB = 50`, `computeMultiplier = 10`, a 3 KB response (`effectiveBytes = 3072`), and a 250 ms handler. Then `ceil(3072/1024) = 3` size units and `ceil(250/100) = 3` compute units, so `metered = 100 + 50*3 + 10*3 = 280` base units. If the signed cap is `500`, the buyer is charged `min(280, 500) = 280`. If the cap were `200`, the buyer would be charged `200`, the ceiling.
+  </Accordion>
+</AccordionGroup>
+
+## Classification
+
+A classifier compiled from the endpoint's `openapi.json` validates the response body and returns one of three grades. Metering only matters for a success; the other two grades never charge the metered amount.
+
+<Steps>
+  <Step title="Try the success schema">
+    If the body validates against the endpoint's declared **success** schema, the grade is `success`.
+  </Step>
+  <Step title="Try the error schema">
+    Otherwise, if the body validates against the declared **error** schema, the grade is `declared_error`. This is a well-formed "your input was bad" answer, not a broken endpoint.
+  </Step>
+  <Step title="Everything else is a malfunction">
+    Otherwise, or if the body is non-JSON or unparseable, or the handler timed out or threw, the grade is `malfunction`.
+  </Step>
+</Steps>
+
+## Three grades, three behaviors
+
+| Grade | Charge | Strike |
+| --- | --- | --- |
+| `success` | `min(computed, cap)`, split 70/30 creator/platform | No |
+| `declared_error` | Released free, or a small `errorPrice` never exceeding the cap | No |
+| `malfunction` / timeout / throw | Nothing charged, reservation released | Yes |
+
+<Warning>
+  The split between `declared_error` and `malfunction` is the wrongful-strike guard. A bad input from the buyer produces a well-formed declared error, which never strikes the creator. Only a genuinely broken response, one that matches neither schema, counts against the endpoint. This is why an endpoint must declare an honest error schema. See [reputation and strikes](/create/reputation-and-strikes).
+</Warning>
+
+Classification is the branch that the [escrow response gate](/concepts/escrow-response-gate) calls "the gate". The reservation is already locked when the handler returns; the grade decides whether the facilitator debits `min(computed, cap)`, releases with no charge, or releases and records a strike.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    Where metering and classification sit in the full flow.
+  </Card>
+  <Card title="The utter-escrow scheme" icon="money-bill-transfer" href="/concepts/x402-scheme">
+    The 402 quote and the capped authorization the buyer signs.
+  </Card>
+  <Card title="Reputation and strikes" icon="star-half-stroke" href="/create/reputation-and-strikes">
+    What a strike does and how endpoints are deactivated.
+  </Card>
+  <Card title="Pricing and bonds" icon="tags" href="/create/pricing-and-bonds">
+    How a creator sets base, perKB, and the cap.
+  </Card>
+</CardGroup>
