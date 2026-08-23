@@ -1,0 +1,123 @@
+---
+title: "Environment"
+description: "The environment variables Utter reads, grouped by area, from .env.example."
+---
+
+Configuration comes from environment variables. Copy `.env.example` to `.env.local` and fill it in. Real secrets live only in `.env.local`, which is gitignored. `.env.example` ships every name with an empty or placeholder value; it never contains a real secret.
+
+<Warning>
+  Never put real secrets in `.env.example` or any committed file. Wallet keys, HMAC secrets, and API keys belong only in `.env.local`. An empty value usually selects an autonomous in-process default.
+</Warning>
+
+## Arc chain
+
+| Var | Purpose |
+| --- | --- |
+| `ARC_CHAIN_ID` | The Arc chain id (`5042002`). |
+| `ARC_RPC_URL` | Arc HTTP RPC endpoint. |
+| `ARC_WS_URL` | Arc WebSocket RPC endpoint. |
+| `ARC_EXPLORER` | ArcScan explorer base for transaction links. |
+
+## Test wallets
+
+| Var | Purpose |
+| --- | --- |
+| `TEST_WALLET_ADDRESS` | The funded test wallet address (read-only checks need only this). |
+| `TEST_WALLET_PRIVATE_KEY` | The test wallet key. Leave empty except in `.env.local`. |
+| `TEST_BUYER_PRIVATE_KEY` | The funded buyer EOA key for the live money-path E2E and the `pay` CLI. |
+
+## Payment and facilitator
+
+| Var | Purpose |
+| --- | --- |
+| `RELAYER_SIGNER_KEYS` | Comma-separated relayer signer keys the facilitator `/settle` path signs debits with. |
+| `FACILITATOR_AUTH_SECRET` | Per-resource caller-auth HMAC secret. Fail-closed in production (requires >= 32 chars). |
+| `FACILITATOR_URL` | The facilitator base URL. Empty selects the in-process facilitator. |
+| `NODE_ENV` | Runtime mode. `production` enforces facilitator auth. |
+| `PLATFORM_TREASURY` | The treasury address that receives the split remainder. |
+| `PLATFORM_FEE_BPS` | Platform fee in basis points (default `3000`; `creatorBps = 10000 - this`). |
+
+## Durability
+
+| Var | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres URL. Empty selects the in-memory test adapter. |
+| `REDIS_URL` | Redis URL. Empty selects the in-memory test adapter. |
+
+## Sandbox and deploy
+
+| Var | Purpose |
+| --- | --- |
+| `SANDBOX_RUNTIME` | Isolation backend. `gvisor` is the only trusted boundary; `docker-dev` is for local wiring only. |
+| `EGRESS_PROXY_URL` | The data-proxy URL, the only permitted egress from a sandboxed resource. |
+| `DATA_PROXY_TOKEN_SECRET` | HMAC secret for the short-lived resource-scoped data-proxy JWT. |
+| `DEPLOY_BASE_IMAGE_NODE` | The digest-pinned Node base image for the resource build. |
+| `DEPLOY_DOMAIN` | The wildcard deploy domain; resources serve at `https://<slug>.resources.<domain>`. |
+| `DNS_PROVIDER` | Traefik DNS-01 wildcard-cert provider. |
+| `DNS_API_TOKEN` | The DNS provider API token. |
+| `REGISTRY_MIRROR_URL` | Internal pull-through npm mirror for the no-network-at-build property. |
+| `DEPLOYER_URL` | The deployer service base URL the studio talks to. |
+| `DEPLOYER_AUTH_SECRET` | Shared Bearer between the studio and the deployer. |
+
+## AI generation
+
+| Var | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | The Claude generation backend key. Empty selects the deterministic scaffold backend. |
+| `DEFAULT_MODEL` | The default model for the Claude backend (default `claude-sonnet-5`). |
+| `AI_RUNTIME_GENERATOR` | Force a generation backend. Empty selects scaffold when no key is set. |
+
+## Identity, scorer, moderation, staking
+
+| Var | Purpose |
+| --- | --- |
+| `ERC8004_IDENTITY_REGISTRY` | The ERC-8004 identity registry address (set after the operator-gated deploy). |
+| `ERC8004_REPUTATION_REGISTRY` | The ERC-8004 reputation registry address. |
+| `ERC8004_VALIDATION_REGISTRY` | The ERC-8004 validation registry address. |
+| `SCORER_INTERVAL_MS` | Scorer poll interval. Empty selects the in-code default. |
+| `SCORER_LATENCY_BUDGET_MS` | Per-resource scoring latency budget. |
+| `MODERATION_BACKEND` | Moderation backend selector. Empty selects the deterministic keyword backend. |
+| `DATA_PROXY_QUOTA_CALLS` | Per-resource data-proxy call quota. |
+| `DATA_PROXY_QUOTA_BYTES` | Per-resource data-proxy response-byte quota. |
+| `REGISTRY_ADMIN_PRIVATE_KEY` | The key that broadcasts register, slash, refund, and pause transactions. |
+| `RESOURCE_CREATOR` | Optional: split the resource creator identity from the registry admin. |
+
+## Studio and observability
+
+| Var | Purpose |
+| --- | --- |
+| `SESSION_SECRET` | Signed session-cookie secret for the SIWE session. |
+| `SIWE_DOMAIN` | The EIP-4361 domain the SIWE message binds to. |
+| `STUDIO_DATA_ADAPTER` | `fixture` (autonomous default) or `live` (operator-gated). |
+| `MARKETPLACE_URL` | The marketplace base URL the studio POSTs deployed resources to. |
+| `MARKETPLACE_AUTH_SECRET` | Shared Bearer for the marketplace `POST /resources` endpoint. |
+| `METRICS_TOKEN` | Bearer token gating the `/metrics` Prometheus exposition. |
+| `VITE_WALLETCONNECT_PROJECT_ID` | WalletConnect project id for the SIWE walletconnect button (client-exposed). |
+
+## Buyer SDK and MCP
+
+| Var | Purpose |
+| --- | --- |
+| `BUYER_PRIVATE_KEY` | The buyer wallet key the live MCP server signs with. Never returned or logged. |
+| `BUYER_SDK_TRANSPORT` | Transport selector. Unset or `demo` runs the in-process demo; `live` is operator-gated. |
+| `BUYER_MAX_CAP_TOKENS` | Per-call cap ceiling in whole USDC tokens. The signed cap is `min(card cap, this)`. |
+| `MCP_PER_TOOL_CAP_BASE_UNITS` | Per-tool spend cap in base units. |
+| `MCP_PER_DAY_CAP_BASE_UNITS` | Per-day spend cap in base units. |
+| `MARKETPLACE_INDEX_URL` | The live marketplace index URL the MCP bin reads for discovery. |
+
+The `pay` CLI reads `TEST_BUYER_PRIVATE_KEY` (see [test wallets](#test-wallets)); the live MCP server reads `BUYER_PRIVATE_KEY`.
+
+## Scale and extras
+
+| Var | Purpose |
+| --- | --- |
+| `ORCHESTRATOR` | Driver selector. Empty or `local` uses the in-process driver; `nomad` is operator-gated. |
+| `NOMAD_ENDPOINT` | The Nomad HTTP API endpoint for the live driver. |
+| `ORCHESTRATOR_WARM_POOL_SIZE` | Number of pre-warmed sandboxes kept ready. |
+| `ORCHESTRATOR_IDLE_TTL_SECONDS` | Idle-reaper TTL before scale-to-zero. |
+| `STABLEFX_MODE` | `mock` (default) or `live` (operator-gated). |
+| `CCTP_MODE` | `mock` (default) or `live` (operator-gated). |
+| `SPEND_CAP_PER_PAYER_24H_BASE_UNITS` | Per-payer rolling-24h spend cap enforced before `/verify`. |
+| `DATA_PROXY_QUOTA_DEFAULT` | Per-resource data-proxy quota default. |
+| `MIN_ECONOMICAL_AMOUNT` | Min batching threshold. Empty means immediate settle with no batching. |
+| `PRICE_FLOOR_MODE` | `soft` (flag below-floor prices) or `hard` (block them). |

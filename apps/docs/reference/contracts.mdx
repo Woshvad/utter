@@ -1,0 +1,127 @@
+---
+title: "Contracts"
+description: "The Solidity contracts behind the escrow money path, resource registry, staking, and splitting."
+---
+
+Utter's on-chain layer is four Solidity contracts (Solidity 0.8.28) plus the reference ERC-8004 registries. All amounts are USDC base units. The basis-point denominator is `10000`. Deployed addresses are on the [addresses page](/reference/addresses).
+
+## PaymentEscrow
+
+The primary money path. Buyers hold an internal deposit balance; a relayer-signed debit charges against it and splits the amount inline.
+
+EIP-712 domain: `UtterEscrow` version `1`.
+
+| Function | Description |
+| --- | --- |
+| `deposit(uint256 amount)` | Move USDC into the caller's internal balance. |
+| `withdraw(uint256 amount)` | Move USDC back out of the caller's internal balance. |
+| `balanceOf(address)` | The buyer's internal deposit balance. This balance is the reservation; there is no separate on-chain lock. |
+| `debit(address buyer, bytes32 resourceId, uint256 amount, uint256 maxAmount, bytes32 nonce, uint256 validBefore, bytes sig)` | Admin/relayer-gated. Charges the buyer and splits inline. |
+
+### debit checks
+
+`debit` enforces, in order:
+
+1. The `nonce` is unused (`usedNonce` mapping).
+2. `validBefore` has not passed.
+3. `amount <= maxAmount`.
+4. The EIP-712 signature over the authorization recovers the buyer.
+5. The resource is active in the registry.
+
+It then splits inline: `toCreator = amount * creatorBps / 10000`, `toTreasury = amount - toCreator`, crediting internal balances. An underfunded debit reverts on balance underflow, so the buyer's `balanceOf` is the effective reservation.
+
+### DebitAuthorization type
+
+```solidity
+DebitAuthorization(
+  address buyer,
+  bytes32 resourceId,
+  uint256 maxAmount,
+  bytes32 nonce,
+  uint256 validBefore
+)
+```
+
+### Events
+
+| Event | Signature |
+| --- | --- |
+| `Deposited` | Buyer deposited into their internal balance. |
+| `Withdrawn` | Buyer withdrew from their internal balance. |
+| `Debited` | `Debited(bytes32 indexed resourceId, address indexed buyer, uint256 amount, uint256 toCreator, uint256 toTreasury, bytes32 nonce)` |
+
+The `Debited` event carries both split legs, so settlement and the split are one transaction. See [the escrow response gate](/concepts/escrow-response-gate).
+
+## ResourceRegistry
+
+On-chain config keyed by `bytes32 resourceId`.
+
+| Function | Description |
+| --- | --- |
+| `register(bytes32 resourceId, address creator, address treasury, uint16 creatorBps, bytes32 agentId, bytes32 pricingHash)` | Register a resource. |
+| `update(...)` | Update an existing resource's config. |
+| `pause(bytes32 resourceId)` / `unpause(bytes32 resourceId)` | Toggle whether the resource is active. |
+| `getResource(bytes32 resourceId)` | Returns `(creator, treasury, creatorBps, active)`. |
+| `isActive(bytes32 resourceId)` | Whether the resource is currently active. |
+
+### Roles
+
+| Role | Grants |
+| --- | --- |
+| `REGISTRY_ADMIN_ROLE` | Register, update, pause. |
+| `SLASHER_ROLE` | Record and consume slash authorizations. |
+| `VAULT_ROLE` | Consume a slash authorization from the vault. |
+
+### Slashing (two-step)
+
+Slashing has a dispute window so a creator can contest a strike-driven slash before funds move:
+
+1. `slashAuthorization(bytes32 resourceId, uint256 amount, string reason)` records a pending slash. A `SLASH_DISPUTE_WINDOW` of 1 day starts.
+2. `cancelSlashAuthorization(...)` disputes and cancels the pending slash during the window.
+3. `consumeSlashAuthorization(...)` is called by the vault after the window to finalize.
+
+## StakingVault
+
+Per-resource USDC bond custody plus an insurance pool. Funds never leave the vault on a slash; they move from a bond into the pool.
+
+| Constant | Value |
+| --- | --- |
+| `COOLDOWN` | 7 days |
+| `MIN_BOND_BASE_UNITS` | `1_000_000` (1 USDC at 6dp) |
+
+| Function | Description |
+| --- | --- |
+| `deposit(bytes32 resourceId, uint256 amount)` | Add to a resource bond. The first depositor becomes `bondOwner`; the resulting bond must be at least `MIN_BOND_BASE_UNITS`. |
+| `requestWithdraw(bytes32 resourceId)` | Start the 7-day cooldown. |
+| `withdraw(bytes32 resourceId)` | Withdraw the bond after the cooldown ends. |
+| `slash(bytes32 resourceId, uint256 amount, string reason)` | `SLASHER_ROLE`. First consumes the registry authorization, then moves bond into `insurancePoolBalance`. |
+| `refund(address payer, uint256 amount)` | `TREASURY_ADMIN_ROLE`. Pay a buyer from the insurance pool. |
+
+| Read | Returns |
+| --- | --- |
+| `bonds(bytes32 resourceId)` | The resource's bonded amount. |
+| `bondOwner(bytes32 resourceId)` | The bond owner address. |
+| `cooldownEnds(bytes32 resourceId)` | Timestamp the cooldown ends. |
+| `insurancePoolBalance` | The pooled insurance balance. |
+
+## PaymentSplitter
+
+The flat-path splitter for the `exact` scheme. It holds a balance and flushes it on demand.
+
+| Function | Description |
+| --- | --- |
+| `distribute()` | Permissionless. Flushes the held balance: `toCreator = bal * creatorBps / 10000`, `toTreasury = remainder`. |
+| `setSplit(...)` | Admin. Set the creator basis points. |
+| `setTreasury(...)` | Admin. Set the treasury address. |
+
+## ERC-8004 reference registries
+
+The reference identity, reputation, and validation contracts an Utter resource is registered against.
+
+| Contract | Behavior |
+| --- | --- |
+| IdentityRegistry | ERC-721. `register(string agentURI)` returns a sequential `agentId` (the token id). Emits `Registered`. |
+| ReputationRegistry | `giveFeedback(...)` records a fixed-point score and increments the `feedbackCount` mapping. Not a money path. |
+| ValidationRegistry | `validationRequest(...)` / `validationResponse(...)`. |
+
+See [ERC-8004 identity](/concepts/erc8004-identity).

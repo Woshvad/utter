@@ -1,0 +1,135 @@
+---
+title: "Facilitator API"
+description: "The Hono service that runs the escrow money path: verify, release, settle, and results."
+---
+
+The facilitator is the escrow money path. It recovers signers, reserves caps before a handler runs, debits on a validated success through the relayer, and serves the exactly-once recovery path. It is a Hono JSON service. The [call endpoint](/reference/call-endpoint) gate talks to it; buyers read `GET /results/:idemKey`.
+
+## Auth
+
+Per-resource caller auth is optional. When enabled, routes require a caller token bound to the operation's `resourceId` via `Authorization: Bearer <token>` or `X-Resource-Auth`. It is fail-closed in production. See [environment](/reference/environment#payment-and-facilitator).
+
+## Health
+
+<ParamField path="GET /health" type="route" />
+
+Returns `200`.
+
+<ParamField path="GET /ready" type="route" />
+
+Returns `200` when ready, `503` otherwise.
+
+## POST /verify
+
+The reserve-before-run guard. Recovers the signer, checks the un-reserved balance and the nonce under a per-buyer lock, then reserves the cap. A handler must never run before this returns valid.
+
+<ParamField body="payment" type="object" required>
+  The decoded `X-PAYMENT` payload (scheme, network, authorization, signature).
+</ParamField>
+<ParamField body="resourceId" type="string">
+  The resource the payment must be bound to.
+</ParamField>
+<ParamField body="maxTimeoutSeconds" type="number">
+  The timeout the authorization must outlive.
+</ParamField>
+
+<ResponseExample>
+```json 200 OK
+{ "valid": true, "payer": "<address>" }
+```
+</ResponseExample>
+
+On failure it returns 402 or another 4xx with one of these reasons: `insufficient_balance`, `nonce_used`, `bad_signature`, `expired`, or `over_cap` (a spend cap tripped).
+
+## POST /release
+
+Releases a reservation. Records a strike only when `strikeReason` is present.
+
+<ParamField body="idemKey" type="string" required>
+  The idempotency key (the payment nonce).
+</ParamField>
+<ParamField body="resourceId" type="string" required>
+  The resource the reservation belongs to.
+</ParamField>
+<ParamField body="strikeReason" type="string">
+  If present, a strike is recorded against the creator.
+</ParamField>
+
+<ResponseExample>
+```json 200 OK
+{ "released": true, "struck": false }
+```
+</ResponseExample>
+
+## POST /settle
+
+Debits the buyer through the relayer and splits inline. Handles both the escrow and exact schemes. Idempotent: a reservation must precede a settle, and a repeated settle returns the cached receipt.
+
+The facilitator debits `min(amount, cap)`; the contract re-enforces `amount <= maxAmount` on-chain. Settling without a prior reservation returns `409 no_reservation`.
+
+<ResponseExample>
+```json 200 OK
+{
+  "success": true,
+  "receipt": {
+    "tx": "<0x…>",
+    "payer": "<address>",
+    "amount": "<base units>",
+    "idemKey": "<bytes32>",
+    "scheme": "utter-escrow",
+    "toCreator": "<base units>",
+    "toTreasury": "<base units>"
+  }
+}
+```
+</ResponseExample>
+
+<ResponseField name="success" type="boolean" />
+<ResponseField name="receipt.tx" type="string">
+  The on-chain debit transaction hash. Viewable on the [explorer](https://testnet.arcscan.app).
+</ResponseField>
+<ResponseField name="receipt.payer" type="string" />
+<ResponseField name="receipt.amount" type="string">
+  The debited amount in USDC base units.
+</ResponseField>
+<ResponseField name="receipt.idemKey" type="string" />
+<ResponseField name="receipt.scheme" type="string" />
+<ResponseField name="receipt.toCreator" type="string">
+  The creator's split leg (base units). Present on the escrow path.
+</ResponseField>
+<ResponseField name="receipt.toTreasury" type="string">
+  The treasury's split leg (base units). Present on the escrow path.
+</ResponseField>
+
+## GET /results/:idemKey
+
+The exactly-once recovery path. Returns the persisted response and receipt within a 24h TTL.
+
+<ResponseExample>
+```json 200 OK
+{
+  "response": { },
+  "receipt": { }
+}
+```
+</ResponseExample>
+
+Returns `404` once the TTL has passed or if the key was never settled.
+
+## GET /revenue/:resourceId
+
+Aggregated revenue for a resource. Amounts are base-unit strings.
+
+<ResponseExample>
+```json 200 OK
+{
+  "creator": "<base units>",
+  "platform": "<base units>",
+  "refund": "<base units>"
+}
+```
+</ResponseExample>
+
+<Note>
+  The relayer signs on-chain debits with a per-signer nonce manager. Gas on Arc is paid in USDC. See [exactly-once settlement](/concepts/exactly-once).
+</Note>

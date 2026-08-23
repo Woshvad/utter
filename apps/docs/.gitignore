@@ -1,0 +1,7 @@
+# Mintlify
+.mintlify/
+node_modules/
+
+# mint export artifacts
+export.zip
+*-export.zip

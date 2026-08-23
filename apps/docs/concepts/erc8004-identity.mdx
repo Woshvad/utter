@@ -1,0 +1,75 @@
+---
+title: "On-chain identity (ERC-8004)"
+description: "Each resource gets an on-chain ERC-8004 identity: a minted agentId that the registry, the agent card, and the reputation score all agree on."
+---
+
+Every endpoint Utter deploys gets an on-chain identity so an agent can verify what it is paying, independent of any single server. Utter uses ERC-8004, the agent-identity standard. Arc has no canonical ERC-8004 deployment, so Utter ships reference contracts for it: an Identity registry, a Reputation registry, and a Validation registry. The identity is minted at deploy time and threaded through the on-chain registry and the [agent card](/concepts/agent-card) so all three agree on one number.
+
+## The agentId
+
+Identity is minted as an ERC-721 token. The `tokenId` is the identity.
+
+<Steps>
+  <Step title="Register the resource">
+    The deployer calls `IdentityRegistry.register(agentURI)`, passing the URI that describes the resource.
+  </Step>
+  <Step title="An ERC-721 is minted">
+    The registry mints a sequential ERC-721 `tokenId`. That `tokenId` **is** the `agentId`.
+  </Step>
+  <Step title="The id is written everywhere it is needed">
+    The same `agentId` is written into the on-chain `ResourceRegistry` as a `bytes32`, and into the agent card's `identity.agentId` as a decimal string. The two must agree.
+  </Step>
+</Steps>
+
+```json
+{
+  "identity": {
+    "standard": "erc-8004",
+    "chainId": 5042002,
+    "agentId": "42"
+  }
+}
+```
+
+<Warning>
+  The `agentId` in the agent card, as a decimal string, must equal the `agentId` recorded on-chain in the `ResourceRegistry`, as `bytes32`. If they disagree the identity is not verifiable and the resource is not trustworthy. The deploy step is what keeps them in lockstep.
+</Warning>
+
+## The three registries
+
+<AccordionGroup>
+  <Accordion title="Identity (ERC-721)">
+    Mints the `agentId` and holds the `agentURI`. This is the canonical "who is this resource" record. Because it is an ERC-721, the identity is a real on-chain token with an owner.
+  </Accordion>
+  <Accordion title="Reputation">
+    Records feedback about a resource. `giveFeedback` writes a fixed-point health **score** in the range 0 to 1, scaled by `10^4`, plus a reputation value. This is a reputation number, not money. It is what the [marketplace](/pay/discover) surfaces as a resource's reputation.
+  </Accordion>
+  <Accordion title="Validation">
+    The validation registry, the third of the reference ERC-8004 contracts Utter ships, records validation of a resource alongside identity and reputation.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  The health score is a reputation signal scaled by `10^4`, so a stored value of `9500` means a score of `0.95`. It never represents a balance or a payment. Money moves only through the [escrow money path](/concepts/escrow-response-gate).
+</Note>
+
+## Why it is on-chain
+
+An agent discovering an endpoint on the marketplace does not have to trust the marketplace's word for what the endpoint is. The `agentId` resolves to an on-chain identity, its reputation is an on-chain score, and the [agent card](/concepts/agent-card) it reads must carry the same `agentId`. The identity survives independent of any one service, which is what lets an agent pay an endpoint it has never seen before.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The agent card" icon="id-card" href="/concepts/agent-card">
+    Where the agentId is published for agents to read.
+  </Card>
+  <Card title="Discover endpoints" icon="magnifying-glass" href="/pay/discover">
+    How the marketplace surfaces identity and reputation.
+  </Card>
+  <Card title="Contracts" icon="file-contract" href="/reference/contracts">
+    The Identity, Reputation, Validation, and ResourceRegistry interfaces.
+  </Card>
+  <Card title="Addresses" icon="location-dot" href="/reference/addresses">
+    The pinned registry addresses on Arc Testnet.
+  </Card>
+</CardGroup>

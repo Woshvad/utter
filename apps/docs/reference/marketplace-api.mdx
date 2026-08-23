@@ -1,0 +1,114 @@
+---
+title: "Marketplace API"
+description: "The Hono JSON service agents read to discover resources and fetch validated agent cards."
+---
+
+The marketplace is a JSON service (no UI) that indexes deployed resources and serves their [agent cards](/reference/agent-card-schema). Agents read `GET /resources` to discover endpoints. It is a Hono service.
+
+## Health
+
+<ParamField path="GET /health" type="route" />
+
+<ResponseExample>
+```json 200 OK
+{ "ok": true, "service": "marketplace" }
+```
+</ResponseExample>
+
+<ParamField path="GET /ready" type="route" />
+
+Returns `200 { "ready": true }` when ready, `503` otherwise.
+
+## GET /resources
+
+Returns a JSON array of index records. All filters are optional.
+
+<ParamField query="category" type="string">
+  Exact category match.
+</ParamField>
+<ParamField query="active" type="boolean">
+  `true` or `false`.
+</ParamField>
+<ParamField query="minBond" type="integer">
+  Minimum bond, base-unit integer.
+</ParamField>
+<ParamField query="minBasePrice" type="integer">
+  Minimum base price, base-unit integer.
+</ParamField>
+<ParamField query="maxBasePrice" type="integer">
+  Maximum base price, base-unit integer.
+</ParamField>
+<ParamField query="minReputation" type="number">
+  Minimum reputation score.
+</ParamField>
+<ParamField query="minUptime" type="number">
+  Minimum uptime.
+</ParamField>
+
+<Note>
+  Base-unit query values are validated as digit strings before being parsed as BigInt. A malformed value returns `400`.
+</Note>
+
+### Index record
+
+<ResponseField name="resourceId" type="string">
+  The bytes32 resource id.
+</ResponseField>
+<ResponseField name="creator" type="string">
+  The creator address (optional).
+</ResponseField>
+<ResponseField name="agentId" type="string">
+  The ERC-8004 agent id.
+</ResponseField>
+<ResponseField name="slug" type="string">
+  The resource slug.
+</ResponseField>
+<ResponseField name="category" type="string" />
+<ResponseField name="pricing" type="object">
+  `{ model, base, perKB, max }`. Amounts are base-unit strings.
+</ResponseField>
+<ResponseField name="reputation" type="number" />
+<ResponseField name="uptime" type="number" />
+<ResponseField name="health" type="object">
+  `{ verified, score }`.
+</ResponseField>
+<ResponseField name="bond" type="string">
+  Bonded amount, base-unit string.
+</ResponseField>
+<ResponseField name="cardUrl" type="string">
+  The agent card URL.
+</ResponseField>
+<ResponseField name="active" type="boolean" />
+
+<ResponseExample>
+```json 200 OK
+[
+  {
+    "resourceId": "0x…",
+    "creator": "0x…",
+    "agentId": "42",
+    "slug": "return-the-current-utc-time-as-json",
+    "category": "time",
+    "pricing": { "model": "metered", "base": "1000", "perKB": "100", "max": "50000" },
+    "reputation": 4.9,
+    "uptime": 0.999,
+    "health": { "verified": true, "score": 100 },
+    "bond": "1000000",
+    "cardUrl": "https://…/.well-known/agent-card.json",
+    "active": true
+  }
+]
+```
+</ResponseExample>
+
+<Note>
+  BigInt fields (pricing amounts, bond) are serialized as base-unit strings.
+</Note>
+
+## GET /:resourceId/.well-known/agent-card.json
+
+Serves the validated [A2A agent card](/reference/agent-card-schema) for a resource. Returns `404` for an unknown resource and `500` if the stored card fails validation.
+
+## POST /resources
+
+An authenticated publish endpoint (`Authorization: Bearer`, fail-closed). It runs moderation, bond, probe, mint, and index before listing a resource. Used by the studio's publish stage, not by discovery clients.

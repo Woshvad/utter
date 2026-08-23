@@ -1,0 +1,42 @@
+---
+title: "Glossary"
+description: "Every Utter term in one place, alphabetized, with links to the concept pages."
+---
+
+| Term | Definition |
+| --- | --- |
+| **Agent card** | The A2A JSON document a resource serves at `/.well-known/agent-card.json`, describing its skills, payment terms, and identity. See [agent card schema](/reference/agent-card-schema). |
+| **Arc** | Circle's stablecoin L1. Utter runs on Arc Testnet, chain id `5042002`. See [addresses](/reference/addresses). |
+| **Bond** | The USDC a creator stakes per resource in the [StakingVault](/reference/contracts#stakingvault). It can be slashed to refund buyers harmed by a bad endpoint. |
+| **Cap** | The `maxAmount` a buyer signs. It is a ceiling on the debit, not the price. The buyer is charged `min(computed, cap)`. |
+| **Classifier** | The gate logic that labels a handler response as `success`, `declared_error`, or `malfunction`. See [metering and classification](/concepts/metering-and-classification). |
+| **Data proxy** | The only permitted egress path from a sandboxed resource. It mints short-lived resource-scoped tokens and enforces quotas. See [egress and the static gate](/concepts/egress-and-static-gate). |
+| **Declared error** | A well-formed "your input was bad" response that validates against the endpoint's declared error schema. No strike; free or a capped error price. |
+| **DebitAuthorization** | The EIP-712 struct a buyer signs to authorize a capped debit under the `UtterEscrow` domain. See [contracts](/reference/contracts#debitauthorization-type). |
+| **Deploy pipeline** | The stages that turn a generated bundle into a live resource: static gate, build, sandboxed run, verify, identity, publish. See [deploy pipeline](/operator/deploy-pipeline). |
+| **ERC-8004** | The on-chain agent identity standard. A resource gets a sequential `agentId` from the IdentityRegistry. See [ERC-8004 identity](/concepts/erc8004-identity). |
+| **Escrow response gate** | The core primitive: funds are reserved, the handler runs, the response is validated, and only a validated success is debited. See [the escrow response gate](/concepts/escrow-response-gate). |
+| **exact scheme** | The flat x402 path using EIP-3009. It transfers a fixed signed amount with no gate and no metering. See [call endpoint](/reference/call-endpoint). |
+| **Facilitator** | The service that runs the escrow money path: `/verify`, `/release`, `/settle`, `/results`. See [facilitator API](/reference/facilitator-api). |
+| **gVisor** | The user-space kernel that isolates untrusted handler code. Plain Docker is not a security boundary. See [the sandbox](/concepts/sandbox). |
+| **Idempotency key (idemKey)** | The payment nonce, used to key settlement so a retry never double charges. Recovers via [`GET /results/:idemKey`](/reference/facilitator-api#get-results-idemkey). |
+| **Malfunction** | A response that is neither a valid success nor a valid declared error, or a handler that timed out or threw. No charge, plus a strike. |
+| **Marketplace** | The JSON service agents read to discover resources and fetch agent cards. See [marketplace API](/reference/marketplace-api). |
+| **Metered pricing** | Pricing where the final price depends on the response: `base + perKB * size`, scaled by a compute multiplier, capped at the signed cap. |
+| **Nonce** | A single-use value in a DebitAuthorization. The escrow contract flips it on-chain so a debit can never replay. |
+| **PaymentEscrow** | The contract holding buyer deposits and performing the capped debit with the inline split. See [contracts](/reference/contracts#paymentescrow). |
+| **Relayer** | The signer the facilitator uses to broadcast on-chain debits, with a per-signer nonce manager. Gas is paid in USDC on Arc. |
+| **Reservation** | The buyer balance locked by `/verify` before the handler runs. It removes the free-compute vector. There is no separate on-chain lock; the deposit balance is the reservation. |
+| **Resource** | A single deployed, priced endpoint created from one sentence. |
+| **Resource id** | The bytes32 id that keys a resource on-chain and is the `payTo` in its payment terms. |
+| **Sandbox** | The isolated runtime where untrusted handler code runs, with deny-by-default egress and hard resource, timeout, and size caps. See [the sandbox](/concepts/sandbox). |
+| **Sidecar** | The trusted process in front of the handler that owns the money path and never runs inside the sandbox. |
+| **SIWE** | Sign-In With Ethereum (EIP-4361), the studio's wallet-based login. |
+| **Slug** | The URL-safe name a resource serves under: `https://<slug>.resources.<domain>`. |
+| **Static gate** | The pre-build scan that rejects generated code with secrets or dangerous imports before anything is built. See [egress and the static gate](/concepts/egress-and-static-gate). |
+| **StakingVault** | The contract custodying per-resource bonds and the insurance pool. See [contracts](/reference/contracts#stakingvault). |
+| **Strike** | A recorded fault against a creator when their endpoint malfunctions. Consecutive strikes deactivate the endpoint. See [reputation and strikes](/create/reputation-and-strikes). |
+| **Treasury** | The platform address that receives the platform's split leg of every debit. |
+| **USDC** | The settlement asset. On Arc it is both the 6-decimal ERC-20 token and the 18-decimal native gas token. Always read `decimals()`. See [addresses](/reference/addresses). |
+| **utter-escrow** | Utter's x402 scheme name for the gated, metered escrow money path. |
+| **x402** | The HTTP 402 payment protocol agents use to pay for a call. Utter extends it with the `utter-escrow` scheme. |

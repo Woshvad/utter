@@ -1,0 +1,114 @@
+---
+title: "The buyer SDK (CLI)"
+description: "The pay CLI: fund the escrow once and fire real paid calls to a live endpoint, with a settlement tx and an ArcScan link per call."
+---
+
+The `pay` CLI is the reference paying agent. It discovers an endpoint's card, sizes the deposit, funds the escrow once, and fires N real paid calls through the escrow gate. It always starts safe: without `--apply` it makes zero chain writes and zero paid calls.
+
+## Setup
+
+The CLI reads its config from the repo-root `.env.local`.
+
+<ParamField path="TEST_BUYER_PRIVATE_KEY" type="string" required>
+  The buyer EOA private key, funded on Arc testnet. Read once into the wallet and never logged. Required for both a dry run and an apply run: the dry run reads the buyer's real escrow balance to decide whether a deposit is even needed.
+</ParamField>
+
+<ParamField path="ARC_RPC_URL" type="string">
+  Optional Arc RPC override. Falls back to the chain default.
+</ParamField>
+
+<ParamField path="ARC_EXPLORER" type="string">
+  Optional block explorer base for the per-call links. Defaults to `https://testnet.arcscan.app`.
+</ParamField>
+
+<Warning>
+  Secrets live only in the gitignored `.env.local`. The buyer key is read once into the wallet and never appears in a log line or any output.
+</Warning>
+
+## Dry run first, then apply
+
+Run without `--apply` to see exactly what a real run would do. The CLI reads the card and the buyer's escrow balance, prints the sizing plan, and stops. No chain writes, no paid calls.
+
+<CodeGroup>
+```bash Dry run
+pnpm --filter @utter/buyer-sdk pay -- \
+  --url https://return-the-current-utc-time-as-json.resources.utter.technology
+```
+
+```bash Apply
+pnpm --filter @utter/buyer-sdk pay -- \
+  --url https://return-the-current-utc-time-as-json.resources.utter.technology \
+  --calls 10 --apply
+```
+</CodeGroup>
+
+The plan sizes the deposit as `cap * calls`, where the cap is the card's pricing max. With `--apply`, the CLI deposits once for the shortfall (reading `decimals()` at runtime), then pays each call: on a 402 it signs a capped `DebitAuthorization`, sends it in the `X-PAYMENT` header, and asserts a 200 with a receipt.
+
+## Flags
+
+<ParamField path="--url" type="string" required>
+  The resource base URL, or its full agent-card URL. `--card-url` is an accepted alias.
+</ParamField>
+
+<ParamField path="--calls" type="number" default="1">
+  How many real paid calls to fire. The one-time deposit is sized to cover every call.
+</ParamField>
+
+<ParamField path="--apply" type="boolean" default="false">
+  Actually deposit and pay. Without it the run is a dry run: reads the card and escrow balance, prints the plan, and makes zero chain writes and zero paid calls.
+</ParamField>
+
+<ParamField path="--body" type="string">
+  A JSON string POSTed as the request body to the handler. Defaults to a benign echo body.
+</ParamField>
+
+<ParamField path="--resource-id" type="string">
+  A `0x`-prefixed bytes32 to bind the card's `payTo` against, a safety check. Omitted, the card is trusted by its URL and its `payTo` is used as discovered.
+</ParamField>
+
+The full flag and behavior table is in the [buyer SDK reference](/reference/buyer-sdk).
+
+## What a paid call prints
+
+For each paid call the CLI prints the status, whether it paid, the debit amount, the idempotency key, the settlement tx hash, and a link straight to the settlement on ArcScan.
+
+```text
+[demo-pay] call 1/10: status=200 paid=true debit=1200 idem=0xabc... tx=0xdef...
+  on-chain settle: https://testnet.arcscan.app/tx/0xdef...
+```
+
+An apply run that does not pay every call exits non-zero, so a host or CI invocation detects a broken money path. A dry run always exits zero.
+
+## A full example
+
+Fire three paid calls to an endpoint with a request body, after checking the plan first.
+
+```bash
+# 1. Dry run: see the sizing plan, no writes.
+pnpm --filter @utter/buyer-sdk pay -- \
+  --url https://sentiment.resources.utter.technology \
+  --calls 3 \
+  --body '{"text":"utter ships"}'
+
+# 2. Apply: deposit once, then pay all three.
+pnpm --filter @utter/buyer-sdk pay -- \
+  --url https://sentiment.resources.utter.technology \
+  --calls 3 \
+  --body '{"text":"utter ships"}' \
+  --apply
+```
+
+<Note>
+  The CLI never re-implements the money path. It orchestrates a deposit before, and N pays over, the frozen escrow gate. Reserve-before-run and exactly-once stay inside the gate.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Deposits and spend caps" icon="vault" href="/pay/deposits-and-caps">
+    How the escrow deposit works and how caps bound what the buyer signs.
+  </Card>
+  <Card title="Buyer SDK reference" icon="book" href="/reference/buyer-sdk">
+    Every flag, env var, and the full CLI behavior table.
+  </Card>
+</CardGroup>

@@ -1,0 +1,119 @@
+---
+title: "Quickstart: pay for an API"
+description: "Point an agent at an endpoint and have it discover and pay per call in USDC."
+---
+
+There are two ways an agent pays an Utter endpoint: the reference buyer SDK from the command line, or the MCP server from Claude Desktop or Cursor. Both do the same thing under the hood. Each call gets a 402, the agent signs a USDC payment, and it pays only for a response that passes validation.
+
+## The fastest taste
+
+Before any setup, see the payment gate on a live endpoint. An unpaid call is refused with an HTTP 402:
+
+```bash
+curl -i -X POST https://return-the-current-utc-time-as-json.resources.utter.technology/call \
+  -H "content-type: application/json" -d '{}'
+# -> HTTP/1.1 402 Payment Required  (scheme utter-escrow, asset USDC, an escrow cap)
+```
+
+The 402 body describes the `utter-escrow` scheme: the asset (USDC), the escrow cap, and what to sign. A paying agent reads that, signs, and calls again.
+
+## Pay for real
+
+<Tabs>
+  <Tab title="Buyer SDK (CLI)">
+    The reference buyer is a command-line agent that reads an endpoint's card, deposits USDC, and pays per call.
+
+    <Steps>
+      <Step title="Install">
+        From the repo root:
+
+        ```bash
+        pnpm install
+        ```
+      </Step>
+      <Step title="Fund a buyer and set the key">
+        Put a buyer private key funded on Arc testnet into `.env.local` at the repo root:
+
+        ```bash
+        # .env.local
+        TEST_BUYER_PRIVATE_KEY=0x...
+        ```
+
+        <Warning>
+          `.env.local` is gitignored. Keep the key there and never commit it. Use a throwaway testnet buyer, not a wallet with real funds.
+        </Warning>
+      </Step>
+      <Step title="Dry run first">
+        Run without `--apply` to do a **dry run**. It reads the card and your escrow balance, prints the plan, and makes no chain writes and no paid calls:
+
+        ```bash
+        pnpm --filter @utter/buyer-sdk pay -- \
+          --url <resourceBaseUrl> --calls 3
+        ```
+      </Step>
+      <Step title="Apply and pay">
+        Add `--apply` to actually pay. It deposits once, sized to `cap * calls`, then pays N times:
+
+        ```bash
+        pnpm --filter @utter/buyer-sdk pay -- \
+          --url <resourceBaseUrl> --calls 3 --apply
+        ```
+
+        Each call gets a 402, signs a USDC payment, gets a 200 plus a receipt, and prints the on-chain settlement tx hash and an ArcScan link:
+
+        ```text
+        call 1/3  200 OK  settled 0.010000 USDC
+          tx https://testnet.arcscan.app/tx/0x...
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="MCP">
+    The buyer SDK ships an MCP server (stdio, bin name `utter-buyer-mcp`) so an agent in Claude Desktop or Cursor can discover and pay for endpoints as tools.
+
+    <Steps>
+      <Step title="Register the server">
+        Add `utter-buyer-mcp` to your MCP config in Claude Desktop or Cursor. It runs over stdio.
+
+        ```json
+        {
+          "mcpServers": {
+            "utter-buyer": {
+              "command": "utter-buyer-mcp"
+            }
+          }
+        }
+        ```
+      </Step>
+      <Step title="Discover and call">
+        The server exposes two kinds of tool:
+
+        - `utter_discover_endpoints` searches and lists paid endpoints.
+        - `utter_call_<resourceId>`, one per endpoint, calls and pays for that endpoint.
+
+        Your agent discovers an endpoint, then calls its per-endpoint tool. The discover-then-pay loop works end to end from the chat.
+      </Step>
+      <Step title="Demo mode by default">
+        By default the server runs in **demo mode**: an in-process mock chain with no real funds required, so an agent can exercise the full discover-then-pay loop immediately. Live mode, which uses real USDC on Arc testnet, is operator-gated.
+
+        <Note>
+          Demo mode is the right way to try MCP first. It behaves like the real loop without moving any funds.
+        </Note>
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Buyer SDK" icon="terminal" href="/pay/buyer-sdk">
+    Every flag, the deposit sizing, and how the paying loop works.
+  </Card>
+  <Card title="MCP server" icon="plug" href="/pay/mcp">
+    Wiring the server into Claude Desktop or Cursor and the demo vs live modes.
+  </Card>
+  <Card title="Deposits and caps" icon="vault" href="/pay/deposits-and-caps">
+    How a single deposit funds many calls and how the signed cap bounds each one.
+  </Card>
+</CardGroup>

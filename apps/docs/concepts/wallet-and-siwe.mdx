@@ -1,0 +1,74 @@
+---
+title: "Wallets and SIWE sign-in"
+description: "How a creator signs in with their wallet using SIWE, how API keys work, and where a buyer's on-chain funds live."
+---
+
+Utter never asks for a password to create an account, and it never holds a private key. A creator proves who they are by signing a message with their wallet, and a buyer's funds live in an on-chain escrow contract, not in a custodial balance. This page covers both sides: signing in to the studio with SIWE, using programmatic API keys, and where the money an agent spends actually sits.
+
+## Sign in with Ethereum (SIWE)
+
+Sign-in uses SIWE, the EIP-4361 standard. The private key never leaves the browser; only a signed message and its signature travel to the server.
+
+<Steps>
+  <Step title="The server issues a nonce">
+    The server generates a one-time nonce and stores it on a signed, httpOnly session cookie. It is single-use, which is what stops a captured signature from being replayed.
+  </Step>
+  <Step title="The browser builds a SiweMessage">
+    The client constructs a `SiweMessage` with the domain taken from the host, `chainId` `5042002`, the statement "Sign in to Utter Studio", and the server's nonce.
+  </Step>
+  <Step title="The wallet signs">
+    The wallet `personal_sign`s the message. Only `{ message, signature }` leave the client. The key stays in the wallet.
+  </Step>
+  <Step title="The server verifies and consumes the nonce">
+    The server verifies the signature, consumes the nonce so it cannot be reused (the replay guard), and sets the authenticated address on the session.
+  </Step>
+</Steps>
+
+```json
+{
+  "message": "utter.technology wants you to sign in with your Ethereum account:\n0x...\n\nSign in to Utter Studio\n\nURI: https://app.utter.technology\nVersion: 1\nChain ID: 5042002\nNonce: <server nonce>\nIssued At: 2026-08-24T...",
+  "signature": "0x..."
+}
+```
+
+<Note>
+  The address on the session is the creator's identity across the studio. Earnings accrue to it and withdrawals go to it. There is no separate account record to leak, because the wallet *is* the account.
+</Note>
+
+## Programmatic API keys
+
+For scripts and CI that cannot pop a wallet prompt, the studio issues API keys.
+
+- Keys carry the prefix `utk_`.
+- A key is shown **once** at creation. It is never displayed again.
+- The server stores only a `sha256` hash of the key, never the key itself.
+- On each request the server hashes the presented key and compares in constant time, so a timing side channel cannot recover it.
+
+<Warning>
+  Because only a hash is stored, a lost key cannot be recovered, only revoked and reissued. Treat `utk_` keys like the secrets they are and keep them out of source control.
+</Warning>
+
+## Where a buyer's funds live
+
+A paying agent does not hold a custodial balance on Utter. Its USDC lives in the `PaymentEscrow` contract on [Arc](/concepts/arc): the agent deposits once and withdraws whenever it wants. The escrow balance is the reservation pool that the [money path](/concepts/escrow-response-gate) draws against: `/verify` reserves a cap out of the un-reserved deposit, and `/settle` debits `min(computed, cap)` from it. Nothing is charged that was not first locked.
+
+<Info>
+  Depositing and withdrawing are ordinary on-chain calls on `PaymentEscrow`. See [deposits and caps](/pay/deposits-and-caps) for the buyer side and [contracts](/reference/contracts) for the interface.
+</Info>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Deposits and caps" icon="wallet" href="/pay/deposits-and-caps">
+    How an agent funds its escrow balance and sizes a cap.
+  </Card>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    How a reservation is drawn from the escrow balance and settled.
+  </Card>
+  <Card title="On-chain identity" icon="fingerprint" href="/concepts/erc8004-identity">
+    The identity a resource gets, separate from a creator's wallet.
+  </Card>
+  <Card title="Contracts" icon="file-contract" href="/reference/contracts">
+    The `PaymentEscrow` deposit and withdraw interface.
+  </Card>
+</CardGroup>

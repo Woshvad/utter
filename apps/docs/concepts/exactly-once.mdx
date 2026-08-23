@@ -1,0 +1,65 @@
+---
+title: "Exactly-once settlement"
+description: "The payment nonce is the idempotency key, and three layers make sure a retry never double charges and never re-signs."
+---
+
+A payment call travels over the network, so it can be retried: a timeout, a dropped connection, a crashed process. Exactly-once settlement means that no matter how many times a call is retried, the buyer is debited at most once and never has to sign again. The whole guarantee hangs on one fact: the payment `nonce` is the idempotency key (`idemKey`). Every layer keys off the same value, so a retry is always recognized as the same call.
+
+<Info>
+  The `nonce` in the signed [`DebitAuthorization`](/concepts/x402-scheme) is not a separate identifier. It *is* the `idemKey`. One value flows through the facilitator cache, the escrow contract, and the recovery endpoint.
+</Info>
+
+## Three layers
+
+<Steps>
+  <Step title="The facilitator cache short-circuits a repeat">
+    The facilitator caches `(idemKey -> result)`. A second `/settle` for a nonce it has already settled returns the cached receipt immediately, without touching the chain. The default result TTL is 24 hours.
+  </Step>
+  <Step title="The contract enforces single-use on-chain">
+    The escrow contract flips a single-use nonce when it debits. If a process crashes after the on-chain debit but before the cache is written, the retried `/settle` reaches the contract and reverts with `NonceUsed` instead of debiting a second time. The facilitator catches the revert and rebuilds the receipt from the on-chain `Debited` event, so the buyer still gets a correct receipt from a call that already moved money.
+  </Step>
+  <Step title="The buyer recovers a lost response">
+    A buyer that lost the HTTP response, but knows the nonce it signed, calls `GET /results/:idemKey` to fetch the receipt. No new signature, no new payment. The call already happened; this just reads its result.
+  </Step>
+</Steps>
+
+## Why all three are needed
+
+Each layer covers a failure the others cannot:
+
+<AccordionGroup>
+  <Accordion title="Fast path: the cache">
+    In the common case the facilitator is alive and the cache answers a retry in memory, with no chain round-trip. Cheap and immediate.
+  </Accordion>
+  <Accordion title="Crash between debit and cache write: the contract">
+    The cache is not durable across a crash at the wrong instant. The on-chain single-use nonce is. It is the source of truth that makes the debit itself idempotent, so even a lost cache cannot cause a double charge. The receipt is reconstructed from the `Debited` event.
+  </Accordion>
+  <Accordion title="Buyer lost the response: /results/:idemKey">
+    The money path can succeed while the response never reaches the buyer. Recovery by `idemKey` lets the buyer read the receipt after the fact without re-signing, so a lost response never turns into a second payment.
+  </Accordion>
+</AccordionGroup>
+
+## Nonces on the relayer
+
+The buyer's payment nonce is a single-use `bytes32` in the authorization, distinct from the Ethereum transaction nonce the relayer needs to broadcast a transaction. Under concurrency the relayer uses a per-signer nonce manager to assign correct, gap-free on-chain transaction nonces, so many settlements in flight at once do not collide or stall. The two kinds of nonce never mix: one is the idempotency key the buyer signs, the other is transaction ordering for the signer that submits the debit.
+
+<Warning>
+  A retry must reuse the same signed authorization, including the same nonce. Re-signing with a fresh nonce would create a second, distinct payment that the escrow contract would happily debit. The [buyer SDK](/reference/buyer-sdk) reuses the authorization on retry for exactly this reason.
+</Warning>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    Where settlement sits in the full money path.
+  </Card>
+  <Card title="The utter-escrow scheme" icon="money-bill-transfer" href="/concepts/x402-scheme">
+    The signed authorization whose nonce is the idempotency key.
+  </Card>
+  <Card title="Facilitator API" icon="server" href="/reference/facilitator-api">
+    The `/verify`, `/settle`, `/release`, and `/results/:idemKey` endpoints.
+  </Card>
+  <Card title="Contracts" icon="file-contract" href="/reference/contracts">
+    The escrow contract, its single-use nonce, and the `Debited` event.
+  </Card>
+</CardGroup>

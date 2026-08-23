@@ -1,0 +1,75 @@
+---
+title: "Provisioning a host"
+description: "The gVisor host, wildcard TLS, durability, and the systemd deployer that make real isolation possible."
+---
+
+The security boundary for untrusted generated code is gVisor (`runsc`) running on a Linux host you provision. Everything on this page is about standing that host up correctly. Local development and building use WSL2 and Docker Desktop, but the real sandbox needs this host. For the exact commands and the acceptance tests, follow the repo runbooks; this page is the map.
+
+<Warning>
+  Plain Docker (`runc`) and Docker Desktop are **not** the boundary. Docker Desktop cannot even register `runsc`. If you run generated code under `runc`, you have no isolation boundary, only a container. Do not treat that as safe.
+</Warning>
+
+## Host requirements
+
+<Steps>
+  <Step title="A Linux host with nested virtualization">
+    gVisor needs it. Docker Engine and `runsc` must be installed and `runsc` registered in `/etc/docker/daemon.json` (systrap platform). Set `UTTER_SANDBOX_HOST=1`.
+  </Step>
+  <Step title="Quota-capable storage">
+    overlay2 on xfs with pquota, so disk caps are actually enforced per container.
+  </Step>
+  <Step title="A host egress firewall">
+    The data proxy is deny-by-default, but the host itself needs a firewall as the outer layer.
+  </Step>
+  <Step title="An internal package registry mirror">
+    Verdaccio (`REGISTRY_MIRROR_URL`) so builds install from a mirror with no network access to the public internet.
+  </Step>
+  <Step title="A wildcard TLS domain">
+    `*.resources.<domain>`, issued via DNS-01. See below.
+  </Step>
+</Steps>
+
+## Wildcard TLS
+
+Every deployed endpoint lives at `https://<slug>.resources.<DEPLOY_DOMAIN>`, so the host needs a wildcard certificate for `*.resources.<domain>`.
+
+<Warning>
+  Let's Encrypt refuses wildcards over HTTP-01. The certificate **must** be issued via DNS-01, which means your DNS provider's credentials go in `.env.local` (gitignored, never committed).
+</Warning>
+
+## Durability
+
+Persistence is Postgres and Redis:
+
+- **Postgres** via `DATABASE_URL`. Load `infrastructure/db/schema.sql` once.
+- **Redis** via `REDIS_URL`.
+
+With `NODE_ENV=production` the services **fail closed**: boot throws unless durability is configured. This is intentional. A production deploy without persistence would silently lose settlement state, so it is not allowed to start.
+
+## The systemd deployer
+
+The [deployer](/operator/deploy-pipeline) runs on the host as a supervised systemd service (`infrastructure/systemd/utter-deployer.service`). It needs the host Docker daemon and `runsc`, which is why it is **not** a compose service. The trusted control-plane services run in compose; the deployer runs on the metal next to the daemon it drives.
+
+## Follow the runbooks
+
+The exact commands, and the three live acceptance tests that prove the host is real, live in the repo. Do not rely on this page for the specifics.
+
+| Runbook | What it covers |
+| --- | --- |
+| `infrastructure/PROVISION.md` | Provisioning the full stack. |
+| `infrastructure/sandbox-host/PROVISION.md` | The gVisor sandbox host specifically. |
+| `infrastructure/RUNBOOK.md` | Operating the running platform. |
+| `infrastructure/SECURITY-AUDIT.md` | The consolidated security audit. |
+
+<Info>
+  The three live acceptance tests are the gate: **malicious-probe-blocked** (a probe cannot reach the network or secrets), **runsc-enforced caps** (resource and disk caps hold under `runsc`), and a **live 402 to 200 deploy** (a real endpoint takes a real payment). If any of the three fails, the host is not ready.
+</Info>
+
+<CardGroup cols={2}>
+  <Card title="The sandbox" icon="box" href="/concepts/sandbox">
+    What `runsc` is isolating, and why plain Docker is not enough.
+  </Card>
+  <Card title="Self-hosting the stack" icon="cubes" href="/operator/self-hosting">
+    The practical run shape once the host is provisioned.
+  </Card>
+</CardGroup>

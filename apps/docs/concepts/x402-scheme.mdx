@@ -1,0 +1,115 @@
+---
+title: "The x402 utter-escrow scheme"
+description: "How Utter extends x402 with an escrow scheme that locks funds, meters, and gates on the response."
+---
+
+x402 is the HTTP 402 payment standard that lets an agent pay for a request with a signed on-chain authorization instead of an API key. Utter builds on it but needs two things the standard `exact` scheme cannot do: meter the price against the response and settle only after the response passes validation. So Utter ships its own scheme, `utter-escrow`, a superset of x402 v2. Everything an agent reads in a 402 and everything it sends back in the `X-PAYMENT` header follows the x402 shape, so a standard client understands the envelope even though the settlement is an Utter extension.
+
+## Two schemes, one envelope
+
+<AccordionGroup>
+  <Accordion title="exact (the standard fallback)">
+    The standard x402 scheme, backed by EIP-3009 `TransferWithAuthorization`. The buyer signs a transfer for an exact value and it moves, full stop. Utter supports it as a **flat-only fallback**: no gate, no metering. Use it for a fixed-price endpoint where the price never depends on the response. It reuses `circlefin/arc-nanopayments`.
+  </Accordion>
+  <Accordion title="utter-escrow (the primary scheme)">
+    Utter's own scheme. The buyer signs a capped authorization, the facilitator reserves the cap, the handler runs, the response is [classified](/concepts/metering-and-classification), and only a validated success is debited for `min(computed, cap)`. This is the scheme that makes the [escrow response gate](/concepts/escrow-response-gate) work. Permit2 is named in the spec as a no-deposit metered alternative.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  The standard `exact` scheme transfers a fixed value before the handler runs, so it can neither meter nor gate. Never regress a metered or gated endpoint to bare `exact`. See [why a bare charge does not work](/concepts/escrow-response-gate).
+</Note>
+
+## The 402 response
+
+A call without an `X-PAYMENT` header returns HTTP 402 with a JSON body. The `accepts` array lists the schemes the endpoint takes; the escrow entry carries everything an agent needs to sign.
+
+```json
+{
+  "x402Version": 2,
+  "error": "payment required",
+  "accepts": [
+    {
+      "scheme": "utter-escrow",
+      "network": "eip155:5042002",
+      "maxAmountRequired": "<cap>",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "escrow": "<PaymentEscrow>",
+      "payTo": "<resourceId>",
+      "maxTimeoutSeconds": 30,
+      "pricing": { "model": "metered", "base": "...", "perKB": "...", "max": "<cap>" },
+      "extra": {
+        "eip712": {
+          "name": "UtterEscrow",
+          "version": "1",
+          "chainId": 5042002,
+          "verifyingContract": "<escrow>"
+        }
+      }
+    }
+  ]
+}
+```
+
+The `network` string is always `eip155:5042002` (Arc Testnet). The `asset` is USDC, which on [Arc](/concepts/arc) is both the 6-decimal ERC-20 and the 18-decimal native gas token, so always read `decimals()` at runtime and never mix the two lenses. `maxAmountRequired` is the cap, a ceiling and not the final price. The `extra.eip712` block is the domain the buyer signs under.
+
+## What the buyer signs
+
+The buyer signs a `DebitAuthorization` with EIP-712, under the `UtterEscrow` domain (version `1`). The typed fields are in this locked order:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `buyer` | `address` | The signer, whose escrow deposit backs the call. |
+| `resourceId` | `bytes32` | The endpoint being paid, equal to `payTo`. |
+| `maxAmount` | `uint256` | The cap. The debit can be less, never more. |
+| `nonce` | `bytes32` | Single-use. It is also the idempotency key. |
+| `validBefore` | `uint256` | Expiry, after which the authorization is dead. |
+
+<Warning>
+  The field order is part of the EIP-712 type hash. Signing the same values in a different order produces a different hash and the facilitator will not recover the expected signer. Keep the order exactly `buyer, resourceId, maxAmount, nonce, validBefore`.
+</Warning>
+
+The `nonce` doubles as the idempotency key across the whole money path. A retry reuses the same nonce so it can never double charge or re-sign. See [exactly-once settlement](/concepts/exactly-once).
+
+## The X-PAYMENT header
+
+The signed authorization goes back as a base64-encoded JSON `PaymentPayload` in the `X-PAYMENT` header:
+
+```json
+{
+  "x402Version": 2,
+  "scheme": "utter-escrow",
+  "network": "eip155:5042002",
+  "authorization": {
+    "buyer": "0x...",
+    "resourceId": "0x...",
+    "maxAmount": "...",
+    "nonce": "0x...",
+    "validBefore": "..."
+  },
+  "signature": "0x..."
+}
+```
+
+The gate decodes the header, hands the payload to the facilitator's `/verify`, and only reserves the cap if the signer, balance, nonce, and expiry all check out. From there the [escrow response gate](/concepts/escrow-response-gate) takes over: run the handler, classify, then settle, release, or fail closed.
+
+<Info>
+  The reference [buyer SDK](/reference/buyer-sdk) builds this payload for you: it reads the 402, signs the `DebitAuthorization`, and retries with the `X-PAYMENT` header. You do not hand-roll EIP-712 unless you want to.
+</Info>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    The full flow from a 402 to a gated settlement.
+  </Card>
+  <Card title="Metering and classification" icon="calculator" href="/concepts/metering-and-classification">
+    How the final price is computed and how a response is graded.
+  </Card>
+  <Card title="Exactly-once settlement" icon="rotate" href="/concepts/exactly-once">
+    Why the nonce is the idempotency key and how retries stay safe.
+  </Card>
+  <Card title="Call endpoint reference" icon="code" href="/reference/call-endpoint">
+    The full 402 body and header formats, field by field.
+  </Card>
+</CardGroup>

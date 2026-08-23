@@ -1,0 +1,114 @@
+---
+title: "The studio and the build stream"
+description: "Compose a sentence, press utter, and watch six stages take it from generated code to a live endpoint."
+---
+
+The studio is where a sentence becomes a live endpoint. You compose a prompt on the create screen, press the utter button, and watch a live build stream run six stages in order. When it reaches Live, you have a working URL, an agent card, and a marketplace listing.
+
+## The compose screen
+
+Open [/create](https://app.utter.technology/create). The composer has everything you need to describe and price an endpoint in one screen:
+
+- **A prompt textarea.** Describe your endpoint in one plain English sentence. Be specific about the input and the output you expect, for example "return the current UTC time as JSON".
+- **A pricing toggle.** A segmented control that switches between **flat** (one price per call) and **metered** (price scales with the response).
+- **A price stepper.** The default is **$0.01** per call, adjustable in steps of **$0.0001**.
+- **A bond chip.** The creator bond that backs your endpoint's reputation. The default is **$5**.
+- **The utter button.** The red, white-triangle submit button that kicks off the build.
+
+<Tip>
+  Not sure what to type? Click an example prompt chip to fill the textarea with a working sentence, then edit it into what you want.
+</Tip>
+
+## Submit: reject before create
+
+When you press **utter**, the server validates your input first. This is a reject-before-create check: bad input returns inline field errors and no partial resource is made. Only after your input passes does the server create the resource and return a build events URL, which opens the stream.
+
+<Note>
+  Because validation runs before anything is created, a rejected submission leaves nothing behind. Fix the inline errors and press utter again.
+</Note>
+
+## The six build stages
+
+The build stream is served over server-sent events and renders six stages in order. You watch each one land in real time.
+
+<Steps>
+  <Step title="Generate">
+    Claude writes the five-file bundle from your prompt: the handler, the API schema, the agent card, and test cases.
+  </Step>
+  <Step title="Deploy">
+    The bundle builds into a container and runs the untrusted handler inside an isolated [sandbox](/concepts/sandbox) with deny-by-default egress, no secrets, and hard resource, timeout, and size caps.
+  </Step>
+  <Step title="Verify">
+    A smoke test confirms the endpoint actually works: it drives an unpaid call to a 402, signs a real payment, and asserts a paid call returns 200 with a settlement receipt.
+  </Step>
+  <Step title="Mint">
+    The endpoint gets an on-chain [ERC-8004 identity](/concepts/erc8004-identity) and is registered on-chain.
+  </Step>
+  <Step title="Publish">
+    It is listed in the marketplace with an [A2A agent card](/concepts/agent-card) so other agents can discover it.
+  </Step>
+  <Step title="Live">
+    The endpoint is up and taking paid calls.
+  </Step>
+</Steps>
+
+## The live moment
+
+When Live lands, the stream shows a filling circle and the line "&lt;slug&gt; is live." along with:
+
+- The **live URL** of your endpoint.
+- The **price** you set.
+- **Verified** and **bond** badges.
+
+Three buttons take you onward:
+
+<CardGroup cols={3}>
+  <Card title="test it" icon="flask">
+    Opens the resource playground at `/resources/:id` so you can send a real request and watch the 402-then-200 flow.
+  </Card>
+  <Card title="view listing" icon="store">
+    Opens your endpoint's listing in the [marketplace](https://app.utter.technology/discover).
+  </Card>
+  <Card title="utter another" icon="plus">
+    Returns to `/create` with an empty composer to build the next one.
+  </Card>
+</CardGroup>
+
+There is also an iterate bar below the result: a form that reopens `/create` prefilled with your prompt so you can refine and re-utter. See [Iterate on an endpoint](/create/iterate).
+
+## What the five-file bundle means for you
+
+Generation does not just write a function. It produces a complete, self-contained endpoint as a five-file bundle:
+
+| File | What it is |
+| --- | --- |
+| `handler.ts` | A Hono request handler, the code that answers each call. |
+| `openapi.json` | The API schema, OpenAPI 3.1, describing the input and output. |
+| `test-cases.json` | Success, declared-error, and malfunction fixtures used to validate the endpoint. |
+| `Dockerfile` | A platform-provided container spec. You do not write this. |
+| `agent-card.json` | The A2A card agents read to discover and call the endpoint. |
+
+## What the four-gate validator means for you
+
+The bundle must pass a four-gate validator before it can deploy. This is why a published endpoint is one that already works:
+
+<AccordionGroup>
+  <Accordion title="Shape">
+    The bundle has the right files in the right structure.
+  </Accordion>
+  <Accordion title="Static security scan">
+    The generated code is scanned for secrets and dangerous imports before anything is built. See [the static gate](/concepts/egress-and-static-gate).
+  </Accordion>
+  <Accordion title="Build spec">
+    The container builds cleanly from the bundle.
+  </Accordion>
+  <Accordion title="Live 402-then-200 serve check">
+    A running instance refuses an unpaid call with a 402, then returns 200 for a real paid call.
+  </Accordion>
+</AccordionGroup>
+
+If generation stumbles, it self-heals with a bounded regenerate and repair loop. A bundle that still cannot pass the gates is rejected and nothing is published. You never get a listing for an endpoint that does not work.
+
+<Info>
+  The gates run before your endpoint is ever public. A listing on the marketplace is a proof point: it built, it passed the static scan, and it served a real paid call.
+</Info>

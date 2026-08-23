@@ -1,0 +1,67 @@
+---
+title: "Self-hosting the stack"
+description: "The practical shape of running Utter yourself: install, env, test, compose up, and the host deployer."
+---
+
+This page is the run shape for standing up your own Utter. The trusted control-plane services run in Docker Compose; the deployer runs on the gVisor host you provisioned. Local development and building use WSL2 and Docker Desktop for everything except the real sandbox, which needs the Linux gVisor host.
+
+## Get it running
+
+<Steps>
+  <Step title="Install">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Configure">
+    Copy the example env and fill in the values. Secrets stay here; this file is gitignored.
+    ```bash
+    cp .env.example .env.local
+    ```
+    See the [environment reference](/reference/environment) for what each variable does.
+  </Step>
+  <Step title="Test">
+    ```bash
+    pnpm test
+    ```
+    The Foundry contract tests run via `pnpm test:contracts`.
+  </Step>
+  <Step title="Bring up the control plane">
+    The trusted services (studio, marketplace, facilitator, Traefik, Postgres, Redis, data proxy) run from compose:
+    ```bash
+    docker compose -f infrastructure/docker-compose.yml --env-file .env.local up -d
+    ```
+  </Step>
+  <Step title="Run the deployer on the host">
+    The deployer is not a compose service. It runs on the gVisor host via systemd, because it needs the host Docker daemon and `runsc`. See [Provisioning a host](/operator/provisioning) and [The deploy pipeline](/operator/deploy-pipeline).
+  </Step>
+</Steps>
+
+## Contracts are already deployed
+
+The contracts (`ResourceRegistry`, `PaymentEscrow`, `StakingVault`, `PaymentSplitter`, and the reference ERC-8004 registries) are already deployed on Arc Testnet. The live addresses are in [the address reference](/reference/addresses).
+
+You only redeploy for a fresh, separate environment, and if you do, you must re-pin the new addresses in `packages/chain` so every service points at your instance.
+
+<Info>
+  Arc is testnet only. There is no mainnet deploy. Chain id is `5042002` and settlement is in USDC.
+</Info>
+
+## The testnet role-collapse caveat
+
+<Warning>
+  On testnet the owner, escrow admin, relayer, and treasury are collapsed onto a single EOA. That is fine for testnet, but a production-style deploy must set distinct roles for each. Do not ship the collapsed configuration as if it were production.
+</Warning>
+
+## Keep secrets in `.env.local`
+
+Everything sensitive (wallet keys, the relayer key, the deployer auth secret, the DNS provider credentials for DNS-01, `DATABASE_URL`, `REDIS_URL`) lives in `.env.local`, which is gitignored. Nothing sensitive is committed.
+
+<CardGroup cols={2}>
+  <Card title="Provisioning a host" icon="server" href="/operator/provisioning">
+    The gVisor host requirements the deployer depends on.
+  </Card>
+  <Card title="Environment reference" icon="gear" href="/reference/environment">
+    Every variable in `.env.local` and what it controls.
+  </Card>
+</CardGroup>

@@ -1,0 +1,6 @@
+<svg width="150" height="40" viewBox="0 0 150 40" xmlns="http://www.w3.org/2000/svg" font-family="'Space Grotesk','Helvetica Neue',Helvetica,Arial,sans-serif">
+  <title>Utter</title>
+  <circle cx="16" cy="20" r="12" fill="#e0241b"/>
+  <polygon points="30,11 30,29 45,20" fill="#0c0c0d"/>
+  <text x="58" y="29" font-size="30" font-weight="700" letter-spacing="-1.5" fill="#0c0c0d">utter</text>
+</svg>

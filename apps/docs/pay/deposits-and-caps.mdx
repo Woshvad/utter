@@ -1,0 +1,79 @@
+---
+title: "Deposits and spend caps"
+description: "How the escrow balance funds every call, how the buyer bounds what it signs, and how a lost response is recovered without paying twice."
+---
+
+An agent deposits USDC into escrow once, and that balance funds every future call. Layered over the on-chain signed cap are buyer-side ceilings the agent controls, so a hostile card can never make it overpay. And if a response is lost, the receipt is recoverable without paying again.
+
+## Depositing into escrow
+
+Funds go into the `PaymentEscrow` contract with `deposit(amount)`, after an ERC-20 `approve` for the same amount. The buyer's escrow balance is the reservation pool: every call reserves against it before any handler runs.
+
+```text
+approve(escrow, amount)  ->  deposit(amount)  ->  escrow balanceOf(buyer) grows
+```
+
+Always read `decimals()` at runtime rather than hardcoding a scale. USDC on Arc is a 6-decimal ERC-20 and an 18-decimal native gas token at the same address; the deposit path reads the token's decimals and never mixes the two.
+
+Withdraw any unused balance at any time with `withdraw(amount)`. Nothing locks a deposit in.
+
+## How the reservation works
+
+Before a handler runs, the facilitator's `/verify` reserves the call's cap against the buyer's un-reserved balance. Only with funds locked does the handler run. This is the rule that removes the free-compute vector: no handler ever runs against an unreserved authorization.
+
+On a validated success, `/settle` debits `min(computed, cap)` and the reservation resolves. On a declared error, malfunction, or timeout, the reservation is released. The full branch is in [The escrow response gate](/concepts/escrow-response-gate).
+
+## The buyer cap ceiling
+
+The cap the card advertises is not the only bound. The buyer sets its own per-call ceiling, and the signed cap is the smaller of the two:
+
+```text
+signed cap = min(card cap, buyer ceiling)
+```
+
+The buyer ceiling comes from the buyer's own config, never from the card, so a card cannot raise it. A hostile card that advertises a huge `pricing.max` still cannot make the agent sign for more than its ceiling.
+
+<ParamField path="BUYER_MAX_CAP_TOKENS" type="string">
+  The buyer's per-call ceiling in whole USDC tokens. Bounds what the client will ever sign, independent of the card. Empty means the card cap is the only per-call bound.
+</ParamField>
+
+## Per-tool and per-day caps
+
+The MCP server adds soft spend caps over the on-chain hard bound. These reserve before pay and never relax the signed cap; they can only deny a call the config disallows.
+
+<ParamField path="MCP_PER_TOOL_CAP_BASE_UNITS" type="string">
+  The running spend cap for a single tool, in base units. Unset means unbounded for that dimension.
+</ParamField>
+
+<ParamField path="MCP_PER_DAY_CAP_BASE_UNITS" type="string">
+  The running spend cap summed across all tools per UTC day, in base units. Unset means unbounded for that dimension.
+</ParamField>
+
+<Warning>
+  When a dimension is unbounded, the server warns once on stderr. With no cap, a hostile card's advertised `pricing.max` becomes the only per-call bound, so setting these closes the denial-of-wallet gap.
+</Warning>
+
+## The server-side per-payer cap
+
+Independent of the buyer's own ceilings, the facilitator can enforce an optional per-payer rolling 24-hour spend cap server-side. This bounds a single payer's spend across calls regardless of what any client signs.
+
+## Exactly-once recovery
+
+The payment nonce is the idempotency key. A network retry must never double charge and never re-sign. A buyer that loses a response recovers the receipt by its key instead of paying again:
+
+```bash
+curl -s https://<facilitator>/results/0x<idemKey> | jq
+```
+
+The facilitator returns the cached receipt for that key. No re-sign, no second debit. The full mechanism is in [Exactly-once settlement](/concepts/exactly-once).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Exactly-once settlement" icon="rotate" href="/concepts/exactly-once">
+    Why a retry never double charges and how recovery by idempotency key works.
+  </Card>
+  <Card title="Facilitator API reference" icon="server" href="/reference/facilitator-api">
+    The `/verify`, `/settle`, and `GET /results/:idemKey` shapes and the per-payer cap.
+  </Card>
+</CardGroup>

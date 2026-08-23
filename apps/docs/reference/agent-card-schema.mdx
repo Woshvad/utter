@@ -1,0 +1,98 @@
+---
+title: "Agent card schema"
+description: "The A2A agent card every Utter resource serves, with its full field reference."
+---
+
+Every deployed resource serves an [A2A](https://a2a-protocol.org) agent card at `/.well-known/agent-card.json`. It is a flat card at protocol version `0.3.0` carrying the resource's skills, its x402 payment terms, its ERC-8004 identity, and its health and bond. Validation is strict: `additionalProperties` is `false` at the top level, and `payTo` must equal the `resourceId` or the [marketplace](/reference/marketplace-api) refuses to list the resource.
+
+## Example
+
+```json /.well-known/agent-card.json
+{
+  "protocolVersion": "0.3.0",
+  "name": "Return the current UTC time as JSON",
+  "description": "Returns the current UTC time as an ISO-8601 string.",
+  "url": "https://return-the-current-utc-time-as-json.resources.utter.technology/call",
+  "version": "1.0.0",
+  "capabilities": { "streaming": false },
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "id": "now",
+      "name": "Current UTC time",
+      "description": "Return the current UTC time.",
+      "tags": ["time", "utc"],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    }
+  ],
+  "x402": {
+    "scheme": "utter-escrow",
+    "network": "eip155:5042002",
+    "chainId": 5042002,
+    "asset": "0x3600000000000000000000000000000000000000",
+    "escrow": "0x87DDD6df70A5CDb5c161C65bfE15e0F6942DD154",
+    "pricing": { "model": "metered", "base": "1000", "perKB": "100", "max": "50000" },
+    "payTo": "0x…"
+  },
+  "cache": { "ttlSeconds": 300 },
+  "identity": { "standard": "erc-8004", "chainId": 5042002, "agentId": "42" },
+  "health": { "verified": true, "score": 100 },
+  "bond": { "posted": "1000000" }
+}
+```
+
+## Fields
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `protocolVersion` | string (const `0.3.0`) | The A2A protocol version. |
+| `name` | string | Human-readable resource name. |
+| `description` | string | What the resource does. |
+| `url` | string | The `POST /call` endpoint URL. |
+| `version` | string | The resource version. |
+| `capabilities` | object | `{ streaming }`. |
+| `defaultInputModes` | string[] | Default request content types. |
+| `defaultOutputModes` | string[] | Default response content types. |
+| `skills` | object[] | One or more skills (see below). |
+| `x402` | object | The payment terms (see below). |
+| `cache` | object | `{ ttlSeconds }`, the card cache lifetime. |
+| `identity` | object | The ERC-8004 identity (see below). |
+| `health` | object | `{ verified, score }`. |
+| `bond` | object | `{ posted }`, the bonded amount in base units. |
+
+### skills[]
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Skill id. |
+| `name` | string | Skill name. |
+| `description` | string | What the skill does. |
+| `tags` | string[] | Discovery tags. |
+| `inputModes` | string[] | Accepted request content types. |
+| `outputModes` | string[] | Produced response content types. |
+
+### x402
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scheme` | string (const `utter-escrow`) | The gated metered scheme. |
+| `network` | string | `eip155:5042002`. |
+| `chainId` | number | `5042002`. |
+| `asset` | string | The USDC token address. |
+| `escrow` | string | The PaymentEscrow address. |
+| `pricing` | object | `{ model, base, perKB, max }`. |
+| `payTo` | string | The `resourceId`. Must equal the resource id or the marketplace refuses to list. |
+
+### identity
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `standard` | string (`erc-8004`) | The identity standard. |
+| `chainId` | number | The chain the identity lives on. |
+| `agentId` | string | The ERC-8004 agent id. |
+
+<Note>
+  The card is validated strictly on serve. See [the agent card concept](/concepts/agent-card) and [ERC-8004 identity](/concepts/erc8004-identity).
+</Note>

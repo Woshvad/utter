@@ -1,0 +1,63 @@
+---
+title: "How it works"
+description: "The full loop from a sentence to a paid API that agents pay for per call."
+---
+
+Utter runs one loop end to end: a sentence becomes a live, priced endpoint, and an agent pays for it per call with safe on-chain settlement. Here are the six steps.
+
+<Steps>
+  <Step title="Utter">
+    You type a sentence in the [studio](/create/studio-and-build). Claude writes the handler code, the API schema (`openapi.json`), the agent card, and test cases. The output is a five-file bundle that describes a complete, self-contained endpoint.
+  </Step>
+  <Step title="Gate">
+    A [static security scan](/concepts/egress-and-static-gate) checks the generated code for secrets and dangerous imports before anything is built. A bundle that fails is rejected, no build runs.
+  </Step>
+  <Step title="Deploy">
+    The deployer builds a container and runs the untrusted handler inside a [gVisor sandbox](/concepts/sandbox) with deny-by-default egress through a data proxy, no secrets, and hard resource, timeout, and size caps. A trusted sidecar sits in front and owns the money path.
+  </Step>
+  <Step title="Verify">
+    A smoke test confirms the endpoint actually works: it drives an unpaid call to a 402, signs a real payment, and asserts a paid call returns 200 with a settlement receipt.
+  </Step>
+  <Step title="Identify and publish">
+    The endpoint gets an on-chain [ERC-8004 identity](/concepts/erc8004-identity), is registered on-chain, and is listed on the marketplace with an [A2A agent card](/concepts/agent-card) so other agents can discover it.
+  </Step>
+  <Step title="Pay">
+    An agent calls the endpoint and gets a 402. It signs a USDC payment, the facilitator reserves the cap in the escrow contract, the handler runs, and the response is validated. Only if it passes does the payment settle: `min(computed, cap)` is debited and split inline between you and the platform, all on-chain. If the response is bad, nothing is charged.
+  </Step>
+</Steps>
+
+## The escrow response gate
+
+The primary money path is an escrow scheme, not a bare charge. This is the primitive the whole platform is built on.
+
+```
+buyer deposits USDC  ->  /verify reserves the cap  ->  handler runs
+                     ->  response validated (ESCROW GATE)
+                     ->  /settle debits min(computed, cap) with the inline 70/30 split
+```
+
+The handler never runs against an unreserved authorization, so there is no free-compute vector. Settlement is exactly once: an idempotent `/settle` keyed by the payment nonce plus a `GET /results/:idemKey` recovery path means a retry never double charges and never re-signs.
+
+Read the full model in [The escrow response gate](/concepts/escrow-response-gate).
+
+## What each piece does
+
+Utter is a pnpm monorepo in TypeScript with Solidity contracts. The parts that carry the loop:
+
+| Part | What it does |
+| --- | --- |
+| `apps/studio` | The creator studio: utter a sentence, watch it build, see earnings, withdraw. |
+| `apps/marketplace` | Discovery and the agent-card index, the public `GET /resources` agents read. |
+| `services/deployer` | Builds generated resources, runs them under gVisor, registers them on-chain, publishes them. |
+| `services/facilitator` | The x402 escrow money path: `/verify`, `/settle`, `/release`, the relayer, exactly-once. |
+| `services/sandbox` | The gVisor isolation runtime and the pre-build static security gate. |
+| `packages/x402-arc` | The x402 escrow scheme: the payment gate, EIP-712 signing, settle, the response classifier. |
+| `packages/ai-runtime` | Sentence-to-handler generation plus the agent-card builder. |
+| `packages/buyer-sdk` | The reference paying agent and the MCP server that exposes endpoints as agent tools. |
+| `contracts/` | Solidity: `ResourceRegistry`, `PaymentEscrow`, `StakingVault`, `PaymentSplitter`. |
+
+The full map is in [Architecture](/operator/architecture).
+
+<Info>
+  Payment is debited only after the response passes validation. This single rule, the escrow response gate, is what lets an agent call a brand new endpoint it has never used and trust that a bad answer costs nothing.
+</Info>

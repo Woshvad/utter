@@ -1,0 +1,99 @@
+---
+title: "Architecture"
+description: "The monorepo map, the services that carry the loop, and the network topology that makes isolation real."
+---
+
+Utter is a single pnpm workspace of TypeScript packages and Solidity contracts. The whole platform is here: the creator studio, the discovery service, the money path, the sandbox runtime, and the on-chain contracts. This page maps every member and shows how the running services are wired into networks that are themselves part of the isolation model.
+
+## The monorepo
+
+The workspace globs `apps/*`, `services/*`, `packages/*`, and `contracts`. Every member is private, ESM, and named `@utter/<dir>`. `viem` is pinned repo-wide to a single version so every chain-touching package speaks the same client.
+
+<Info>
+  There is no mainnet. Utter targets **Arc Testnet** (chain id `5042002`) only. USDC `0x3600…0000` is both the 6-decimal ERC-20 and the 18-decimal native gas token, so every package reads `decimals()` at runtime rather than hardcoding it.
+</Info>
+
+### Apps
+
+| Member | Package | What it is |
+| --- | --- | --- |
+| `apps/studio` | `@utter/studio` | The creator studio. A React Router v7 SSR app on port `3000`. Utter a sentence, watch it build, set a price, see earnings, withdraw. Its `/discover` screen reads the marketplace. |
+| `apps/marketplace` | `@utter/marketplace` | A headless Hono JSON discovery service on port `8789`, no UI. It serves the public resource index and agent-card lookups that agents read. |
+
+### Services
+
+| Member | What it does |
+| --- | --- |
+| `services/deployer` | Builds generated bundles, runs them under gVisor, registers them on-chain, publishes them. An authenticated control-plane HTTP server (`POST /deploy` plus an SSE stream) on port `8788`. It runs on the provisioned Linux host, not in the compose stack, because it needs the host Docker daemon and `runsc`. |
+| `services/facilitator` | The x402 escrow money path: `/verify`, `/settle`, `/release`, `/results`, the relayer, and exactly-once settlement. |
+| `services/sandbox` | The gVisor isolation runtime and the pre-build static gate. |
+| `services/orchestrator` | The warm pool and scale-to-zero scheduler. This is a scheduler, not an isolation boundary. |
+
+### Packages
+
+| Member | What it does |
+| --- | --- |
+| `packages/chain` | Pinned Arc constants plus `viem` and the ABIs. |
+| `packages/x402-arc` | The escrow scheme, the response gate, and the sidecar. |
+| `packages/ai-runtime` | Sentence-to-handler generation plus the agent-card builder. |
+| `packages/ai-scorer` | Probes and strikes. |
+| `packages/buyer-sdk` | The reference paying agent and the MCP server. |
+| `packages/erc8004` | On-chain identity. |
+| `packages/data-proxy` | The egress proxy. |
+| `packages/staking` | Creator bonds and the staking vault client. |
+| `packages/treasury` | Platform treasury accounting. |
+| `packages/cost` | Metering and cost inputs. |
+| `packages/observability` | Logs, metrics, and traces. |
+
+### Contracts
+
+`contracts` is a Foundry/Solidity project: `ResourceRegistry`, `PaymentEscrow`, `StakingVault`, `PaymentSplitter`, and reference ERC-8004 registries. These are already deployed on Arc Testnet; see [Self-hosting the stack](/operator/self-hosting) for the redeploy caveat.
+
+## The network topology
+
+The [sandbox](/concepts/sandbox) is not only `runsc`. The docker-compose stack splits the running services across several networks, most of them `internal: true`, so that no container can reach anything it has no business reaching. The untrusted handler and the trusted sidecar are **two separate containers per resource**: the handler holds no secrets and no facilitator token, and it can only talk outward through the [data proxy](/concepts/egress-and-static-gate).
+
+<AccordionGroup>
+  <Accordion title="edge">
+    The only externally reachable network. Traefik lives here with external egress and the wildcard TLS certificate for `*.resources.<domain>`.
+  </Accordion>
+  <Accordion title="ingress (internal)">
+    Traefik to the per-resource sidecar. No gateway, so nothing on this network reaches the internet.
+  </Accordion>
+  <Accordion title="controlplane (internal)">
+    The sidecar to the facilitator. This is where the money path is spoken; the untrusted handler is not on it.
+  </Accordion>
+  <Accordion title="proxynet (internal)">
+    The handler to the data proxy. The handler's only egress path, and it is deny-by-default.
+  </Accordion>
+  <Accordion title="upstreamnet (internal)">
+    The data proxy to its allowed upstreams, and the facilitator to the Arc RPC endpoint.
+  </Accordion>
+  <Accordion title="redisnet (internal)">
+    Redis and the data proxy.
+  </Accordion>
+  <Accordion title="backendnet (internal)">
+    Postgres, the facilitator, and the marketplace.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  The handler and sidecar being two containers is the point. A compromised handler holds nothing worth stealing and has no route to the facilitator, the chain, Postgres, or Redis. The trust boundary is enforced by the network split, not by convention. See [egress and the static gate](/concepts/egress-and-static-gate).
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The deploy pipeline" icon="list-check" href="/operator/deploy-pipeline">
+    The ordered steps a bundle runs through, from auth to a running paid endpoint.
+  </Card>
+  <Card title="Provisioning a host" icon="server" href="/operator/provisioning">
+    The gVisor host, wildcard TLS, durability, and the systemd deployer.
+  </Card>
+  <Card title="The sandbox" icon="box" href="/concepts/sandbox">
+    How untrusted generated code is isolated at runtime.
+  </Card>
+  <Card title="Self-hosting the stack" icon="cubes" href="/operator/self-hosting">
+    The practical run shape: install, env, test, compose up.
+  </Card>
+</CardGroup>

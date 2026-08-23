@@ -1,0 +1,61 @@
+---
+title: "Paying for APIs"
+description: "How an AI agent deposits USDC once, then discovers and pays for endpoints per call with no keys and no humans."
+---
+
+Utter is the supply side of the agent economy. Your agent deposits USDC once, discovers endpoints on its own, and pays per call in USDC with no API keys and no humans in the loop. Payment settles only after the response passes validation, so a bad answer costs nothing.
+
+Everything runs on **Arc Testnet** (chain id `5042002`, network string `eip155:5042002`) under the `utter-escrow` scheme.
+
+## The mental model
+
+Four moves, and only the first ever needs a human decision.
+
+<Steps>
+  <Step title="Deposit once">
+    The agent deposits USDC into the escrow contract a single time. That balance is a reservation pool it pays every future call from. No per-endpoint signup, no keys. See [Deposits and spend caps](/pay/deposits-and-caps).
+  </Step>
+  <Step title="Discover">
+    The agent reads the public marketplace index and each endpoint's agent card. The card carries everything needed to pay: pricing, the escrow contract, the `payTo` id, the cap, reputation, and bond. See [Discovering endpoints](/pay/discover).
+  </Step>
+  <Step title="Pay per call">
+    The agent calls an endpoint, gets a 402 with a quote, signs a capped authorization, and sends it. The facilitator reserves the cap, the handler runs, the response is validated, and only then does the payment settle.
+  </Step>
+  <Step title="Recover if needed">
+    If the agent loses a response, it fetches the receipt by its idempotency key instead of paying again. Settlement is exactly once.
+  </Step>
+</Steps>
+
+<Info>
+  The whole thing rests on one rule: payment is debited only after the response passes validation. Read the primitive in [The escrow response gate](/concepts/escrow-response-gate).
+</Info>
+
+## Two clients
+
+The reference buyer SDK (`@utter/buyer-sdk`) ships two ways to pay. Both run the same discover, reserve, handler, settle loop and both hold the buyer key inside the client, never as an argument or a return value.
+
+<CardGroup cols={2}>
+  <Card title="The buyer SDK (CLI)" icon="terminal" href="/pay/buyer-sdk">
+    A command-line driver that funds the escrow once and fires N real paid calls. Start with a dry run, then add `--apply`. It prints a settlement tx and an ArcScan link per paid call.
+  </Card>
+  <Card title="The MCP server" icon="plug" href="/pay/mcp">
+    A stdio MCP server that exposes discovered endpoints as tools your agent can call from Claude Desktop or Cursor. Runs in a safe in-process demo mode by default.
+  </Card>
+</CardGroup>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart: pay for an API" icon="rocket" href="/start/quickstart-pay">
+    Point an agent at a live endpoint and make your first paid call.
+  </Card>
+  <Card title="Discovering endpoints" icon="magnifying-glass" href="/pay/discover">
+    The marketplace index, its filters, and the agent card as the single source of pay data.
+  </Card>
+  <Card title="Deposits and spend caps" icon="vault" href="/pay/deposits-and-caps">
+    How the escrow balance works, the buyer cap ceiling, and per-tool and per-day caps.
+  </Card>
+  <Card title="The escrow response gate" icon="shield-check" href="/concepts/escrow-response-gate">
+    Why an agent can trust a brand new endpoint: a bad answer is never charged.
+  </Card>
+</CardGroup>

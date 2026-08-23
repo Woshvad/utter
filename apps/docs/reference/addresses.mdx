@@ -1,0 +1,72 @@
+---
+title: "Addresses and chain"
+description: "Arc Testnet network parameters and every pinned contract address Utter uses."
+---
+
+Utter runs on **Arc Testnet** only. Every address below is pinned in one place, `packages/chain/src/addresses.ts`, so a re-pin (for example a mainnet cut) touches a single file. Each Utter contract address links to the [ArcScan explorer](https://testnet.arcscan.app).
+
+## Network
+
+| Field | Value |
+| --- | --- |
+| Chain name | Arc Testnet |
+| Chain id | `5042002` |
+| CAIP-2 network | `eip155:5042002` |
+| RPC (HTTP) | `https://rpc.testnet.arc.network` |
+| RPC (WebSocket) | `wss://rpc.testnet.arc.network` |
+| Explorer | [https://testnet.arcscan.app](https://testnet.arcscan.app) |
+| Native gas token | USDC (18-decimal native value) |
+
+<Warning>
+  USDC at `0x3600…0000` is **both** the 6-decimal ERC-20 token and the 18-decimal native gas token. Always read `decimals()` at runtime for ERC-20 amount math. Never reuse the 18-decimal native gas lens for token amounts, and never hardcode `6`.
+</Warning>
+
+## Utter contracts
+
+Deployed and verified on Arc Testnet (chain id `5042002`) via `contracts/script/Deploy.s.sol`.
+
+| Contract | Address | Purpose |
+| --- | --- | --- |
+| ResourceRegistry | [`0x12aafa5a70c3aD8Bd3a52252744f9F7Aa073E362`](https://testnet.arcscan.app/address/0x12aafa5a70c3aD8Bd3a52252744f9F7Aa073E362) | Per-resource config, indexer events, pause and slash authorization. |
+| PaymentEscrow | [`0x87DDD6df70A5CDb5c161C65bfE15e0F6942DD154`](https://testnet.arcscan.app/address/0x87DDD6df70A5CDb5c161C65bfE15e0F6942DD154) | Primary money path: capped EIP-712 debit with the inline creator/treasury split. |
+| StakingVault | [`0x15573Cb5a391F1023317bd49b076A7FE664FdE8B`](https://testnet.arcscan.app/address/0x15573Cb5a391F1023317bd49b076A7FE664FdE8B) | Per-resource USDC bond custody and the insurance pool. |
+| PaymentSplitter | [`0x71375fC7cA1EA9d2f0dFc44d454B37AbD3cCe510`](https://testnet.arcscan.app/address/0x71375fC7cA1EA9d2f0dFc44d454B37AbD3cCe510) | Flat-path (`exact` scheme) splitter. |
+
+See [Contracts](/reference/contracts) for the ABIs and behavior.
+
+## Tokens and shared infrastructure
+
+| Contract | Address | Notes |
+| --- | --- | --- |
+| USDC | `0x3600000000000000000000000000000000000000` | 6-dp ERC-20 and 18-dp native gas token. Read `decimals()`. |
+| EURC | `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a` | 6-dp ERC-20. StableFX / EURC payouts. |
+| Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` | Batched reads. |
+| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Signature approvals for the no-deposit metered path. |
+| CREATE2 Factory | `0x4e59b44847b379578588920cA78FbF26c0B4956C` | Deterministic deploys. |
+
+## Circle Gateway, CCTP and StableFX
+
+Used by the chain-abstracted funding and EURC payout paths.
+
+| Contract | Address |
+| --- | --- |
+| GatewayWallet | `0x0077777d7EBA4688BDeF3E311b846F25870A19B9` |
+| GatewayMinter | `0x0022222ABE238Cc2C7Bb1f21003F0a260052475B` |
+| CCTP TokenMessengerV2 | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+| CCTP MessageTransmitterV2 | `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275` |
+| CCTP TokenMinterV2 | `0xb43db544E2c27092c107639Ad201b3dEfAbcF192` |
+| StableFX FxEscrow | `0x867650F5eAe8df91445971f14d89fd84F0C9a9f8` |
+
+The Arc CCTP destination domain is `26`.
+
+## Roles
+
+On testnet the owner, escrow admin (relayer), registry admin, and platform treasury are collapsed onto a single deployer EOA:
+
+| Role | Address |
+| --- | --- |
+| Deployer / owner / relayer / treasury | [`0xDa8c5726f596E8dae99e6dDEBa8AEa1c8bE9A4a5`](https://testnet.arcscan.app/address/0xDa8c5726f596E8dae99e6dDEBa8AEa1c8bE9A4a5) |
+
+<Note>
+  A production deploy assigns these to distinct roles. On testnet they are one EOA for simplicity.
+</Note>

@@ -1,0 +1,94 @@
+---
+title: "Pricing and bonds"
+description: "Set a flat or metered price, understand the buyer-signed cap and the 70/30 split, and post the bond that backs your endpoint."
+---
+
+Two things you set when you create an endpoint shape what you earn and what backs your reputation: the **price** and the **bond**. Price is what an agent pays per call. The bond is USDC you stake to publish, and it is what a run of malfunctions puts at risk.
+
+## Flat vs metered
+
+The composer has a segmented toggle between two pricing models.
+
+<Tabs>
+  <Tab title="Flat">
+    One price per call, no matter the response. Simple and predictable. The default price is **$0.01** per call, adjustable in steps of **$0.0001**.
+
+    Flat is the right choice when every call does roughly the same amount of work.
+  </Tab>
+  <Tab title="Metered">
+    The price scales with the response. Use it when calls vary a lot in size or compute. The final amount is computed after the handler runs, from the response bytes and the time it took.
+  </Tab>
+</Tabs>
+
+### The metering formula
+
+For a metered endpoint, the price of a call is:
+
+```text
+price = base
+      + perKB            * ceil(bytes / 1024)
+      + computeMultiplier * ceil(ms / 100)
+```
+
+Then the result is always clamped to the buyer-signed cap:
+
+```text
+charged = min(price, cap)
+```
+
+All amounts are in USDC base units. The platform reads `decimals()` at runtime and never hardcodes it, so the same code is correct whether USDC has 6 decimals or another value. See [metering and classification](/concepts/metering-and-classification) for how the size and compute measurements are taken.
+
+## The cap relationship
+
+Every paying agent signs an authorization for a **cap**, a ceiling on what it is willing to pay for a single call. The cap is not the price. When your handler returns:
+
+- The escrow reserves the cap up front, before the handler runs, so there is no free-compute path.
+- On a successful response the buyer is charged `min(computed, cap)`, never more than what it signed for.
+- If your metered formula would exceed the cap, the charge is clamped down to the cap.
+
+This protects the buyer from a runaway bill and protects you by making the metered price enforceable on-chain.
+
+<Note>
+  A cap that is too low for your pricing means calls get clamped and you earn less than your formula intends. Price your endpoint so a normal call lands comfortably under the caps agents sign.
+</Note>
+
+## The 70/30 split
+
+Every paid call is split **70/30 between you and the platform**. The split is applied inline, inside the same on-chain debit that charges the buyer, not as a later payout job. Your 70% accrues as an internal balance you withdraw whenever you want. See [Earnings and withdraw](/create/earnings-and-withdraw).
+
+## Bonds
+
+To publish an endpoint you post a USDC **bond** into the StakingVault. Publishing is gated on a posted bond: no bond, no listing.
+
+| Setting | Value |
+| --- | --- |
+| Contract minimum | 1 USDC (`MIN_BOND_BASE_UNITS = 1_000_000` base units) |
+| Studio default | $5 |
+
+The bond backs your endpoint's reputation. It is skin in the game: a well-behaved endpoint keeps its bond, and a misbehaving one puts it at risk.
+
+### Reclaiming a bond
+
+A bond can be reclaimed after a **7-day cooldown**. The flow is two steps:
+
+<Steps>
+  <Step title="Request withdraw">
+    Call `requestWithdraw` to start the 7-day cooldown clock.
+  </Step>
+  <Step title="Withdraw">
+    After the cooldown, call `withdraw` to take the bond back.
+  </Step>
+</Steps>
+
+### Slashing and insurance
+
+If an endpoint misbehaves, its bond can be **slashed into an insurance pool**. Slashing is a two-step process with a **1-day dispute window**, so it is never instant or silent. Refunds to buyers harmed by a bad endpoint come from that insurance pool. In normal operation, a declared error for bad buyer input is never a strike and never touches your bond. See [Reputation and strikes](/create/reputation-and-strikes) for what counts as misbehavior.
+
+<CardGroup cols={2}>
+  <Card title="Metering and classification" icon="gauge" href="/concepts/metering-and-classification">
+    How the size and compute measurements are taken and how a response is classified.
+  </Card>
+  <Card title="Contracts reference" icon="file-contract" href="/reference/contracts">
+    The StakingVault, PaymentEscrow, and the on-chain details behind bonds and the split.
+  </Card>
+</CardGroup>

@@ -1,0 +1,64 @@
+---
+title: "Reputation and strikes"
+description: "How the scorer probes your endpoint, why a bad buyer input never strikes you, and what five consecutive failures do."
+---
+
+Your endpoint earns a reputation from how it actually behaves. An off-chain scorer probes it, a small set of rules decides what counts against you, and the result is recorded on-chain. The design has one guardrail at its center: a bad answer from your endpoint is your fault, but a bad input from the buyer is not.
+
+## The scorer
+
+An off-chain scorer probes each endpoint on three things:
+
+- **Schema.** Does the response match the endpoint's declared schema?
+- **Latency.** Does it respond within its bounds?
+- **Correctness.** Is the answer actually right for the input?
+
+The scorer runs continuously, not just at build time, so reputation tracks how the endpoint behaves in the wild.
+
+## Three-way classification
+
+Every response is classified into one of three outcomes. This is the same classification the [escrow response gate](/concepts/escrow-response-gate) uses to decide whether to charge, and it is the wrongful-strike guard.
+
+<AccordionGroup>
+  <Accordion title="Success">
+    The response validates against the endpoint's declared success schema. The buyer is charged, and this is a healthy call. No strike.
+  </Accordion>
+  <Accordion title="Declared error (never a strike)">
+    The response is a well-formed "your input was bad" answer that validates against the endpoint's declared error schema. This is the endpoint working correctly on bad buyer input, so it is **never a strike**. Depending on the error policy the call is free or charged a small declared-error price.
+  </Accordion>
+  <Accordion title="Malfunction or timeout">
+    The response is neither a valid success nor a valid declared error, or the handler timed out or threw. Nothing is charged, and a **strike** is recorded against the creator.
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+  A `declared_error` is never a strike. If your endpoint cleanly rejects bad input, that is it working, not failing. Only malfunctions and timeouts count against you. See [metering and classification](/concepts/metering-and-classification).
+</Info>
+
+## Five consecutive strikes deactivate the endpoint
+
+Strikes are counted consecutively. **Five consecutive strike-worthy failures** (malfunctions or timeouts) deactivate the endpoint. A **single success resets the counter** to zero, so an endpoint that has an occasional hiccup but mostly works is never at risk.
+
+When an endpoint is deactivated:
+
+<Steps>
+  <Step title="The on-chain resource is paused">
+    The endpoint stops taking paid calls. Its listing reflects that it is no longer live.
+  </Step>
+  <Step title="A bond-slash review is raised">
+    Deactivation raises a review that can slash the endpoint's bond into the insurance pool. Slashing is a two-step process with a 1-day dispute window, so it is never instant. See [Pricing and bonds](/create/pricing-and-bonds).
+  </Step>
+</Steps>
+
+## Reputation is on-chain
+
+Reputation is recorded on-chain through an **ERC-8004 reputation registry**. It is a **health score, not money**: it captures how reliably an endpoint behaves so agents can decide whether to trust it, separate from the payment path. Money moves through the escrow and the split; reputation moves through the registry.
+
+<CardGroup cols={2}>
+  <Card title="Metering and classification" icon="gauge" href="/concepts/metering-and-classification">
+    How a response is classified as success, declared error, or malfunction.
+  </Card>
+  <Card title="ERC-8004 identity" icon="fingerprint" href="/concepts/erc8004-identity">
+    The on-chain identity and reputation registry behind every endpoint.
+  </Card>
+</CardGroup>
