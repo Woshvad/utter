@@ -1,5 +1,13 @@
 packages:
   - "apps/*"
+  # apps/docs is a Mintlify-hosted docs site (built on Mintlify's own platform, not
+  # here or in CI). Its `mint` CLI devDependency repeatedly floats onto releases that
+  # pin npm versions which do not exist yet (postcss@8.5.23, @floating-ui/utils@^0.2.12),
+  # breaking a full `pnpm install` for the WHOLE monorepo on any host that resolves the
+  # docs tree fresh. Exclude it from the workspace so production/host installs never
+  # resolve the docs tree and cannot be held hostage by a broken Mintlify release.
+  # Author docs locally with `cd apps/docs && npx mint dev`.
+  - "!apps/docs"
   - "services/*"
   - "packages/*"
   - "contracts"
@@ -23,9 +31,3 @@ allowBuilds:
 # version and type identity across @utter/* holds.
 overrides:
   viem: 2.52.2
-  # apps/docs' Mintlify CLI (mint) floats onto releases that pin a phantom
-  # postcss@8.5.23 (never published; latest 8.5.x is real), which breaks a full
-  # `pnpm install` on any host that resolves the docs tree fresh. Pin postcss to a
-  # real 8.5.x so resolution succeeds. postcss 8.5.x is patch-compatible, so this is
-  # safe for the only other consumer (apps/studio's Tailwind/PostCSS build).
-  postcss: 8.5.16
