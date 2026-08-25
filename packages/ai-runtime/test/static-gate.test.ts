@@ -126,9 +126,14 @@ describe("static-gate (GEN-02 / WR-01): a secret smuggled into a JSON artifact i
     ).toBe(true);
   });
 
-  it("rejects a 0x<64hex> private key hidden in a test-cases.json string", async () => {
+  it("rejects a 0x<64hex> private key hidden in a key-context field of test-cases.json", async () => {
+    // A realistic smuggle: the hex is bound to a private-key-named field, so the
+    // hex-private-key rule fires. A BARE 0x<64hex> (no key context) is deliberately NOT
+    // flagged here - it is byte-identical to a public payTo / resourceId that legitimate
+    // bundles carry, so flagging it would false-positive on every real deploy (see the
+    // negative control below).
     const malicious = smuggleIntoJson(await scaffold(), "test-cases.json", (doc) => {
-      doc.cases[0].input.note =
+      doc.cases[0].input.privateKey =
         "0xa3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
     });
     const result = await validateBundle(malicious, spec);
@@ -139,6 +144,20 @@ describe("static-gate (GEN-02 / WR-01): a secret smuggled into a JSON artifact i
         (v) => v.kind === "secret" && v.file === "test-cases.json" && v.rule === "hex-private-key",
       ),
     ).toBe(true);
+  });
+
+  it("does NOT false-positive on a BARE 0x<64hex> (a public resourceId/payTo shape) in test-cases.json", async () => {
+    // A bare 0x<64hex> with no key context is a PUBLIC value shape (resourceId, payTo, tx
+    // hash). The gate must let it through, or every on-chain bundle that references a
+    // resourceId in a test case would be blocked. This pins the deliberate boundary.
+    const benign = smuggleIntoJson(await scaffold(), "test-cases.json", (doc) => {
+      doc.cases[0].input.resourceId =
+        "0xa3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60a3f9c2e1b7d48f60";
+    });
+    const result = await validateBundle(benign, spec);
+    expect(
+      result.gates.g2.violations.some((v) => v.file === "test-cases.json"),
+    ).toBe(false);
   });
 
   it("does NOT false-positive on the public PaymentEscrow/USDC addresses in agent-card.json", async () => {

@@ -75,6 +75,16 @@ pnpm --filter @utter/buyer-sdk pay -- \
 
 The same buyer SDK is exposed over **MCP**, so an agent in Claude Desktop or Cursor discovers and pays the same way.
 
+**Install an endpoint as a Claude Code plugin.** Every endpoint can be published as a one-command-installable Claude Code plugin. The repo itself is a plugin marketplace:
+
+```bash
+# from a checkout of this repo (works today, no publish needed)
+/plugin marketplace add ./
+/plugin install utter-buyer@utter
+```
+
+The base `utter-buyer` plugin boots in demo mode with no configuration and runs the full discover, pay, and settle escrow loop in-process. Per-endpoint plugins (`utter-<slug>`) scope the buyer to one resource for the live path. Regenerate the marketplace from the live index with `pnpm --filter @utter/plugin-gen generate`. See `packages/plugin-gen` and the docs at https://docs.utter.technology.
+
 ---
 
 ## Architecture
@@ -93,6 +103,7 @@ A pnpm monorepo in TypeScript, with Solidity contracts.
 | `packages/x402-arc` | The x402 escrow scheme: the payment gate, EIP-712 signing, settle, classifier. |
 | `packages/ai-runtime` | Sentence to handler generation (Claude) plus the agent-card builder. |
 | `packages/buyer-sdk` | The reference paying agent and the MCP server that exposes endpoints as agent tools. |
+| `packages/plugin-gen` | Turns published endpoints into an installable Claude Code plugin marketplace (the distribution bridge). |
 | `packages/staking` `treasury` `erc8004` `observability` `cost` `data-proxy` | Bonds and slashing, payouts, onchain identity, metrics, pricing, and the egress proxy. |
 | `contracts/` | Solidity (Foundry): `ResourceRegistry`, `PaymentEscrow`, `StakingVault`, `PaymentSplitter`. |
 

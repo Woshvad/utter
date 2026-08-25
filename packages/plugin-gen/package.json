@@ -1,0 +1,20 @@
+{
+  "name": "@utter/plugin-gen",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generate an installable Claude Code plugin marketplace from published Utter endpoints.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "utter-plugins": "./src/bin/generate.ts"
+  },
+  "scripts": {
+    "generate": "node --import ../../scripts/ts-resolver.mjs --experimental-strip-types src/bin/generate.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "17.4.2"
+  }
+}

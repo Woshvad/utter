@@ -205,6 +205,84 @@ describe("createLiveCardSource (live MCP discovery READ): row -> DiscoveredCard 
     expect(calls).not.toContain("https://weather.resources.utter.app/openapi.json");
   });
 
+  it("scopes to resourceIds (per-endpoint plugin allow-list): case-insensitive, 0x-normalized, filters BEFORE openapi fetch", async () => {
+    const rowA = indexRow({ slug: "weather" });
+    const rowB = indexRow({
+      resourceId: RES_B,
+      slug: "translate",
+      cardUrl: "https://translate.resources.utter.app/.well-known/agent-card.json",
+    });
+    const { fetcher, calls } = makeFetcher({ resources: [rowA, rowB] });
+
+    // Scope to RES_B only, supplied WITHOUT the 0x prefix + upper-cased -> still matches
+    // (case-insensitive, 0x-normalized on both sides).
+    const source = createLiveCardSource({
+      marketplaceIndexUrl: "https://market.utter.app",
+      fetcher,
+      resourceIds: [RES_B.replace(/^0x/, "").toUpperCase()],
+    });
+    const cards = await source();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.resourceId).toBe(RES_B);
+    // The out-of-scope row's openapi was never fetched (scope ran before the per-row fetch).
+    expect(calls).toContain("https://translate.resources.utter.app/openapi.json");
+    expect(calls).not.toContain("https://weather.resources.utter.app/openapi.json");
+  });
+
+  it("scopes to multiple resourceIds and composes with the query filter", async () => {
+    const rowA = indexRow({ slug: "weather" });
+    const rowB = indexRow({
+      resourceId: RES_B,
+      slug: "translate",
+      cardUrl: "https://translate.resources.utter.app/.well-known/agent-card.json",
+    });
+    const { fetcher } = makeFetcher({ resources: [rowA, rowB] });
+
+    // Scope allows both, but the query narrows to rowA's slug -> exactly rowA.
+    const source = createLiveCardSource({
+      marketplaceIndexUrl: "https://market.utter.app",
+      fetcher,
+      resourceIds: [RES_A, RES_B],
+    });
+    const both = await source();
+    expect(both.map((c) => c.resourceId).sort()).toEqual([RES_A, RES_B].sort());
+
+    const narrowed = await source("weather");
+    expect(narrowed).toHaveLength(1);
+    expect(narrowed[0]!.resourceId).toBe(RES_A);
+  });
+
+  it("treats an empty / whitespace-only scope as UNSCOPED (the full marketplace)", async () => {
+    const rowA = indexRow({ slug: "weather" });
+    const rowB = indexRow({
+      resourceId: RES_B,
+      slug: "translate",
+      cardUrl: "https://translate.resources.utter.app/.well-known/agent-card.json",
+    });
+    const { fetcher } = makeFetcher({ resources: [rowA, rowB] });
+
+    // A scope of only blank entries must not scope to nothing (fail-open to full list, not
+    // fail-closed to empty): both rows are returned.
+    const source = createLiveCardSource({
+      marketplaceIndexUrl: "https://market.utter.app",
+      fetcher,
+      resourceIds: ["", "   ", "0x"],
+    });
+    const cards = await source();
+    expect(cards).toHaveLength(2);
+  });
+
+  it("returns nothing when the scope matches no row (a scoped source for a delisted id)", async () => {
+    const rowA = indexRow({ slug: "weather" });
+    const { fetcher } = makeFetcher({ resources: [rowA] });
+    const source = createLiveCardSource({
+      marketplaceIndexUrl: "https://market.utter.app",
+      fetcher,
+      resourceIds: [RES_B], // not present in the index
+    });
+    expect(await source()).toHaveLength(0);
+  });
+
   it("fail-louds on a non-200 /resources, a non-array body, and a non-numeric pricing.max", async () => {
     const non200 = makeFetcher({ resources: [], resourcesStatus: 503 });
     const s1 = createLiveCardSource({ marketplaceIndexUrl: "https://market.utter.app", fetcher: non200.fetcher });

@@ -30,9 +30,9 @@ Four moves, and only the first ever needs a human decision.
   The whole thing rests on one rule: payment is debited only after the response passes validation. Read the primitive in [The escrow response gate](/concepts/escrow-response-gate).
 </Info>
 
-## Two clients
+## Three ways to pay
 
-The reference buyer SDK (`@utter/buyer-sdk`) ships two ways to pay. Both run the same discover, reserve, handler, settle loop and both hold the buyer key inside the client, never as an argument or a return value.
+The reference buyer SDK (`@utter/buyer-sdk`) powers three ways to pay. All run the same discover, reserve, handler, settle loop and all hold the buyer key inside the client, never as an argument or a return value.
 
 <CardGroup cols={2}>
   <Card title="The buyer SDK (CLI)" icon="terminal" href="/pay/buyer-sdk">
@@ -40,6 +40,9 @@ The reference buyer SDK (`@utter/buyer-sdk`) ships two ways to pay. Both run the
   </Card>
   <Card title="The MCP server" icon="plug" href="/pay/mcp">
     A stdio MCP server that exposes discovered endpoints as tools your agent can call from Claude Desktop or Cursor. Runs in a safe in-process demo mode by default.
+  </Card>
+  <Card title="Claude Code plugin" icon="puzzle-piece" href="/pay/claude-code-plugin">
+    Install an endpoint as a Claude Code plugin. One command wires the buyer MCP so your agent discovers and pays for it, with the escrow gate handling billing.
   </Card>
 </CardGroup>
 
