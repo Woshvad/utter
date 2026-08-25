@@ -42,15 +42,20 @@ const SECRET_RULES: { rule: string; pattern: RegExp }[] = [
   // payTo / resourceId / tx hash / block hash - pervasive PUBLIC on-chain values that a
   // generated handler for an on-chain platform emits constantly. Flagging every bare
   // 0x<64hex> false-positives and blocks legitimate deploys, so we fire ONLY in a
-  // KEY-CONTEXT: a private/secret/signer-key assignment, or a key->account factory
-  // (privateKeyToAccount / new [ethers.]Wallet). That still catches the realistic
-  // hardcoded-key forms while letting a bare hash/id through. The runtime env-injection
+  // KEY-CONTEXT: an identifier that names a private/secret/signer/deployer/wallet key
+  // (including the common abbreviations `priv`/`private`/`pk`) assigned a 0x<64hex>, or a
+  // key->account factory (privateKeyToAccount / new [ethers.]Wallet). That catches the
+  // realistic hardcoded-key forms (`const PRIV = "0x.."`, `privateKey: "0x.."`,
+  // `pk = "0x.."`) while letting a bare hash / resourceId / payTo through (`resourceId`,
+  // `payTo`, `hash` etc. are not key-context, so they never match). A public key is 33/65
+  // bytes (66/130 hex), never 64 hex, so a `pk`-named 0x<64hex> is a private key. The word
+  // boundaries stop `privacy`/`privilege`/`backpack` from matching. The runtime env-injection
   // vector is independently guarded by service-env.ts (SECRET_VALUE_RULES, publicConstantSafe),
   // and the sandbox default-denies egress, so a bare hex that slips here cannot be exfiltrated.
   {
     rule: "hex-private-key",
     pattern:
-      /(?:(?:private|priv|secret|signer|signing|deployer)[_-]?key["']?\s*[:=]\s*["']?|(?:privateKeyToAccount|new\s+(?:ethers\.)?Wallet)\s*\(\s*["'])0x[a-fA-F0-9]{64}\b/i,
+      /(?:\b(?:(?:private|priv|secret|signer|signing|deployer|wallet)[_-]?key|priv(?:ate)?|pk)\b["']?\s*[:=]\s*["']?|(?:privateKeyToAccount|new\s+(?:ethers\.)?Wallet)\s*\(\s*["'])0x[a-fA-F0-9]{64}\b/i,
   },
 ];
 
