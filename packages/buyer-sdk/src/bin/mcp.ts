@@ -75,7 +75,31 @@ function liveCardSource(env: NodeJS.ProcessEnv): CardListSource {
         "(operator-gated; the live BUY-03 demo is provisioned separately).",
     );
   }
-  return createLiveCardSource({ marketplaceIndexUrl: url.trim() });
+  // Optional per-endpoint SCOPE: a Claude Code plugin generated for a single endpoint sets
+  // UTTER_RESOURCE_IDS (comma/space separated) or UTTER_RESOURCE_ID so its bundled buyer MCP
+  // exposes ONLY that endpoint's call tool. Absent = the full marketplace (unscoped). This
+  // is a registration/display filter; the pay gate still re-pins the money fields per call.
+  const resourceIds = parseResourceScope(env);
+  return createLiveCardSource({ marketplaceIndexUrl: url.trim(), resourceIds });
+}
+
+/**
+ * Parse the optional per-endpoint resource scope from env. Reads UTTER_RESOURCE_IDS (a
+ * comma- or whitespace-separated list) and UTTER_RESOURCE_ID (a single id), unions them,
+ * and returns the de-duplicated non-empty ids (or undefined when neither is set, so the
+ * source stays unscoped). Non-secret; parsed once by the bin.
+ */
+function parseResourceScope(env: NodeJS.ProcessEnv): string[] | undefined {
+  const raw = `${env.UTTER_RESOURCE_IDS ?? ""} ${env.UTTER_RESOURCE_ID ?? ""}`;
+  const ids = Array.from(
+    new Set(
+      raw
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    ),
+  );
+  return ids.length > 0 ? ids : undefined;
 }
 
 /**

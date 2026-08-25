@@ -73,6 +73,7 @@
               "pay/discover",
               "pay/buyer-sdk",
               "pay/mcp",
+              "pay/claude-code-plugin",
               "pay/deposits-and-caps"
             ]
           }
@@ -156,6 +157,7 @@
               "operator/architecture",
               "operator/deploy-pipeline",
               "operator/provisioning",
+              "operator/plugin-marketplace",
               "operator/self-hosting"
             ]
           }

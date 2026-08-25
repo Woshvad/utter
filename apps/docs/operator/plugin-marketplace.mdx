@@ -1,0 +1,98 @@
+---
+title: "The plugin marketplace"
+description: "Turn every published Utter endpoint into an installable Claude Code plugin, and publish them as a one-command marketplace."
+---
+
+Utter is the supply side of the agent economy: a sentence becomes a paid API. Distribution is
+how those APIs reach the agents that pay for them. The `@utter/plugin-gen` package turns your
+published endpoints into an installable Claude Code plugin marketplace, so any agent can add
+your marketplace and install an endpoint in one command.
+
+Each endpoint becomes a plugin whose bundled buyer MCP lets an agent discover, pay for, and
+call it through the [escrow response gate](/concepts/escrow-response-gate). See the agent-facing
+side in [Install as a Claude Code plugin](/pay/claude-code-plugin).
+
+## What it generates
+
+<Steps>
+  <Step title="Read the endpoints">
+    It reads the public marketplace index (`GET /resources`), or a single agent card, or a
+    file, and projects each endpoint to the fields a plugin needs (resource id, slug, price,
+    reputation).
+  </Step>
+  <Step title="Build the plugins">
+    A base `utter-buyer` plugin (discovery plus pay for any endpoint) and one `utter-<slug>`
+    plugin per endpoint, each with a `plugin.json`, a skill, and a scoped buyer MCP server.
+  </Step>
+  <Step title="Write the marketplace">
+    A `.claude-plugin/marketplace.json` that lists every plugin, plus the plugin folders under
+    `plugins/`. Point Claude Code at the folder and the plugins install.
+  </Step>
+</Steps>
+
+## Generate
+
+The `utter-plugins` CLI writes the marketplace to disk.
+
+```bash
+# From the live index, into the repo root (repo-local MCP launch)
+pnpm --filter @utter/plugin-gen generate -- \
+  --marketplace-url https://<your-marketplace-host> \
+  --out ../../ --local --prune --enrich
+```
+
+```bash
+# From a single endpoint's agent card (no live index needed)
+pnpm --filter @utter/plugin-gen generate -- \
+  --card https://<slug>.resources.<domain>/.well-known/agent-card.json \
+  --out ../../ --local --prune
+```
+
+Key flags:
+
+| Flag | What it does |
+| --- | --- |
+| `--marketplace-url <url>` | Read the live `GET /resources` index. Add `--enrich` to pull each endpoint's description from its agent card. |
+| `--card <url>` | Read one endpoint's agent card (repeatable). |
+| `--out <dir>` | Where to write (`.claude-plugin/` and `plugins/`). |
+| `--local` | Launch the buyer MCP from the workspace via `${CLAUDE_PROJECT_DIR}` (works today, no npm publish). |
+| `--published` | Launch via `npx -y @utter/buyer-sdk utter-buyer-mcp` (for external installs; requires the package be published). |
+| `--prune` | Remove the plugin folder before writing so stale plugins are dropped. |
+| `--no-base` | Omit the base `utter-buyer` plugin. |
+
+## Two ways to launch the buyer MCP
+
+The generated `plugin.json` declares one stdio MCP server. How it launches is a generation choice:
+
+- **Local (`--local`)**: runs `${CLAUDE_PROJECT_DIR}/scripts/utter-buyer-mcp.mjs`, so it works
+  immediately for anyone running Claude Code inside the utter repo. No publish step. This is the
+  Windows-safe launcher (an absolute path is valid as the main script argument, unlike
+  `node --import`).
+- **Published (`--published`)**: runs `npx -y @utter/buyer-sdk utter-buyer-mcp`, the standard
+  form for a marketplace consumed outside the repo. It requires publishing `@utter/buyer-sdk`
+  to a registry your users can reach.
+
+## Publish the marketplace
+
+Writing to the repo root makes the repository itself an installable marketplace:
+
+```bash
+/plugin marketplace add <your-org>/utter
+/plugin install utter-buyer@utter
+```
+
+Regenerate after each new endpoint is published (or on a schedule) to keep the marketplace in
+sync with the live index. Because the money fields are never authored by the generator, a stale
+or wrong row cannot cause a bad payment: the buyer SDK re-pins escrow, asset, payTo, and cap
+against the trusted on-chain constants on the served card before signing.
+
+## Scope and safety
+
+- The generator is pure text and config. It never holds a key and never writes a secret into a
+  committed file. Live plugins read the buyer key from the plugin's sensitive user config at
+  launch.
+- A per-endpoint plugin's buyer MCP is scoped to one resource id (`UTTER_RESOURCE_IDS`), so it
+  exposes only that endpoint's call tool.
+- The base plugin runs in demo mode by default so it boots and demonstrates the full escrow loop
+  with no configuration. Live endpoints activate when the live buyer path is provisioned. See
+  [Provisioning](/operator/provisioning).

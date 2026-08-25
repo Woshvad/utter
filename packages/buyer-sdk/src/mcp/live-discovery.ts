@@ -85,9 +85,27 @@ async function fetchOpenapiBestEffort(
 export function createLiveCardSource(opts: {
   marketplaceIndexUrl: string;
   fetcher?: FetchLike;
+  /**
+   * An optional allow-list of resourceIds this source is SCOPED to. When present and
+   * non-empty, only rows whose resourceId is in the list are projected (case-insensitive,
+   * 0x-normalized). This is what a per-endpoint Claude Code plugin sets (via UTTER_RESOURCE_IDS)
+   * so its bundled buyer MCP exposes ONLY that one endpoint's call tool. Empty/undefined =
+   * no scoping (the full marketplace, the default). The scope is a DISPLAY/registration
+   * filter only; it never authors a money field (the pay gate re-pins escrow/asset/payTo/cap
+   * on the served card before signing).
+   */
+  resourceIds?: string[];
 }): CardListSource {
   const fetcher = opts.fetcher ?? (globalThis.fetch as unknown as FetchLike);
   const base = opts.marketplaceIndexUrl.replace(/\/+$/, "");
+  // Normalize the scope to a lowercased, 0x-stripped Set for O(1), case-insensitive
+  // membership. A blank/whitespace id is dropped so a stray "" never scopes to nothing.
+  const scope = new Set(
+    (opts.resourceIds ?? [])
+      .map((id) => id.trim().toLowerCase().replace(/^0x/, ""))
+      .filter((id) => id.length > 0),
+  );
+  const scoped = scope.size > 0;
 
   return async (query?: string): Promise<DiscoveredCard[]> => {
     const res = await fetcher(`${base}/resources`, {
@@ -107,18 +125,26 @@ export function createLiveCardSource(opts: {
     }
     const rows = body as IndexRow[];
 
+    // Scope filter FIRST (a per-endpoint plugin's UTTER_RESOURCE_IDS allow-list): keep only
+    // rows whose resourceId is in the scope Set (case-insensitive, 0x-normalized). Applied
+    // BEFORE the query filter and the per-row openapi fetch, so a scoped source never even
+    // fetches openapi for out-of-scope rows. Empty scope = the full marketplace (default).
+    const inScope = scoped
+      ? rows.filter((row) => scope.has((row.resourceId ?? "").toLowerCase().replace(/^0x/, "")))
+      : rows;
+
     // Optional query filter, applied BEFORE the per-row openapi fetch so we never fetch
     // openapi for filtered-out rows. Matches slug, category, or resourceId (lowercased).
     const q = query?.trim().toLowerCase();
     const matched =
       q && q !== ""
-        ? rows.filter((row) => {
+        ? inScope.filter((row) => {
             const slug = (row.slug ?? "").toLowerCase();
             const category = (row.category ?? "").toLowerCase();
             const resourceId = (row.resourceId ?? "").toLowerCase();
             return slug.includes(q) || category.includes(q) || resourceId.includes(q);
           })
-        : rows;
+        : inScope;
 
     const cards: DiscoveredCard[] = [];
     for (const row of matched) {

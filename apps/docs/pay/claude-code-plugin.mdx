@@ -1,0 +1,99 @@
+---
+title: "Install as a Claude Code plugin"
+description: "Install an Utter API as a Claude Code plugin and let your agent discover, pay for, and call it in one command."
+---
+
+Every Utter endpoint can be published as a Claude Code plugin. Installing one gives your agent
+the buyer tools to discover Utter APIs, pay for them per call in USDC on Arc, and call them,
+with the buyer key held only inside the local MCP process. Payment runs through the
+[escrow response gate](/concepts/escrow-response-gate): you are charged only after the
+response passes validation.
+
+This is the same buyer flow as [the MCP server](/pay/mcp), packaged so a single
+`/plugin install` wires it up.
+
+## Two kinds of plugin
+
+<CardGroup cols={2}>
+  <Card title="utter-buyer (the base plugin)">
+    Discovery plus pay tools for any Utter endpoint. Ships in demo mode: it boots with no
+    configuration and runs the full discover, reserve, pay, and settle loop in-process against
+    a mock chain, so you can see how paying for an API works with no real money.
+  </Card>
+  <Card title="utter-&lt;slug&gt; (one per endpoint)">
+    A plugin scoped to a single published endpoint. It exposes just that endpoint's call tool
+    and carries a skill describing what it does, its price, and its reputation. It runs in live
+    mode against the real resource.
+  </Card>
+</CardGroup>
+
+## Install
+
+Add the marketplace once, then install a plugin from it.
+
+```bash
+# From the utter repository (works today, no publish needed)
+/plugin marketplace add ./          # or an absolute path to your utter checkout
+
+# Or from GitHub once the repo is pushed
+/plugin marketplace add <your-org>/utter
+```
+
+```bash
+# The base buyer plugin (demo mode, zero config)
+/plugin install utter-buyer@utter
+
+# A specific endpoint (live mode)
+/plugin install utter-return-the-current-utc-time-as-json@utter
+```
+
+When the plugin is enabled, its bundled `utter-buyer` MCP server starts automatically. Claude
+lists its tools as `mcp__plugin_<plugin-name>_utter-buyer__<tool>`.
+
+## The tools
+
+The bundled MCP server exposes the same two tools as [the MCP server](/pay/mcp):
+
+<AccordionGroup>
+  <Accordion title="utter_discover_endpoints">
+    Lists or searches paid endpoints, projecting only price, reputation, and bond to the model.
+    In a per-endpoint plugin, discovery is scoped to that one resource.
+  </Accordion>
+  <Accordion title="utter_call_[resourceId]">
+    One tool per endpoint, named with the full 32-byte resource id. It validates your input
+    before paying, reserves the per-call cap, pays through the escrow gate, and returns the
+    response text. The buyer key is never a tool argument or return.
+  </Accordion>
+</AccordionGroup>
+
+## Configure a live plugin
+
+A live plugin (any per-endpoint plugin, or the base plugin switched to live) reads two values
+from the plugin's configuration:
+
+<ParamField path="buyer_private_key" type="string">
+  A funded Arc testnet buyer key. Held only inside the local MCP process to sign USDC escrow
+  payments. It never leaves your machine and is never a tool argument, a tool return, or a log
+  line. Marked sensitive, so Claude Code stores it securely.
+</ParamField>
+
+<ParamField path="marketplace_url" type="string">
+  The Utter marketplace base URL the buyer reads for discovery (it fetches `GET {url}/resources`).
+</ParamField>
+
+<Info>
+  The base `utter-buyer` plugin works immediately in demo mode. A live plugin also needs the
+  operator-gated live buyer path provisioned (the same gate as the rest of live Utter). See
+  [Provisioning](/operator/provisioning).
+</Info>
+
+## Budgets and safety
+
+Per-call and per-day budget caps bound what any tool will spend. A cap denial returns a tool
+error with no charge. See [Deposits and spend caps](/pay/deposits-and-caps). The on-chain
+signed cap is the hard per-call bound regardless.
+
+## How these are made
+
+Operators generate the whole marketplace from the live index with one command. See
+[The plugin marketplace](/operator/plugin-marketplace).

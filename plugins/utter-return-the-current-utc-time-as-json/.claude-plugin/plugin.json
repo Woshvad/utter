@@ -1,0 +1,52 @@
+{
+  "name": "utter-return-the-current-utc-time-as-json",
+  "displayName": "return-the-current-utc-time-as-json",
+  "version": "0.1.0",
+  "description": "return the current utc time as json",
+  "author": {
+    "name": "Utter",
+    "url": "https://utter.technology"
+  },
+  "homepage": "https://docs.utter.technology",
+  "keywords": [
+    "utter",
+    "x402",
+    "paid-api"
+  ],
+  "mcpServers": {
+    "utter-buyer": {
+      "command": "node",
+      "args": [
+        "--experimental-strip-types",
+        "${CLAUDE_PROJECT_DIR}/scripts/utter-buyer-mcp.mjs"
+      ],
+      "env": {
+        "BUYER_SDK_TRANSPORT": "live",
+        "MARKETPLACE_INDEX_URL": "${user_config.marketplace_url}",
+        "BUYER_PRIVATE_KEY": "${user_config.buyer_private_key}",
+        "UTTER_RESOURCE_IDS": "0xf8fa3ed7e7443ca91838eb6ecb7b35473c2d2452b9c2913d787617bcfa54f5ce"
+      }
+    }
+  },
+  "userConfig": {
+    "buyer_private_key": {
+      "type": "string",
+      "title": "Buyer private key",
+      "description": "A funded Arc testnet buyer EOA private key. Held only inside the local MCP process to sign USDC escrow payments; it never leaves your machine and is never a tool argument or return.",
+      "sensitive": true,
+      "required": true
+    },
+    "marketplace_url": {
+      "type": "string",
+      "title": "Marketplace index URL",
+      "description": "The Utter marketplace base URL the buyer reads for discovery (it fetches GET {url}/resources).",
+      "required": true
+    }
+  },
+  "metadata": {
+    "kind": "utter-endpoint",
+    "mode": "live",
+    "resourceId": "0xf8fa3ed7e7443ca91838eb6ecb7b35473c2d2452b9c2913d787617bcfa54f5ce",
+    "agentId": "placeholder"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "utter-buyer",
+  "displayName": "Utter buyer",
+  "version": "0.1.0",
+  "description": "Discover and pay for Utter APIs from your agent (x402 escrow, USDC on Arc).",
+  "author": {
+    "name": "Utter",
+    "url": "https://utter.technology"
+  },
+  "homepage": "https://docs.utter.technology",
+  "keywords": [
+    "utter",
+    "x402",
+    "payments",
+    "agent",
+    "usdc",
+    "arc"
+  ],
+  "mcpServers": {
+    "utter-buyer": {
+      "command": "node",
+      "args": [
+        "--experimental-strip-types",
+        "${CLAUDE_PROJECT_DIR}/scripts/utter-buyer-mcp.mjs"
+      ],
+      "env": {
+        "BUYER_SDK_TRANSPORT": "demo"
+      }
+    }
+  },
+  "metadata": {
+    "kind": "utter-buyer",
+    "mode": "demo"
+  }
+}
