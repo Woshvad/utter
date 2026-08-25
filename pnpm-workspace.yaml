@@ -23,3 +23,9 @@ allowBuilds:
 # version and type identity across @utter/* holds.
 overrides:
   viem: 2.52.2
+  # apps/docs' Mintlify CLI (mint) floats onto releases that pin a phantom
+  # postcss@8.5.23 (never published; latest 8.5.x is real), which breaks a full
+  # `pnpm install` on any host that resolves the docs tree fresh. Pin postcss to a
+  # real 8.5.x so resolution succeeds. postcss 8.5.x is patch-compatible, so this is
+  # safe for the only other consumer (apps/studio's Tailwind/PostCSS build).
+  postcss: 8.5.16
